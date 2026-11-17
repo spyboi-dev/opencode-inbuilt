@@ -586,10 +586,26 @@ static dispatch_queue_t OCEngineLogQueue(void) {
         // the server start.
         @"if ! command -v git >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1 || ! command -v rg >/dev/null 2>&1; then "
         @"echo \"PROGRESS 86 Installing tools (git, python3, jq, ripgrep)...\" >> \"$SLOG\" 2>/dev/null; "
-        @"(apt-get update >> \"$SLOG\" 2>&1 && apt-get install -y git python3 jq ripgrep >> \"$SLOG\" 2>&1 && echo \"PROGRESS 88 Tools ready\" >> \"$SLOG\") || echo \"ERROR Tools install failed (see above)\" >> \"$SLOG\"; fi; "
+        // DEBIAN_FRONTEND=noninteractive is required: tzdata (pulled
+        // in by git/python3) otherwise stops at an interactive
+        // debconf prompt asking for the geographic area, and the
+        // install hangs forever waiting for input (seen in the
+        // 2026-11-17 12:43 device log, stuck at "Geographic area:").
+        // dpkg --configure -a first recovers the half-configured
+        // state left by that stuck run. A failure here is logged but
+        // never blocks the server start.
+        @"(export DEBIAN_FRONTEND=noninteractive; dpkg --configure -a >> \"$SLOG\" 2>&1; apt-get update >> \"$SLOG\" 2>&1 && apt-get install -y git python3 jq ripgrep >> \"$SLOG\" 2>&1 && echo \"PROGRESS 88 Tools ready\" >> \"$SLOG\") || echo \"ERROR Tools install failed (see above)\" >> \"$SLOG\"; fi; "
         @"if ! command -v bun >/dev/null 2>&1; then "
         @"echo \"PROGRESS 88 Installing bun...\" >> \"$SLOG\" 2>/dev/null; "
         @"(npm install -g bun >> \"$SLOG\" 2>&1 && echo \"PROGRESS 89 bun ready\" >> \"$SLOG\") || echo \"ERROR bun install failed (see above)\" >> \"$SLOG\"; fi; "
+        // A previous opencode server can survive an engine stop and
+        // keep holding port 4096, so a quick stop/start fails with
+        // "Failed to start server. Is port 4096 in use?" (seen
+        // 2026-11-17 11:52 and 11:57). Kill any leftover server
+        // before starting. -x matches the exact process name
+        // "opencode", so it cannot match this bootstrap shell itself
+        // (whose command line contains "opencode serve" as text).
+        @"command -v pkill >/dev/null 2>&1 && pkill -x opencode 2>/dev/null; sleep 1; "
         @"echo \"PROGRESS 90 Starting server...\" >> \"$SLOG\" 2>/dev/null; ";
     NSString *serveWithLog = [command stringByAppendingString:@" >> \"$SLOG\" 2>&1"];
     NSString *full = [bootstrap stringByAppendingString:serveWithLog];
