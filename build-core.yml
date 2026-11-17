@@ -1,0 +1,132 @@
+# Build the LinuxRunner guest core for iOS arm64, link it into the
+# OpenCode inbuilt app, and upload the core static libraries and the
+# IPA as artifacts.
+#
+# Pipeline (see CORE-BUILD.md for the full story):
+#   1. Clone the LinuxRunner core at the pinned commit (no vendoring).
+#   2. Configure it with LinuxRunner's OWN app/xcode-meson.sh
+#      (meson cross build, JITless, vdso_required=true) and build
+#      libish.a, libish_emu.a, libfakefs.a with ninja.
+#   3. Build libarchive.a from the LinuxRunner submodule's xcodeproj.
+#   4. ./build-core.sh links the app with the core (OC_CORE_LINKED)
+#      and produces build/OpenCode-Inbuilt.ipa.
+#
+# Triggered manually, or on pushes to main that touch the app, the
+# build script, the resources, or this workflow.
+name: Build core + IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'build-core.sh'
+      - 'resources/**'
+      - '.github/workflows/build-core.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    env:
+      # Apple's clang reads this when no -miphoneos-version-min flag
+      # is given; xcode-meson.sh relies on it for the core libs.
+      IPHONEOS_DEPLOYMENT_TARGET: '15.0'
+    steps:
+      - name: Check out app
+        uses: actions/checkout@v4
+
+      - name: Select Xcode 26
+        run: |
+          XCODE="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)"
+          if [ -z "$XCODE" ]; then echo "no Xcode 26 found:"; ls /Applications | grep -i xcode || true; exit 1; fi
+          echo "Using $XCODE"
+          sudo xcode-select -s "$XCODE/Contents/Developer"
+          xcodebuild -version
+
+      - name: Install build tools
+        # llvm + lld: the real aarch64 vDSO needs a clang that can
+        # target aarch64-linux-gnu with ld.lld (vdso/arm64/meson.build
+        # looks for /opt/homebrew/opt/llvm/bin/clang).
+        run: brew install meson ninja llvm lld
+
+      - name: Resolve iPhoneOS SDK
+        run: echo "SDKROOT=$(xcrun --sdk iphoneos --show-sdk-path)" >> "$GITHUB_ENV"
+
+      - name: Clone LinuxRunner core (pinned commit)
+        # Pinned to the 1.1.2 release commit; nothing is vendored in
+        # this repo. A shallow fetch of the exact SHA keeps it small.
+        run: |
+          git init linuxrunner
+          cd linuxrunner
+          git remote add origin https://github.com/mxhm11cr/LinuxRunner.git
+          git fetch --depth 1 origin f96a2a6f1327363856b5cd1975f1f6cb279cc884
+          git checkout FETCH_HEAD
+          test "$(git rev-parse HEAD)" = f96a2a6f1327363856b5cd1975f1f6cb279cc884
+          git submodule update --init deps/libarchive
+
+      - name: Configure core (upstream xcode-meson.sh)
+        # Runs LinuxRunner's own configure step: meson cross build,
+        # darwin/aarch64, jit=false (JITless), vdso_required=true.
+        # SDKROOT in the env is what makes plain `clang -arch arm64`
+        # target the iOS SDK; CC_FOR_BUILD inside the script unsets
+        # it again for the build-machine compiler. ISH_LOGGER is set
+        # to the meson default so the script does not blank it.
+        env:
+          SRCROOT: ${{ github.workspace }}/linuxrunner
+          MESON_BUILD_DIR: ${{ github.workspace }}/core-build
+          ARCHS: arm64
+          CONFIGURATION: Release
+          ISH_LOGGER: dprintf
+        run: ./linuxrunner/app/xcode-meson.sh
+
+      - name: Build core static libs
+        run: |
+          cd core-build
+          ninja libish.a libish_emu.a libfakefs.a
+          ls -lh libish.a libish_emu.a libfakefs.a
+          lipo -info libish.a libish_emu.a libfakefs.a
+
+      - name: Build libarchive for iOS
+        # The submodule's xcodeproj has one native target, "libarchive"
+        # (product libarchive.a), and no shared scheme, so build it
+        # by target, not by scheme.
+        run: |
+          xcodebuild -list -project linuxrunner/deps/libarchive.xcodeproj
+          xcodebuild -project linuxrunner/deps/libarchive.xcodeproj \
+            -target libarchive -sdk iphoneos -configuration Release \
+            -derivedDataPath libarchive-dd CODE_SIGNING_ALLOWED=NO
+          mkdir -p libarchive-build
+          cp "$(find libarchive-dd -name libarchive.a | head -1)" libarchive-build/libarchive.a
+          lipo -info libarchive-build/libarchive.a
+
+      - name: Build IPA with core linked
+        run: ./build-core.sh linuxrunner core-build libarchive-build/libarchive.a
+
+      - name: Verify the core is in the binary
+        run: |
+          lipo -info build/Payload/OpenCode.app/OpenCode
+          nm -arch arm64 build/Payload/OpenCode.app/OpenCode | grep -q ' _mount_root' \
+            || { echo "core symbols missing from the app binary"; exit 1; }
+          nm -arch arm64 build/Payload/OpenCode.app/OpenCode | grep -q ' _fakefs_import' \
+            || { echo "core symbols missing from the app binary"; exit 1; }
+          echo "core linked: mount_root and fakefs_import present"
+
+      - name: Upload core libraries
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-libs
+          path: |
+            core-build/libish.a
+            core-build/libish_emu.a
+            core-build/libfakefs.a
+            libarchive-build/libarchive.a
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenCode-Inbuilt-core
+          path: build/OpenCode-Inbuilt.ipa
