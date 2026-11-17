@@ -8,6 +8,7 @@
 @interface OCSessionsViewController () <UITableViewDataSource, UITableViewDelegate>
 @property (nonatomic, strong) UITableView *tableView;
 @property (nonatomic, strong) NSArray *sessions;
+@property (nonatomic, strong) UILabel *greetingLabel;
 @property (nonatomic, strong) UILabel *statusLabel;
 @property (nonatomic, strong) UIRefreshControl *refreshControl;
 @end
@@ -24,16 +25,6 @@ static NSString *OCGreetingForNow(void) {
     if (hour < 17) return @"Good afternoon";
     return @"Good evening";
 }
-
-@interface OCSessionsViewController () <UITableViewDataSource, UITableViewDelegate>
-@property (nonatomic, strong) UITableView *tableView;
-@property (nonatomic, strong) NSArray *sessions;
-@property (nonatomic, strong) UILabel *greetingLabel;
-@property (nonatomic, strong) UILabel *statusLabel;
-@property (nonatomic, strong) UIRefreshControl *refreshControl;
-@end
-
-@implementation OCSessionsViewController
 
 - (void)viewDidLoad {
     [super viewDidLoad];
