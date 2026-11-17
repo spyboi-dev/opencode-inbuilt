@@ -16,7 +16,7 @@ mkdir -p "$APP"
 CLANG=clang-18
 CFLAGS="-target arm64-apple-ios$MIN -isysroot $SDK -miphoneos-version-min=$MIN -fobjc-arc -O2 -Wall -Wextra -Wno-deprecated-declarations -F$SDK/System/Library/SubFrameworks -F$SDK/System/Library/PrivateFrameworks"
 
-for f in main AppDelegate OCKeychain OCUtil OCSettings OCServerClient OCEngine OCSessionsViewController OCChatViewController OCFilesViewController OCEngineViewController OCLogViewController OCSettingsViewController; do
+for f in main AppDelegate OCKeychain OCUtil OCSettings OCServerClient OCEngine OCSessionsViewController OCChatViewController OCFilesViewController OCEngineViewController OCSettingsViewController; do
   echo "== $f.m"
   $CLANG $CFLAGS -c "$SRC/$f.m" -o "$OUT/$f.o"
 done

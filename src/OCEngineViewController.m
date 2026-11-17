@@ -1,8 +1,8 @@
-// OCEngineViewController - engine status, first-launch setup, start/stop.
+// OCEngineViewController - engine status, first-launch setup, start/stop,
+// live log (PancakeStore-style dark card, on this screen) and progress.
 #import "OCEngineViewController.h"
 #import "OCEngine.h"
 #import "OCSettings.h"
-#import "OCLogViewController.h"
 
 @interface OCEngineViewController ()
 @property (nonatomic, strong) UILabel *stateLabel;
@@ -12,7 +12,9 @@
 @property (nonatomic, strong) UIButton *setupButton;
 @property (nonatomic, strong) UIButton *startButton;
 @property (nonatomic, strong) UIButton *stopButton;
-@property (nonatomic, strong) UIButton *logsButton;
+@property (nonatomic, strong) UITextView *logTextView;
+@property (nonatomic, strong) UIButton *shareLogButton;
+@property (nonatomic, strong, nullable) NSTimer *logRefreshTimer;
 @end
 
 @implementation OCEngineViewController
@@ -34,19 +36,65 @@
     self.setupButton = [self buttonWithTitle:@"Run first-launch setup" action:@selector(setupTapped)];
     self.startButton = [self buttonWithTitle:@"Start engine" action:@selector(startTapped)];
     self.stopButton = [self buttonWithTitle:@"Stop engine" action:@selector(stopTapped)];
-    self.logsButton = [self buttonWithTitle:@"View logs" action:@selector(logsTapped)];
+
+    // Live log, PancakeStore style: a "Logs" header with a terminal icon
+    // over a dark rounded card holding the monospace log. It sits on this
+    // screen and refreshes every second while the tab is visible, so
+    // there is nothing to tap to see what the engine is doing.
+    UIStackView *logHeader = [[UIStackView alloc] init];
+    logHeader.axis = UILayoutConstraintAxisHorizontal;
+    logHeader.spacing = 8;
+    logHeader.alignment = UIStackViewAlignmentCenter;
+    UIImageView *logIcon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"terminal"]];
+    logIcon.tintColor = [UIColor secondaryLabelColor];
+    logIcon.contentMode = UIViewContentModeScaleAspectFit;
+    logIcon.translatesAutoresizingMaskIntoConstraints = NO;
+    [logIcon.widthAnchor constraintEqualToConstant:22].active = YES;
+    [logIcon.heightAnchor constraintEqualToConstant:22].active = YES;
+    UILabel *logTitle = [self labelWithFont:[UIFont boldSystemFontOfSize:18]];
+    logTitle.text = @"Logs";
+    logTitle.textColor = [UIColor secondaryLabelColor];
+    [logHeader addArrangedSubview:logIcon];
+    [logHeader addArrangedSubview:logTitle];
+
+    self.logTextView = [[UITextView alloc] init];
+    self.logTextView.font = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular];
+    self.logTextView.textColor = [UIColor labelColor];
+    self.logTextView.backgroundColor = [UIColor secondarySystemBackgroundColor];
+    self.logTextView.layer.cornerRadius = 18;
+    self.logTextView.layer.masksToBounds = YES;
+    self.logTextView.textContainerInset = UIEdgeInsetsMake(16, 16, 16, 16);
+    self.logTextView.editable = NO;
+    self.logTextView.selectable = YES;
+    self.logTextView.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.logTextView.heightAnchor constraintEqualToConstant:260].active = YES;
+
+    self.shareLogButton = [self buttonWithTitle:@"Copy log" action:@selector(shareLogTapped)];
 
     UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[
         self.stateLabel, self.detailLabel, self.progressView, self.progressLabel,
-        self.setupButton, self.startButton, self.stopButton, self.logsButton]];
+        self.setupButton, self.startButton, self.stopButton,
+        logHeader, self.logTextView, self.shareLogButton]];
     stack.axis = UILayoutConstraintAxisVertical;
     stack.spacing = 16;
     stack.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.view addSubview:stack];
+
+    // The log makes the content taller than a small screen, so the whole
+    // stack scrolls.
+    UIScrollView *scroll = [[UIScrollView alloc] init];
+    scroll.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:scroll];
+    [scroll addSubview:stack];
     [NSLayoutConstraint activateConstraints:@[
-        [stack.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:24],
-        [stack.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:20],
-        [stack.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-20],
+        [scroll.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
+        [scroll.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [scroll.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [scroll.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor],
+        [stack.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor constant:24],
+        [stack.leadingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.leadingAnchor constant:20],
+        [stack.trailingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.trailingAnchor constant:-20],
+        [stack.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor constant:-24],
+        [stack.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor constant:-40],
     ]];
 
     __weak typeof(self) weakSelf = self;
@@ -102,6 +150,54 @@
     [super viewWillAppear:animated];
     [[OCEngine shared] refreshState];
     [self refresh];
+    [self refreshLog];
+    [self startLogRefreshTimer];
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    [self stopLogRefreshTimer];
+}
+
+- (void)startLogRefreshTimer {
+    [self stopLogRefreshTimer];
+    __weak typeof(self) weakSelf = self;
+    self.logRefreshTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
+        (void)timer;
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        [strongSelf refreshLog];
+    }];
+}
+
+- (void)stopLogRefreshTimer {
+    [self.logRefreshTimer invalidate];
+    self.logRefreshTimer = nil;
+}
+
+// Refresh the live log card. Only auto-scrolls to the newest lines if
+// the user is already near the bottom, so reading an earlier line is
+// not yanked away.
+- (void)refreshLog {
+    NSString *text = [[OCEngine shared] fullLogText];
+    if ([text isEqualToString:self.logTextView.text]) return;
+    CGFloat bottom = self.logTextView.contentOffset.y + self.logTextView.bounds.size.height;
+    BOOL nearBottom = (self.logTextView.contentSize.height - bottom) < 60;
+    self.logTextView.text = text;
+    if (nearBottom) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSRange end = NSMakeRange(self.logTextView.text.length, 0);
+            [self.logTextView scrollRangeToVisible:end];
+        });
+    }
+}
+
+- (void)shareLogTapped {
+    [UIPasteboard generalPasteboard].string = self.logTextView.text ?: @"";
+    [self.shareLogButton setTitle:@"Copied" forState:UIControlStateNormal];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [self.shareLogButton setTitle:@"Copy log" forState:UIControlStateNormal];
+    });
 }
 
 - (void)refresh {
@@ -189,12 +285,6 @@
 - (void)stopTapped {
     [[OCEngine shared] stopEngine];
     [self refresh];
-}
-
-- (void)logsTapped {
-    OCLogViewController *logs = [[OCLogViewController alloc] init];
-    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:logs];
-    [self presentViewController:nav animated:YES completion:nil];
 }
 
 @end
