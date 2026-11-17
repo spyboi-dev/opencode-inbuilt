@@ -2,6 +2,7 @@
 #import "OCFilesViewController.h"
 #import "OCServerClient.h"
 #import "OCSettings.h"
+#import "OCCodeViewController.h"
 
 @interface OCFilesViewController () <UITableViewDataSource, UITableViewDelegate>
 @property (nonatomic, strong) UITableView *tableView;
@@ -80,14 +81,7 @@
         return;
     }
     [[self client] readFileAtPath:child completion:^(NSString *content, NSError *error) {
-        UIViewController *vc = [[UIViewController alloc] init];
-        vc.title = name;
-        UITextView *tv = [[UITextView alloc] initWithFrame:vc.view.bounds];
-        tv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        tv.editable = NO;
-        tv.font = [UIFont monospacedSystemFontOfSize:13 weight:UIFontWeightRegular];
-        tv.text = content ?: (error ? error.localizedDescription : @"Empty file.");
-        [vc.view addSubview:tv];
+        OCCodeViewController *vc = [[OCCodeViewController alloc] initWithTitle:name content:content ?: (error ? error.localizedDescription : @"Empty file.")];
         [self.navigationController pushViewController:vc animated:YES];
     }];
 }

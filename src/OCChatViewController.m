@@ -85,6 +85,8 @@ static UIColor *OCClaudeGlass(void) {
 @property (nonatomic, strong) UIButton *micButton;
 // FreeMilk toolbar: Chat/Files switch, Run, globe. Files mode is an
 // embedded file browser; the uncommitted bar sits above the composer.
+// The roadmap sits at the bottom of the chat, fed by the session's
+// todos (the todowrite tool calls), one ticket per milestone.
 @property (nonatomic, strong) UISegmentedControl *modeSegment;
 @property (nonatomic, strong) UIButton *runButton;
 @property (nonatomic, strong) UIButton *globeButton;
@@ -92,6 +94,10 @@ static UIColor *OCClaudeGlass(void) {
 @property (nonatomic, strong) UIButton *uncommittedBar;
 @property (nonatomic, strong) NSLayoutConstraint *uncommittedHeightConstraint;
 @property (nonatomic, assign) NSInteger diffCount;
+@property (nonatomic, strong) UIView *roadmapContainer;
+@property (nonatomic, strong) UIScrollView *roadmapScroll;
+@property (nonatomic, strong) NSLayoutConstraint *roadmapHeightConstraint;
+@property (nonatomic, strong) NSArray *roadmapItems;
 @property (nonatomic, strong) NSArray *displayItems; // @{kind, role, text, detail, output, state, model, duration, key}
 @property (nonatomic, strong) OCServerClient *client;
 @property (nonatomic, strong, nullable) NSTimer *pollTimer;
@@ -243,6 +249,37 @@ static UIColor *OCClaudeGlass(void) {
     self.uncommittedBar.hidden = YES;
     [self.view addSubview:self.uncommittedBar];
 
+    // Roadmap: FreeMilk's list of milestone tickets at the bottom of
+    // the chat. A horizontal row of glass ticket cards, one per todo
+    // from the session. Hidden while the session has no todos.
+    self.roadmapContainer = [[UIView alloc] init];
+    self.roadmapContainer.translatesAutoresizingMaskIntoConstraints = NO;
+    self.roadmapContainer.hidden = YES;
+    [self.view addSubview:self.roadmapContainer];
+
+    UILabel *roadmapLabel = [[UILabel alloc] init];
+    roadmapLabel.text = @"Roadmap";
+    roadmapLabel.font = OCRoundedFont(13, UIFontWeightSemibold);
+    roadmapLabel.textColor = OCTextFaint();
+    roadmapLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.roadmapContainer addSubview:roadmapLabel];
+
+    self.roadmapScroll = [[UIScrollView alloc] init];
+    self.roadmapScroll.showsHorizontalScrollIndicator = NO;
+    self.roadmapScroll.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.roadmapContainer addSubview:self.roadmapScroll];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [roadmapLabel.topAnchor constraintEqualToAnchor:self.roadmapContainer.topAnchor],
+        [roadmapLabel.leadingAnchor constraintEqualToAnchor:self.roadmapContainer.leadingAnchor constant:16],
+        [roadmapLabel.trailingAnchor constraintEqualToAnchor:self.roadmapContainer.trailingAnchor constant:-16],
+        [roadmapLabel.heightAnchor constraintEqualToConstant:18],
+        [self.roadmapScroll.topAnchor constraintEqualToAnchor:roadmapLabel.bottomAnchor constant:6],
+        [self.roadmapScroll.leadingAnchor constraintEqualToAnchor:self.roadmapContainer.leadingAnchor],
+        [self.roadmapScroll.trailingAnchor constraintEqualToAnchor:self.roadmapContainer.trailingAnchor],
+        [self.roadmapScroll.bottomAnchor constraintEqualToAnchor:self.roadmapContainer.bottomAnchor],
+    ]];
+
     // Composer: FreeMilk's big rounded card (28px radius) over a
     // Liquid Glass blur. The text area sits on top; the bottom row
     // holds a plus circle, the model pill, a mic circle and the white
@@ -310,10 +347,15 @@ static UIColor *OCClaudeGlass(void) {
     [self updateSendButton];
 
     self.composerBottomConstraint = [self.composerCard.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-8];
-    // The uncommitted bar sits between the content and the composer;
-    // the table and files views end at whichever is visible above it.
-    NSLayoutConstraint *tableBottom = [self.tableView.bottomAnchor constraintEqualToAnchor:self.uncommittedBar.topAnchor constant:-8];
-    NSLayoutConstraint *filesBottom = [self.filesChild.view.bottomAnchor constraintEqualToAnchor:self.uncommittedBar.topAnchor constant:-8];
+    // The content ends at the roadmap, the roadmap ends at the
+    // uncommitted bar, and the bar ends at the composer. Both the
+    // roadmap and the bar collapse to zero height when hidden, so
+    // the content reaches the composer with a fixed gap.
+    NSLayoutConstraint *tableBottom = [self.tableView.bottomAnchor constraintEqualToAnchor:self.roadmapContainer.topAnchor constant:-8];
+    NSLayoutConstraint *filesBottom = [self.filesChild.view.bottomAnchor constraintEqualToAnchor:self.roadmapContainer.topAnchor constant:-8];
+    NSLayoutConstraint *roadmapBottom = [self.roadmapContainer.bottomAnchor constraintEqualToAnchor:self.uncommittedBar.topAnchor constant:-8];
+    NSLayoutConstraint *roadmapHeight = [self.roadmapContainer.heightAnchor constraintEqualToConstant:0];
+    self.roadmapHeightConstraint = roadmapHeight;
     NSLayoutConstraint *composerTop = [self.uncommittedBar.bottomAnchor constraintEqualToAnchor:self.composerCard.topAnchor constant:-8];
     // When the bar is hidden it still occupies its height, so the
     // content ends at the composer with a fixed 12pt gap instead.
@@ -349,6 +391,10 @@ static UIColor *OCClaudeGlass(void) {
         [self.filesChild.view.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [self.filesChild.view.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
         filesBottom,
+        [self.roadmapContainer.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [self.roadmapContainer.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        roadmapBottom,
+        roadmapHeight,
         [self.uncommittedBar.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:12],
         [self.uncommittedBar.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-12],
         composerTop,
@@ -489,6 +535,87 @@ static UIColor *OCClaudeGlass(void) {
     [self presentViewController:nav animated:YES completion:nil];
 }
 
+// FreeMilk's roadmap: rebuild the ticket cards from the session's
+// todos. One glass card per todo, with a status mark and the title;
+// tapping a card asks the agent to work on that milestone. The
+// whole strip hides while the session has no todos.
+- (void)updateRoadmap {
+    NSArray *todos = self.roadmapItems ?: @[];
+    for (UIView *v in self.roadmapScroll.subviews) [v removeFromSuperview];
+    if (!todos.count) {
+        self.roadmapContainer.hidden = YES;
+        self.roadmapHeightConstraint.constant = 0;
+        [self.view layoutIfNeeded];
+        return;
+    }
+    self.roadmapContainer.hidden = NO;
+    self.roadmapHeightConstraint.constant = 110;
+    CGFloat x = 16;
+    for (NSDictionary *todo in todos) {
+        if (![todo isKindOfClass:[NSDictionary class]]) continue;
+        NSString *content = todo[@"content"];
+        if (![content isKindOfClass:[NSString class]] || !content.length) continue;
+        NSString *status = todo[@"status"];
+        if (![status isKindOfClass:[NSString class]]) status = @"pending";
+        NSString *mark = @"○";
+        UIColor *markColor = OCTextFaint();
+        if ([status isEqualToString:@"completed"]) { mark = @"✓"; markColor = [UIColor systemGreenColor]; }
+        else if ([status isEqualToString:@"in_progress"]) { mark = @"◐"; markColor = [UIColor systemBlueColor]; }
+
+        UIButton *card = [UIButton buttonWithType:UIButtonTypeSystem];
+        card.backgroundColor = OCLayer01();
+        card.layer.cornerRadius = 14;
+        card.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.10].CGColor;
+        card.layer.borderWidth = 0.5;
+        card.translatesAutoresizingMaskIntoConstraints = NO;
+        card.tag = (NSInteger)[todos indexOfObject:todo];
+        [card addTarget:self action:@selector(roadmapCardTapped:) forControlEvents:UIControlEventTouchUpInside];
+        [self.roadmapScroll addSubview:card];
+
+        UILabel *markLabel = [[UILabel alloc] init];
+        markLabel.text = mark;
+        markLabel.font = OCRoundedFont(16, UIFontWeightSemibold);
+        markLabel.textColor = markColor;
+        markLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        [card addSubview:markLabel];
+
+        UILabel *titleLabel = [[UILabel alloc] init];
+        titleLabel.text = content;
+        titleLabel.font = OCRoundedFont(14, UIFontWeightMedium);
+        titleLabel.textColor = OCTextBase();
+        titleLabel.numberOfLines = 3;
+        titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        [card addSubview:titleLabel];
+
+        [NSLayoutConstraint activateConstraints:@[
+            [card.leadingAnchor constraintEqualToAnchor:self.roadmapScroll.leadingAnchor constant:x],
+            [card.topAnchor constraintEqualToAnchor:self.roadmapScroll.topAnchor],
+            [card.widthAnchor constraintEqualToConstant:180],
+            [card.heightAnchor constraintEqualToConstant:76],
+            [markLabel.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:12],
+            [markLabel.topAnchor constraintEqualToAnchor:card.topAnchor constant:10],
+            [markLabel.widthAnchor constraintEqualToConstant:20],
+            [markLabel.heightAnchor constraintEqualToConstant:20],
+            [titleLabel.leadingAnchor constraintEqualToAnchor:markLabel.trailingAnchor constant:6],
+            [titleLabel.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-12],
+            [titleLabel.topAnchor constraintEqualToAnchor:card.topAnchor constant:10],
+            [titleLabel.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-10],
+        ]];
+        x += 180 + 10;
+    }
+    self.roadmapScroll.contentSize = CGSizeMake(x + 6, 76);
+    [self.view layoutIfNeeded];
+}
+
+- (void)roadmapCardTapped:(UIButton *)sender {
+    NSArray *todos = self.roadmapItems ?: @[];
+    if (sender.tag < 0 || sender.tag >= (NSInteger)todos.count) return;
+    NSDictionary *todo = todos[sender.tag];
+    NSString *content = todo[@"content"];
+    if (![content isKindOfClass:[NSString class]] || !content.length) return;
+    [self sendPromptText:[NSString stringWithFormat:@"Work on this milestone: %@", content]];
+}
+
 // FreeMilk's uncommitted-changes bar: counts the session's diff and
 // shows while there is anything uncommitted; tapping it opens the
 // diff. Hidden while the session is clean.
@@ -511,6 +638,32 @@ static UIColor *OCClaudeGlass(void) {
 }
 
 #pragma mark - Messages
+
+// FreeMilk's roadmap: the session's todos, from the latest
+// todowrite tool call. Each todo is a milestone ticket with a
+// content (title), a status (pending, in_progress, completed) and a
+// priority. The latest call wins; an empty list means no roadmap.
++ (NSArray *)roadmapFromMessages:(NSArray *)messages {
+    NSArray *latest = nil;
+    for (id raw in messages) {
+        if (![raw isKindOfClass:[NSDictionary class]]) continue;
+        NSArray *parts = raw[@"content"];
+        if (![parts isKindOfClass:[NSArray class]]) continue;
+        for (id partRaw in parts) {
+            if (![partRaw isKindOfClass:[NSDictionary class]]) continue;
+            NSDictionary *part = partRaw;
+            if (![part[@"type"] isEqualToString:@"tool"]) continue;
+            if (![part[@"name"] isEqualToString:@"todowrite"]) continue;
+            NSDictionary *state = part[@"state"];
+            if (![state isKindOfClass:[NSDictionary class]]) continue;
+            NSDictionary *input = state[@"input"];
+            if (![input isKindOfClass:[NSDictionary class]]) continue;
+            NSArray *todos = input[@"todos"];
+            if ([todos isKindOfClass:[NSArray class]] && todos.count) latest = todos;
+        }
+    }
+    return latest ?: @[];
+}
 
 + (NSArray *)displayItemsFromMessages:(NSArray *)messages {
     // Real server shape (verified live against opencode 2.2.6):
@@ -611,7 +764,9 @@ static UIColor *OCClaudeGlass(void) {
         // The server returns messages newest first; the thread reads oldest first.
         NSArray *chronological = [[messages reverseObjectEnumerator] allObjects];
         self.displayItems = [OCChatViewController displayItemsFromMessages:chronological];
+        self.roadmapItems = [OCChatViewController roadmapFromMessages:chronological];
         [self updateUncommittedBar];
+        [self updateRoadmap];
         [self.tableView reloadData];
         [self scrollToBottom];
     }];
@@ -625,10 +780,40 @@ static UIColor *OCClaudeGlass(void) {
     [self.tableView scrollToRowAtIndexPath:last atScrollPosition:UITableViewScrollPositionBottom animated:YES];
 }
 
+// FreeMilk's agent loading view: while the agent is working, a
+// footer row at the bottom of the thread shows a spinner and the
+// agent's state. It is the thread's table footer, so it sits under
+// the last message and scrolls with the thread.
+- (void)updateActivityFooter {
+    if (!self.waitingForReply) {
+        self.tableView.tableFooterView = nil;
+        return;
+    }
+    UIView *footer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 44)];
+    UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+    spinner.translatesAutoresizingMaskIntoConstraints = NO;
+    [spinner startAnimating];
+    [footer addSubview:spinner];
+    UILabel *label = [[UILabel alloc] init];
+    label.text = @"Agent is working";
+    label.font = OCRoundedFont(14, UIFontWeightMedium);
+    label.textColor = OCTextFaint();
+    label.translatesAutoresizingMaskIntoConstraints = NO;
+    [footer addSubview:label];
+    [NSLayoutConstraint activateConstraints:@[
+        [spinner.leadingAnchor constraintEqualToAnchor:footer.leadingAnchor constant:16],
+        [spinner.centerYAnchor constraintEqualToAnchor:footer.centerYAnchor],
+        [label.leadingAnchor constraintEqualToAnchor:spinner.trailingAnchor constant:8],
+        [label.centerYAnchor constraintEqualToAnchor:footer.centerYAnchor],
+    ]];
+    self.tableView.tableFooterView = footer;
+}
+
 - (void)startPolling {
     [self.pollTimer invalidate];
     self.waitingForReply = YES;
     [self updateSendButton];
+    [self updateActivityFooter];
     __weak typeof(self) weakSelf = self;
     self.pollTimer = [NSTimer scheduledTimerWithTimeInterval:2.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
         (void)timer;
@@ -642,6 +827,7 @@ static UIColor *OCClaudeGlass(void) {
     self.pollTimer = nil;
     self.waitingForReply = NO;
     [self updateSendButton];
+    [self updateActivityFooter];
 }
 
 // The server marks a session idle when the agent finishes (time.idle >=

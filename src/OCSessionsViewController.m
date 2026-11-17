@@ -14,6 +14,27 @@
 
 @implementation OCSessionsViewController
 
+// FreeMilk's greeting cover: a large greeting over the Threads
+// list, the way FreeMilk greets you on its home tab. Time-based,
+// in the rounded system font.
+static NSString *OCGreetingForNow(void) {
+    NSCalendar *cal = [NSCalendar currentCalendar];
+    NSInteger hour = [cal component:NSCalendarUnitHour fromDate:[NSDate date]];
+    if (hour < 12) return @"Good morning";
+    if (hour < 17) return @"Good afternoon";
+    return @"Good evening";
+}
+
+@interface OCSessionsViewController () <UITableViewDataSource, UITableViewDelegate>
+@property (nonatomic, strong) UITableView *tableView;
+@property (nonatomic, strong) NSArray *sessions;
+@property (nonatomic, strong) UILabel *greetingLabel;
+@property (nonatomic, strong) UILabel *statusLabel;
+@property (nonatomic, strong) UIRefreshControl *refreshControl;
+@end
+
+@implementation OCSessionsViewController
+
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"Threads";
@@ -21,10 +42,19 @@
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAdd target:self action:@selector(newChat)];
     self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"Engine" style:UIBarButtonItemStylePlain target:self action:@selector(showEngine)];
 
+    self.greetingLabel = [[UILabel alloc] init];
+    self.greetingLabel.text = OCGreetingForNow();
+    UIFont *base = [UIFont systemFontOfSize:28 weight:UIFontWeightBold];
+    UIFontDescriptor *rounded = [[base fontDescriptor] fontDescriptorWithDesign:UIFontDescriptorSystemDesignRounded];
+    self.greetingLabel.font = [UIFont fontWithDescriptor:rounded size:28] ?: base;
+    self.greetingLabel.textColor = [UIColor labelColor];
+    self.greetingLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:self.greetingLabel];
+
     self.statusLabel = [[UILabel alloc] init];
     self.statusLabel.font = [UIFont systemFontOfSize:13];
     self.statusLabel.textColor = [UIColor secondaryLabelColor];
-    self.statusLabel.textAlignment = NSTextAlignmentCenter;
+    self.statusLabel.textAlignment = NSTextAlignmentLeft;
     self.statusLabel.numberOfLines = 0;
     self.statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:self.statusLabel];
@@ -39,7 +69,10 @@
     [self.tableView addSubview:self.refreshControl];
 
     [NSLayoutConstraint activateConstraints:@[
-        [self.statusLabel.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:8],
+        [self.greetingLabel.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:12],
+        [self.greetingLabel.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
+        [self.greetingLabel.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
+        [self.statusLabel.topAnchor constraintEqualToAnchor:self.greetingLabel.bottomAnchor constant:4],
         [self.statusLabel.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
         [self.statusLabel.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
         [self.tableView.topAnchor constraintEqualToAnchor:self.statusLabel.bottomAnchor constant:8],
@@ -55,8 +88,9 @@
 }
 
 - (void)showEngine {
+    // The engine lives in Integrations (tab 1) now.
     UITabBarController *tabs = self.tabBarController;
-    if (tabs.viewControllers.count > 2) tabs.selectedIndex = 2;
+    if (tabs.viewControllers.count > 1) tabs.selectedIndex = 1;
 }
 
 - (OCServerClient *)client {
