@@ -15,6 +15,10 @@ static NSString *const kDebianCached = @"oc.debianCached";
 @property (nonatomic, assign) OCEngineState state;
 @property (nonatomic, strong, nullable) NSTimer *healthTimer;
 @property (nonatomic, assign) NSInteger healthFailures;
+// First start can take minutes (Node + OpenCode install in the guest);
+// health failures before this date are ignored so the engine is not
+// restarted while the install is still running.
+@property (nonatomic, strong, nullable) NSDate *healthGraceUntil;
 // First-launch setup chain state. The chain is held STRONGLY by the
 // OCEngine singleton (which lives for the life of the app), and it is
 // driven by the -setupDownloadNext instance method, never by a block
@@ -371,14 +375,23 @@ static NSString *const kDebianCached = @"oc.debianCached";
     [self setState:OCEngineStateStarting];
     NSString *command = [self serveLaunchCommand];
     // Install Node + OpenCode once, then launch the server, inside the guest.
-    NSString *bootstrap = @"if ! command -v opencode >/dev/null 2>&1; then npm install -g opencode-ai@2.3.0; fi; ";
+    // The Debian rootfs ships no Node, so the first Start downloads the
+    // official Node 22 LTS arm64 binary (v22.23.5, verified live) and
+    // installs OpenCode with its npm. The install runs in a subshell so
+    // the serve still starts in $HOME/Projects.
+    NSString *bootstrap =
+        @"if ! command -v node >/dev/null 2>&1; then "
+        @"(cd /tmp && curl -fsSL -o node.tar.xz https://nodejs.org/dist/v22.23.5/node-v22.23.5-linux-arm64.tar.xz && tar -xJf node.tar.xz -C /usr/local --strip-components=1 && rm -f node.tar.xz); fi; "
+        @"if ! command -v opencode >/dev/null 2>&1; then npm install -g opencode-ai@2.3.0; fi; ";
     NSString *full = [bootstrap stringByAppendingString:command];
     __weak typeof(self) weakSelf = self;
     self.guestExecutor(full, @"$HOME/Projects", ^(NSString * _Nullable output, NSInteger exitCode) {
-        (void)output;
         typeof(self) strongSelf = weakSelf;
         if (!strongSelf) return;
         if (exitCode != 0) {
+            // Log the guest output so a failed Node/OpenCode install can
+            // be diagnosed from the app log instead of guessing.
+            if (output.length) NSLog(@"[OCEngine] serve launch failed, guest output: %@", output);
             [strongSelf setState:OCEngineStateError];
             NSError *e = [NSError errorWithDomain:@"OCEngine" code:(NSInteger)exitCode
                                          userInfo:@{NSLocalizedDescriptionKey: @"Guest serve launch failed"}];
@@ -386,6 +399,10 @@ static NSString *const kDebianCached = @"oc.debianCached";
             return;
         }
         [strongSelf setState:OCEngineStateRunning];
+        // The Node/OpenCode install can still be running when the
+        // executor acks; give the first start 5 minutes before health
+        // failures can restart the engine.
+        strongSelf.healthGraceUntil = [NSDate dateWithTimeIntervalSinceNow:300];
         [strongSelf startHealthTimer];
         dispatch_async(dispatch_get_main_queue(), ^{ completion(YES, nil); });
     });
@@ -407,6 +424,9 @@ static NSString *const kDebianCached = @"oc.debianCached";
         [strongSelf checkHealthWithCompletion:^(BOOL healthy, NSDictionary * _Nullable info) {
             (void)info;
             if (healthy) { strongSelf.healthFailures = 0; return; }
+            // First start can still be installing Node/OpenCode; ignore
+            // failures until the grace period ends.
+            if (strongSelf.healthGraceUntil && [[NSDate date] compare:strongSelf.healthGraceUntil] == NSOrderedAscending) return;
             strongSelf.healthFailures++;
             if (strongSelf.healthFailures >= 3) {
                 // Guest died (iOS suspended or killed the app). Files persist,
