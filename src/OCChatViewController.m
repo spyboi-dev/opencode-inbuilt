@@ -1,26 +1,18 @@
 // OCChatViewController - chat thread for one OpenCode session.
-// Follows OpenCode's own session-ui display model (packages/session-ui):
-// user messages are right-aligned bubbles (layer-02, 10px radius, max
-// 82% wide, folding past 12 lines); assistant text flows as plain
-// markdown with a faint copy + meta footer; reasoning is a collapsible
-// "Thinking"/"Thought" card; every tool is a 28px trigger row (icon,
-// title, subtitle, chevron) whose detail opens below it, and Shell
-// shows a command + result card. A new session is an empty timeline
-// with the composer at the bottom; there is no greeting hero.
-// Colours are OpenCode's dark tokens: base #161616, layer-01 #242424,
-// layer-02 #2e2e2e, text #f2f2f2, muted #aeaeae, faint #808080,
-// accent #3b5cf6.
+// Looks like the Claude iOS app: a full-screen chat with no nav bar
+// and no tab bar, a glass hamburger and ghost avatar up top, and an
+// empty state with a coral starburst, a serif greeting and a model
+// pill over a big rounded composer card. Messages themselves follow
+// OpenCode's own session-ui model (user bubbles, plain assistant
+// markdown, collapsible Thinking cards, 28px tool rows, Shell
+// command + result cards). Colours are Claude's dark tokens: near
+// black #1a1a1a background, #2a2a2a card, coral #d97757, cream
+// #f5f0e8 greeting.
 #import "OCChatViewController.h"
 #import "OCServerClient.h"
 #import "OCSettings.h"
 #import "OCUtil.h"
 
-// OpenCode dark tokens, as dynamic colours so light mode still reads.
-static UIColor *OCBackground(void) {
-    return [UIColor colorWithDynamicProvider:^UIColor * _Nonnull(UITraitCollection * _Nonnull traits) {
-        return traits.userInterfaceStyle == UIUserInterfaceStyleDark ? [UIColor colorWithRed:0x16/255.0 green:0x16/255.0 blue:0x16/255.0 alpha:1.0] : [UIColor systemBackgroundColor];
-    }];
-}
 static UIColor *OCLayer01(void) {
     return [UIColor colorWithDynamicProvider:^UIColor * _Nonnull(UITraitCollection * _Nonnull traits) {
         return traits.userInterfaceStyle == UIUserInterfaceStyleDark ? [UIColor colorWithRed:0x24/255.0 green:0x24/255.0 blue:0x24/255.0 alpha:1.0] : [UIColor secondarySystemBackgroundColor];
@@ -49,6 +41,53 @@ static UIColor *OCTextFaint(void) {
 static UIColor *OCAccent(void) {
     return [UIColor colorWithRed:0x3b/255.0 green:0x5c/255.0 blue:0xf6/255.0 alpha:1.0];
 }
+// Claude chrome colours.
+static UIColor *OCClaudeBackground(void) {
+    return [UIColor colorWithDynamicProvider:^UIColor * _Nonnull(UITraitCollection * _Nonnull traits) {
+        return traits.userInterfaceStyle == UIUserInterfaceStyleDark ? [UIColor colorWithRed:0x1a/255.0 green:0x1a/255.0 blue:0x1a/255.0 alpha:1.0] : [UIColor systemBackgroundColor];
+    }];
+}
+static UIColor *OCClaudeCard(void) {
+    return [UIColor colorWithDynamicProvider:^UIColor * _Nonnull(UITraitCollection * _Nonnull traits) {
+        return traits.userInterfaceStyle == UIUserInterfaceStyleDark ? [UIColor colorWithRed:0x2a/255.0 green:0x2a/255.0 blue:0x2a/255.0 alpha:1.0] : [UIColor systemGray5Color];
+    }];
+}
+static UIColor *OCClaudeCoral(void) {
+    return [UIColor colorWithRed:0xd9/255.0 green:0x77/255.0 blue:0x57/255.0 alpha:1.0];
+}
+static UIColor *OCClaudeCream(void) {
+    return [UIColor colorWithDynamicProvider:^UIColor * _Nonnull(UITraitCollection * _Nonnull traits) {
+        return traits.userInterfaceStyle == UIUserInterfaceStyleDark ? [UIColor colorWithRed:0xf5/255.0 green:0xf0/255.0 blue:0xe8/255.0 alpha:1.0] : [UIColor labelColor];
+    }];
+}
+static UIColor *OCClaudeGlass(void) {
+    return [UIColor colorWithWhite:1.0 alpha:0.08];
+}
+
+// The coral starburst mark, drawn as radiating strokes like the
+// Claude asterisk. One view, no image asset needed.
+@interface OCStarburstView : UIView
+@end
+@implementation OCStarburstView
+- (void)drawRect:(CGRect)rect {
+    CGContextRef ctx = UIGraphicsGetCurrentContext();
+    CGContextSetStrokeColorWithColor(ctx, [OCClaudeCoral() CGColor]);
+    CGContextSetLineWidth(ctx, 3.0);
+    CGContextSetLineCap(ctx, kCGLineCapRound);
+    CGPoint c = CGPointMake(CGRectGetMidX(rect), CGRectGetMidY(rect));
+    CGFloat r = MIN(rect.size.width, rect.size.height) / 2.0;
+    // 8 spokes, alternating long and short, with a slight rotation
+    // so it reads as a starburst rather than a plain asterisk.
+    for (int i = 0; i < 8; i++) {
+        CGFloat angle = (M_PI / 4.0) * i + M_PI / 8.0;
+        CGFloat len = (i % 2 == 0) ? r : r * 0.62;
+        CGPoint p = CGPointMake(c.x + cos(angle) * len, c.y + sin(angle) * len);
+        CGContextMoveToPoint(ctx, c.x, c.y);
+        CGContextAddLineToPoint(ctx, p.x, p.y);
+    }
+    CGContextStrokePath(ctx);
+}
+@end
 
 @interface OCChatViewController () <UITableViewDataSource, UITableViewDelegate, OCServerEventDelegate, UITextViewDelegate>
 @property (nonatomic, strong) NSDictionary *session;
@@ -59,8 +98,15 @@ static UIColor *OCAccent(void) {
 @property (nonatomic, strong) NSLayoutConstraint *composerHeightConstraint;
 @property (nonatomic, strong) UIButton *modelChipButton;
 @property (nonatomic, strong) UIButton *sendButton;
-@property (nonatomic, strong) UIButton *stopButton;
 @property (nonatomic, strong) NSLayoutConstraint *composerBottomConstraint;
+// Claude chrome: glass top bar, empty-state hero, composer extras.
+@property (nonatomic, strong) UIView *topBar;
+@property (nonatomic, strong) UIButton *menuButton;
+@property (nonatomic, strong) UIButton *avatarButton;
+@property (nonatomic, strong) UIView *heroView;
+@property (nonatomic, strong) UIButton *heroPillButton;
+@property (nonatomic, strong) UIButton *plusButton;
+@property (nonatomic, strong) UIButton *micButton;
 @property (nonatomic, strong) NSArray *displayItems; // @{kind, role, text, detail, output, state, model, duration, key}
 @property (nonatomic, strong) OCServerClient *client;
 @property (nonatomic, strong, nullable) NSTimer *pollTimer;
@@ -81,6 +127,8 @@ static UIColor *OCAccent(void) {
         _shownPermissionIDs = [NSMutableSet set];
         _expandedKeys = [NSMutableSet set];
         _expandedUserKeys = [NSMutableSet set];
+        // Claude is a full-screen chat: no tab bar on this screen.
+        self.hidesBottomBarWhenPushed = YES;
         id model = session[@"model"];
         if ([model isKindOfClass:[NSDictionary class]]) {
             if ([model[@"id"] isKindOfClass:[NSString class]]) _currentModelID = model[@"id"];
@@ -102,45 +150,112 @@ static UIColor *OCAccent(void) {
 
 - (NSString *)sessionID { return self.session[@"id"]; }
 
-- (NSString *)modelChipTitle {
-    if (self.currentModelID.length && self.currentProviderID.length)
-        return [NSString stringWithFormat:@"%@ / %@", self.currentProviderID, self.currentModelID];
+// The short model label for the Claude-style pills (hero + composer):
+// just the model id, so it fits like "Sonnet 5.5 Medium" does.
+- (NSString *)modelPillTitle {
     if (self.currentModelID.length) return self.currentModelID;
-    return @"Model";
+    return @"Choose a model";
+}
+
+// The white circle at the right of the composer is the send button in
+// all three states: a waveform when the input is empty (tap focuses
+// the composer), an arrow-up when there is text (tap sends), and a
+// stop square while a reply is in flight (tap stops).
+- (void)updateSendButton {
+    UIImage *icon = nil;
+    if (self.waitingForReply) {
+        icon = [UIImage systemImageNamed:@"stop.fill"];
+    } else if (self.composer.text.length) {
+        icon = [UIImage systemImageNamed:@"arrow.up"];
+    } else {
+        icon = [UIImage systemImageNamed:@"waveform"];
+    }
+    [self.sendButton setImage:[icon imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate] forState:UIControlStateNormal];
+    self.sendButton.tintColor = [UIColor blackColor];
+}
+
+- (UIButton *)glassCircleButtonWithImage:(NSString *)imageName diameter:(CGFloat)diameter {
+    UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+    b.backgroundColor = OCClaudeGlass();
+    b.layer.cornerRadius = diameter / 2.0;
+    b.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.12].CGColor;
+    b.layer.borderWidth = 0.5;
+    b.translatesAutoresizingMaskIntoConstraints = NO;
+    [b setImage:[[UIImage systemImageNamed:imageName] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate] forState:UIControlStateNormal];
+    b.tintColor = [UIColor whiteColor];
+    return b;
 }
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.view.backgroundColor = OCBackground();
-    NSString *title = self.session[@"title"];
-    self.title = ([title isKindOfClass:[NSString class]] && title.length) ? title : @"New Session";
-    self.navigationItem.rightBarButtonItems = @[
-        [[UIBarButtonItem alloc] initWithTitle:@"Model" style:UIBarButtonItemStylePlain target:self action:@selector(pickModel)],
-        [[UIBarButtonItem alloc] initWithTitle:@"Diff" style:UIBarButtonItemStylePlain target:self action:@selector(showDiff)],
-    ];
+    self.view.backgroundColor = OCClaudeBackground();
 
-    // The timeline. No separators and no greeting hero: a new session
-    // is an empty timeline with the composer at the bottom.
+    // Claude has no nav bar and no title on the chat screen. A glass
+    // hamburger (back to sessions) and a ghost avatar (settings) sit
+    // in circular glass buttons at the top. The nav bar itself is
+    // hidden in viewWillAppear and restored in viewWillDisappear.
+    self.topBar = [[UIView alloc] init];
+    self.topBar.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:self.topBar];
+
+    self.menuButton = [self glassCircleButtonWithImage:@"line.horizontal.3" diameter:44];
+    [self.menuButton addTarget:self action:@selector(menuTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.topBar addSubview:self.menuButton];
+
+    self.avatarButton = [self glassCircleButtonWithImage:@"person.crop.circle.fill" diameter:44];
+    [self.avatarButton addTarget:self action:@selector(avatarTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.topBar addSubview:self.avatarButton];
+
+    // The timeline.
     self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
     self.tableView.dataSource = self;
     self.tableView.delegate = self;
     self.tableView.rowHeight = UITableViewAutomaticDimension;
     self.tableView.estimatedRowHeight = 60;
     self.tableView.separatorStyle = UITableViewCellSeparatorStyleNone;
-    self.tableView.backgroundColor = OCBackground();
+    self.tableView.backgroundColor = OCClaudeBackground();
     self.tableView.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:self.tableView];
 
-    // Composer: one rounded card, 12px radius, at the bottom. The
-    // text area sits on top; a 44px footer row holds the model chip
-    // and the 28px send button.
+    // Empty-state hero, Claude style: coral starburst, serif
+    // greeting, model pill. Shown only while there are no messages.
+    self.heroView = [[UIView alloc] init];
+    self.heroView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.heroView.hidden = YES;
+    [self.view addSubview:self.heroView];
+
+    OCStarburstView *starburst = [[OCStarburstView alloc] init];
+    starburst.backgroundColor = [UIColor clearColor];
+    starburst.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.heroView addSubview:starburst];
+
+    UILabel *greeting = [[UILabel alloc] init];
+    greeting.text = @"What are we building?";
+    UIFont *serif = [UIFont fontWithName:@"Georgia" size:32];
+    greeting.font = serif ?: [UIFont systemFontOfSize:32 weight:UIFontWeightSemibold];
+    greeting.textColor = OCClaudeCream();
+    greeting.textAlignment = NSTextAlignmentCenter;
+    greeting.numberOfLines = 0;
+    greeting.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.heroView addSubview:greeting];
+
+    self.heroPillButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [self.heroPillButton setTitle:[self modelPillTitle] forState:UIControlStateNormal];
+    self.heroPillButton.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
+    [self.heroPillButton setTitleColor:OCTextBase() forState:UIControlStateNormal];
+    self.heroPillButton.backgroundColor = OCLayer02();
+    self.heroPillButton.layer.cornerRadius = 18;
+    self.heroPillButton.contentEdgeInsets = UIEdgeInsetsMake(10, 18, 10, 18);
+    self.heroPillButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.heroPillButton addTarget:self action:@selector(pickModel) forControlEvents:UIControlEventTouchUpInside];
+    [self.heroView addSubview:self.heroPillButton];
+
+    // Composer: Claude's big rounded card (28px radius). The text
+    // area sits on top; the bottom row holds a plus circle, the
+    // model pill, a mic circle and the white voice/send circle.
     self.composerCard = [[UIView alloc] init];
-    self.composerCard.backgroundColor = OCLayer01();
-    self.composerCard.layer.cornerRadius = 12;
-    self.composerCard.layer.shadowColor = [UIColor blackColor].CGColor;
-    self.composerCard.layer.shadowOpacity = 0.25;
-    self.composerCard.layer.shadowRadius = 8;
-    self.composerCard.layer.shadowOffset = CGSizeMake(0, -2);
+    self.composerCard.backgroundColor = OCClaudeCard();
+    self.composerCard.layer.cornerRadius = 28;
     self.composerCard.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:self.composerCard];
 
@@ -155,69 +270,99 @@ static UIColor *OCAccent(void) {
     [self.composerCard addSubview:self.composer];
 
     self.composerPlaceholder = [[UILabel alloc] init];
-    self.composerPlaceholder.text = @"Ask anything, / for commands, @ for context…";
+    self.composerPlaceholder.text = @"Chat with OpenCode";
     self.composerPlaceholder.font = [UIFont systemFontOfSize:16];
     self.composerPlaceholder.textColor = OCTextFaint();
     self.composerPlaceholder.translatesAutoresizingMaskIntoConstraints = NO;
     [self.composerCard addSubview:self.composerPlaceholder];
 
+    self.plusButton = [self glassCircleButtonWithImage:@"plus" diameter:36];
+    [self.plusButton addTarget:self action:@selector(plusTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.composerCard addSubview:self.plusButton];
+
     self.modelChipButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    [self.modelChipButton setTitle:[self modelChipTitle] forState:UIControlStateNormal];
-    self.modelChipButton.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+    [self.modelChipButton setTitle:[self modelPillTitle] forState:UIControlStateNormal];
+    self.modelChipButton.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
     [self.modelChipButton setTitleColor:OCTextBase() forState:UIControlStateNormal];
-    self.modelChipButton.backgroundColor = [UIColor clearColor];
-    self.modelChipButton.contentEdgeInsets = UIEdgeInsetsMake(6, 8, 6, 8);
+    self.modelChipButton.backgroundColor = OCClaudeGlass();
+    self.modelChipButton.layer.cornerRadius = 18;
+    self.modelChipButton.contentEdgeInsets = UIEdgeInsetsMake(6, 12, 6, 12);
     self.modelChipButton.translatesAutoresizingMaskIntoConstraints = NO;
     [self.modelChipButton addTarget:self action:@selector(pickModel) forControlEvents:UIControlEventTouchUpInside];
     [self.composerCard addSubview:self.modelChipButton];
 
+    self.micButton = [self glassCircleButtonWithImage:@"mic.fill" diameter:36];
+    [self.micButton addTarget:self action:@selector(micTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.composerCard addSubview:self.micButton];
+
     self.sendButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    self.sendButton.backgroundColor = OCAccent();
-    self.sendButton.layer.cornerRadius = 6;
+    self.sendButton.backgroundColor = [UIColor whiteColor];
+    self.sendButton.layer.cornerRadius = 18;
     self.sendButton.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.sendButton setImage:[[UIImage systemImageNamed:@"arrow.up"] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate] forState:UIControlStateNormal];
-    self.sendButton.tintColor = [UIColor whiteColor];
-    self.sendButton.alpha = 0.35;
     [self.sendButton addTarget:self action:@selector(sendTapped) forControlEvents:UIControlEventTouchUpInside];
     [self.composerCard addSubview:self.sendButton];
-
-    self.stopButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    self.stopButton.backgroundColor = OCAccent();
-    self.stopButton.layer.cornerRadius = 6;
-    self.stopButton.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.stopButton setImage:[[UIImage systemImageNamed:@"stop.fill"] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate] forState:UIControlStateNormal];
-    self.stopButton.tintColor = [UIColor whiteColor];
-    [self.stopButton addTarget:self action:@selector(stopTapped) forControlEvents:UIControlEventTouchUpInside];
-    self.stopButton.hidden = YES;
-    [self.composerCard addSubview:self.stopButton];
+    [self updateSendButton];
 
     self.composerBottomConstraint = [self.composerCard.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-8];
     [NSLayoutConstraint activateConstraints:@[
-        [self.tableView.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
+        [self.topBar.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
+        [self.topBar.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [self.topBar.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [self.topBar.heightAnchor constraintEqualToConstant:56],
+        [self.menuButton.leadingAnchor constraintEqualToAnchor:self.topBar.leadingAnchor constant:16],
+        [self.menuButton.centerYAnchor constraintEqualToAnchor:self.topBar.centerYAnchor],
+        [self.menuButton.widthAnchor constraintEqualToConstant:44],
+        [self.menuButton.heightAnchor constraintEqualToConstant:44],
+        [self.avatarButton.trailingAnchor constraintEqualToAnchor:self.topBar.trailingAnchor constant:-16],
+        [self.avatarButton.centerYAnchor constraintEqualToAnchor:self.topBar.centerYAnchor],
+        [self.avatarButton.widthAnchor constraintEqualToConstant:44],
+        [self.avatarButton.heightAnchor constraintEqualToConstant:44],
+        [self.tableView.topAnchor constraintEqualToAnchor:self.topBar.bottomAnchor],
         [self.tableView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [self.tableView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
         [self.tableView.bottomAnchor constraintEqualToAnchor:self.composerCard.topAnchor constant:-12],
+        [self.heroView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:24],
+        [self.heroView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-24],
+        [self.heroView.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor constant:-60],
+        [starburst.topAnchor constraintEqualToAnchor:self.heroView.topAnchor],
+        [starburst.centerXAnchor constraintEqualToAnchor:self.heroView.centerXAnchor],
+        [starburst.widthAnchor constraintEqualToConstant:64],
+        [starburst.heightAnchor constraintEqualToConstant:64],
+        [greeting.topAnchor constraintEqualToAnchor:starburst.bottomAnchor constant:20],
+        [greeting.leadingAnchor constraintEqualToAnchor:self.heroView.leadingAnchor],
+        [greeting.trailingAnchor constraintEqualToAnchor:self.heroView.trailingAnchor],
+        [self.heroPillButton.topAnchor constraintEqualToAnchor:greeting.bottomAnchor constant:24],
+        [self.heroPillButton.centerXAnchor constraintEqualToAnchor:self.heroView.centerXAnchor],
+        [self.heroPillButton.heightAnchor constraintEqualToConstant:36],
+        [self.heroPillButton.bottomAnchor constraintEqualToAnchor:self.heroView.bottomAnchor],
         [self.composerCard.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:12],
         [self.composerCard.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-12],
         self.composerBottomConstraint,
-        [self.composer.topAnchor constraintEqualToAnchor:self.composerCard.topAnchor constant:12],
-        [self.composer.leadingAnchor constraintEqualToAnchor:self.composerCard.leadingAnchor constant:16],
-        [self.composer.trailingAnchor constraintEqualToAnchor:self.composerCard.trailingAnchor constant:-16],
+        [self.composer.topAnchor constraintEqualToAnchor:self.composerCard.topAnchor constant:14],
+        [self.composer.leadingAnchor constraintEqualToAnchor:self.composerCard.leadingAnchor constant:18],
+        [self.composer.trailingAnchor constraintEqualToAnchor:self.composerCard.trailingAnchor constant:-18],
         [self.composerPlaceholder.leadingAnchor constraintEqualToAnchor:self.composer.leadingAnchor constant:5],
         [self.composerPlaceholder.centerYAnchor constraintEqualToAnchor:self.composer.centerYAnchor],
-        [self.modelChipButton.leadingAnchor constraintEqualToAnchor:self.composerCard.leadingAnchor constant:8],
-        [self.modelChipButton.topAnchor constraintEqualToAnchor:self.composer.bottomAnchor constant:4],
-        [self.modelChipButton.bottomAnchor constraintEqualToAnchor:self.composerCard.bottomAnchor constant:-8],
-        [self.modelChipButton.heightAnchor constraintEqualToConstant:28],
-        [self.sendButton.trailingAnchor constraintEqualToAnchor:self.composerCard.trailingAnchor constant:-8],
-        [self.sendButton.centerYAnchor constraintEqualToAnchor:self.modelChipButton.centerYAnchor],
-        [self.sendButton.widthAnchor constraintEqualToConstant:28],
-        [self.sendButton.heightAnchor constraintEqualToConstant:28],
-        [self.stopButton.trailingAnchor constraintEqualToAnchor:self.composerCard.trailingAnchor constant:-8],
-        [self.stopButton.centerYAnchor constraintEqualToAnchor:self.modelChipButton.centerYAnchor],
-        [self.stopButton.widthAnchor constraintEqualToConstant:28],
-        [self.stopButton.heightAnchor constraintEqualToConstant:28],
+        [self.plusButton.leadingAnchor constraintEqualToAnchor:self.composerCard.leadingAnchor constant:12],
+        [self.plusButton.topAnchor constraintEqualToAnchor:self.composer.bottomAnchor constant:8],
+        [self.plusButton.bottomAnchor constraintEqualToAnchor:self.composerCard.bottomAnchor constant:-12],
+        [self.plusButton.widthAnchor constraintEqualToConstant:36],
+        [self.plusButton.heightAnchor constraintEqualToConstant:36],
+        [self.modelChipButton.leadingAnchor constraintEqualToAnchor:self.plusButton.trailingAnchor constant:8],
+        [self.modelChipButton.centerYAnchor constraintEqualToAnchor:self.plusButton.centerYAnchor],
+        [self.modelChipButton.heightAnchor constraintEqualToConstant:36],
+        [self.micButton.centerYAnchor constraintEqualToAnchor:self.plusButton.centerYAnchor],
+        [self.micButton.widthAnchor constraintEqualToConstant:36],
+        [self.micButton.heightAnchor constraintEqualToConstant:36],
+        [self.sendButton.trailingAnchor constraintEqualToAnchor:self.composerCard.trailingAnchor constant:-12],
+        [self.sendButton.centerYAnchor constraintEqualToAnchor:self.plusButton.centerYAnchor],
+        [self.sendButton.widthAnchor constraintEqualToConstant:36],
+        [self.sendButton.heightAnchor constraintEqualToConstant:36],
     ]];
+    // The model pill takes the space between the plus and mic
+    // buttons; the mic sits just left of the send circle.
+    [self.modelChipButton.trailingAnchor constraintLessThanOrEqualToAnchor:self.micButton.leadingAnchor constant:-8].active = YES;
+    [self.micButton.trailingAnchor constraintEqualToAnchor:self.sendButton.leadingAnchor constant:-8].active = YES;
 
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(keyboardWillShow:) name:UIKeyboardWillShowNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(keyboardWillHide:) name:UIKeyboardWillHideNotification object:nil];
@@ -225,14 +370,19 @@ static UIColor *OCAccent(void) {
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
+    // Claude is a full-screen chat: the nav bar stays hidden here and
+    // is restored when leaving, so the sessions list keeps its bar.
+    [self.navigationController setNavigationBarHidden:YES animated:animated];
     self.serverClient.eventDelegate = self;
     [self.serverClient startEventStream];
+    [self updateHeroVisibility];
     [self reloadMessages];
     [self checkPermissions];
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
     [super viewWillDisappear:animated];
+    [self.navigationController setNavigationBarHidden:NO animated:animated];
     [self.serverClient stopEventStream];
     [self.pollTimer invalidate];
     self.pollTimer = nil;
@@ -273,7 +423,42 @@ static UIColor *OCAccent(void) {
         }
     }
     self.composerPlaceholder.hidden = textView.text.length > 0;
-    self.sendButton.alpha = textView.text.length ? 1.0 : 0.35;
+    [self updateSendButton];
+}
+
+#pragma mark - Claude chrome actions
+
+- (void)menuTapped {
+    [self.navigationController popViewControllerAnimated:YES];
+}
+
+- (void)avatarTapped {
+    // The ghost avatar opens Settings (tab 3).
+    self.tabBarController.selectedIndex = 3;
+}
+
+- (void)micTapped {
+    // The keyboard already offers dictation; bring it up.
+    [self.composer becomeFirstResponder];
+}
+
+- (void)plusTapped {
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:nil message:nil preferredStyle:UIAlertControllerStyleActionSheet];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"View diff" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+        [self showDiff];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Open Files" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+        self.tabBarController.selectedIndex = 1;
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+
+// The hero shows only while the session has no messages.
+- (void)updateHeroVisibility {
+    BOOL empty = self.displayItems.count == 0;
+    self.heroView.hidden = !empty;
+    self.tableView.hidden = empty;
 }
 
 #pragma mark - Messages
@@ -377,6 +562,7 @@ static UIColor *OCAccent(void) {
         // The server returns messages newest first; the thread reads oldest first.
         NSArray *chronological = [[messages reverseObjectEnumerator] allObjects];
         self.displayItems = [OCChatViewController displayItemsFromMessages:chronological];
+        [self updateHeroVisibility];
         [self.tableView reloadData];
         [self scrollToBottom];
     }];
@@ -393,8 +579,7 @@ static UIColor *OCAccent(void) {
 - (void)startPolling {
     [self.pollTimer invalidate];
     self.waitingForReply = YES;
-    self.stopButton.hidden = NO;
-    self.sendButton.hidden = YES;
+    [self updateSendButton];
     __weak typeof(self) weakSelf = self;
     self.pollTimer = [NSTimer scheduledTimerWithTimeInterval:2.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
         (void)timer;
@@ -407,8 +592,7 @@ static UIColor *OCAccent(void) {
     [self.pollTimer invalidate];
     self.pollTimer = nil;
     self.waitingForReply = NO;
-    self.stopButton.hidden = YES;
-    self.sendButton.hidden = NO;
+    [self updateSendButton];
 }
 
 // The server marks a session idle when the agent finishes (time.idle >=
@@ -432,8 +616,12 @@ static UIColor *OCAccent(void) {
 #pragma mark - Send / stop
 
 - (void)sendTapped {
+    // The white circle is one button in three states: while a reply
+    // is in flight it stops, with text it sends, and when empty it
+    // just focuses the composer (the keyboard offers dictation).
+    if (self.waitingForReply) { [self stopTapped]; return; }
     NSString *text = [self.composer.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    if (!text.length) return;
+    if (!text.length) { [self.composer becomeFirstResponder]; return; }
     self.composer.text = @"";
     [self textViewDidChange:self.composer];
     [self.composer resignFirstResponder];
@@ -481,8 +669,8 @@ static UIColor *OCAccent(void) {
                     else {
                         self.currentModelID = modelID;
                         self.currentProviderID = providerID;
-                        [self.modelChipButton setTitle:[self modelChipTitle] forState:UIControlStateNormal];
-                        self.title = [NSString stringWithFormat:@"%@ · %@", self.session[@"title"] ?: @"Chat", modelID];
+                        [self.modelChipButton setTitle:[self modelPillTitle] forState:UIControlStateNormal];
+                        [self.heroPillButton setTitle:[self modelPillTitle] forState:UIControlStateNormal];
                     }
                 }];
             }]];
