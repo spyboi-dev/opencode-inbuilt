@@ -322,6 +322,24 @@ static void oc_die_handler(const char *msg) {
     }
 
     oc_boot_log("mount_root ok");
+    // First process + runtime dirs (AppDelegate boot order).
+    // become_first_process MUST run before any generic_* path call:
+    // path_normalize dereferences thread-local `current`, which is NULL
+    // until the first process exists. The exchange bind mount used to
+    // run first and crashed here with SIGSEGV (boot.log: mount_root ok
+    // then CRASH signal 11).
+    err = become_first_process();
+    if (err < 0) {
+        [self finishBootWithSuccess:NO error:[OCCoreGlue errorWithCode:5 message:@"become_first_process failed"]];
+        return;
+    }
+    oc_boot_log("become_first_process ok");
+    err = prepare_guest_runtime_dirs();
+    if (err < 0) {
+        [self finishBootWithSuccess:NO error:[OCCoreGlue errorWithCode:5 message:@"prepare_guest_runtime_dirs failed"]];
+        return;
+    }
+    oc_boot_log("runtime dirs ok");
     // Exchange bind mount (RuntimeBridge prepareExchange, minus Swift):
     // a host dir the guest sees at /home/mobile/Downloads.
     NSError *dirError = nil;
@@ -349,19 +367,6 @@ static void oc_die_handler(const char *msg) {
     }
 
     oc_boot_log("exchange ok");
-    // First process + runtime dirs (AppDelegate boot order).
-    err = become_first_process();
-    if (err < 0) {
-        [self finishBootWithSuccess:NO error:[OCCoreGlue errorWithCode:5 message:@"become_first_process failed"]];
-        return;
-    }
-    oc_boot_log("become_first_process ok");
-    err = prepare_guest_runtime_dirs();
-    if (err < 0) {
-        [self finishBootWithSuccess:NO error:[OCCoreGlue errorWithCode:5 message:@"prepare_guest_runtime_dirs failed"]];
-        return;
-    }
-    oc_boot_log("runtime dirs ok");
     // FsInitialize() is intentionally skipped: on a fresh Debian root
     // /ish/version does not exist, so its version block never runs,
     // and FsApplyOverlay() no-ops when RootfsPatch.bundle is absent
