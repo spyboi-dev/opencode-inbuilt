@@ -1074,10 +1074,11 @@ static UIColor *OCClaudeGlass(void) {
     return cell;
 }
 
-// User message, OpenCode's way: a right-aligned bubble, layer-02,
-// 10px radius, at most 82% wide, 8px/12px padding, plain text. A
-// faint sent-time sits under the bubble. Past 12 lines it folds to
-// the first 8 with a Read more toggle.
+// User message, FreeMilk's way: a right-aligned glass bubble,
+// frosted over a system-material blur, 18px radius, at most 82%
+// wide, 8px/12px padding, rounded type. A faint sent-time sits under
+// the bubble. Past 12 lines it folds to the first 8 with a Read
+// more toggle.
 - (void)configureUserCell:(UITableViewCell *)cell item:(NSDictionary *)item {
     NSString *text = item[@"text"];
     NSString *key = item[@"key"];
@@ -1088,24 +1089,26 @@ static UIColor *OCClaudeGlass(void) {
         folded = YES;
         shownText = [[lines subarrayWithRange:NSMakeRange(0, 8)] componentsJoinedByString:@"\n"];
     }
-    UIView *bubble = [[UIView alloc] init];
-    bubble.backgroundColor = OCLayer02();
-    bubble.layer.cornerRadius = 10;
+    UIVisualEffectView *bubble = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial]];
+    bubble.layer.cornerRadius = 18;
+    bubble.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.10].CGColor;
+    bubble.layer.borderWidth = 0.5;
+    bubble.clipsToBounds = YES;
     bubble.translatesAutoresizingMaskIntoConstraints = NO;
     UILabel *label = [[UILabel alloc] init];
     label.text = shownText;
-    label.font = [UIFont systemFontOfSize:16];
+    label.font = OCRoundedFont(16, UIFontWeightRegular);
     label.textColor = OCTextBase();
     label.numberOfLines = 0;
     label.translatesAutoresizingMaskIntoConstraints = NO;
-    [bubble addSubview:label];
+    [bubble.contentView addSubview:label];
     [cell.contentView addSubview:bubble];
 
     NSMutableArray *constraints = [NSMutableArray arrayWithArray:@[
-        [label.topAnchor constraintEqualToAnchor:bubble.topAnchor constant:8],
-        [label.leadingAnchor constraintEqualToAnchor:bubble.leadingAnchor constant:12],
-        [label.trailingAnchor constraintEqualToAnchor:bubble.trailingAnchor constant:-12],
-        [label.bottomAnchor constraintEqualToAnchor:bubble.bottomAnchor constant:-8],
+        [label.topAnchor constraintEqualToAnchor:bubble.contentView.topAnchor constant:8],
+        [label.leadingAnchor constraintEqualToAnchor:bubble.contentView.leadingAnchor constant:12],
+        [label.trailingAnchor constraintEqualToAnchor:bubble.contentView.trailingAnchor constant:-12],
+        [label.bottomAnchor constraintEqualToAnchor:bubble.contentView.bottomAnchor constant:-8],
         [bubble.topAnchor constraintEqualToAnchor:cell.contentView.topAnchor constant:4],
         [bubble.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-16],
         [bubble.widthAnchor constraintLessThanOrEqualToAnchor:cell.contentView.widthAnchor multiplier:0.82],
@@ -1166,7 +1169,7 @@ static UIColor *OCClaudeGlass(void) {
 // model, duration and tokens line.
 - (void)configureAssistantCell:(UITableViewCell *)cell item:(NSDictionary *)item {
     UILabel *label = [[UILabel alloc] init];
-    label.attributedText = [OCUtil attributedFromMarkdown:item[@"text"] baseFont:[UIFont systemFontOfSize:16]];
+    label.attributedText = [OCUtil attributedFromMarkdown:item[@"text"] baseFont:OCRoundedFont(16, UIFontWeightRegular)];
     label.numberOfLines = 0;
     label.translatesAutoresizingMaskIntoConstraints = NO;
     [cell.contentView addSubview:label];
@@ -1230,18 +1233,21 @@ static UIColor *OCClaudeGlass(void) {
 - (void)configureReasoningCell:(UITableViewCell *)cell item:(NSDictionary *)item {
     NSString *key = item[@"key"];
     BOOL expanded = [self.expandedKeys containsObject:key];
-    UIView *card = [[UIView alloc] init];
-    card.backgroundColor = OCLayer01();
+    UIVisualEffectView *card = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial]];
     card.layer.cornerRadius = 12;
+    card.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.10].CGColor;
+    card.layer.borderWidth = 0.5;
+    card.clipsToBounds = YES;
     card.translatesAutoresizingMaskIntoConstraints = NO;
     [cell.contentView addSubview:card];
+    UIView *cardContent = card.contentView;
 
     UILabel *titleLabel = [[UILabel alloc] init];
     titleLabel.text = expanded ? @"Thought" : @"Thinking";
-    titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+    titleLabel.font = OCRoundedFont(13, UIFontWeightMedium);
     titleLabel.textColor = OCTextBase();
     titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    [card addSubview:titleLabel];
+    [cardContent addSubview:titleLabel];
 
     UILabel *subtitleLabel = [[UILabel alloc] init];
     NSString *duration = item[@"duration"];
@@ -1249,51 +1255,53 @@ static UIColor *OCClaudeGlass(void) {
     subtitleLabel.font = [UIFont systemFontOfSize:13];
     subtitleLabel.textColor = OCTextMuted();
     subtitleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    [card addSubview:subtitleLabel];
+    [cardContent addSubview:subtitleLabel];
 
     UILabel *chevron = [[UILabel alloc] init];
     chevron.text = expanded ? @"▾" : @"▸";
     chevron.font = [UIFont systemFontOfSize:13];
     chevron.textColor = OCTextFaint();
     chevron.translatesAutoresizingMaskIntoConstraints = NO;
-    [card addSubview:chevron];
+    [cardContent addSubview:chevron];
 
     NSMutableArray *constraints = [NSMutableArray arrayWithArray:@[
-        [titleLabel.topAnchor constraintEqualToAnchor:card.topAnchor constant:8],
-        [titleLabel.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:12],
+        [titleLabel.topAnchor constraintEqualToAnchor:cardContent.topAnchor constant:8],
+        [titleLabel.leadingAnchor constraintEqualToAnchor:cardContent.leadingAnchor constant:12],
         [subtitleLabel.centerYAnchor constraintEqualToAnchor:titleLabel.centerYAnchor],
         [subtitleLabel.leadingAnchor constraintEqualToAnchor:titleLabel.trailingAnchor constant:8],
         [chevron.centerYAnchor constraintEqualToAnchor:titleLabel.centerYAnchor],
-        [chevron.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-12],
+        [chevron.trailingAnchor constraintEqualToAnchor:cardContent.trailingAnchor constant:-12],
         [card.topAnchor constraintEqualToAnchor:cell.contentView.topAnchor constant:4],
         [card.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
         [card.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-16],
     ]];
     if (expanded) {
         UILabel *body = [[UILabel alloc] init];
-        body.attributedText = [OCUtil attributedFromMarkdown:item[@"text"] baseFont:[UIFont systemFontOfSize:13]];
+        body.attributedText = [OCUtil attributedFromMarkdown:item[@"text"] baseFont:OCRoundedFont(13, UIFontWeightRegular)];
         body.textColor = OCTextMuted();
         body.numberOfLines = 0;
         body.translatesAutoresizingMaskIntoConstraints = NO;
-        [card addSubview:body];
+        [cardContent addSubview:body];
         [constraints addObjectsFromArray:@[
             [body.topAnchor constraintEqualToAnchor:titleLabel.bottomAnchor constant:8],
-            [body.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:12],
-            [body.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-12],
-            [body.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-10],
+            [body.leadingAnchor constraintEqualToAnchor:cardContent.leadingAnchor constant:12],
+            [body.trailingAnchor constraintEqualToAnchor:cardContent.trailingAnchor constant:-12],
+            [body.bottomAnchor constraintEqualToAnchor:cardContent.bottomAnchor constant:-10],
             [titleLabel.bottomAnchor constraintEqualToAnchor:body.topAnchor constant:-8],
         ]];
     } else {
-        [constraints addObject:[titleLabel.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-8]];
+        [constraints addObject:[titleLabel.bottomAnchor constraintEqualToAnchor:cardContent.bottomAnchor constant:-8]];
     }
     [constraints addObject:[card.bottomAnchor constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-4]];
     [NSLayoutConstraint activateConstraints:constraints];
 }
 
-// Tool call, OpenCode's way: a BasicTool trigger row, 28px tall, with
-// a per-tool icon, a 13px medium title and a 13px muted subtitle
-// (truncated), and a chevron. No card background on the trigger; the
-// detail opens below it. Shell shows a command + result card.
+// Tool call, FreeMilk's way: the run step is a frosted glass card
+// (AgentRunRow), 16px radius over a system-material blur with a
+// hairline border. Inside, a per-tool icon, a 13px medium title and
+// a 13px muted subtitle (truncated), and a chevron. The detail opens
+// inside the card below the trigger row. Shell shows a command +
+// result card.
 - (void)configureToolCell:(UITableViewCell *)cell item:(NSDictionary *)item {
     NSString *key = item[@"key"];
     BOOL expanded = [self.expandedKeys containsObject:key];
@@ -1301,9 +1309,18 @@ static UIColor *OCClaudeGlass(void) {
     NSString *status = item[@"state"];
     BOOL running = [status isEqualToString:@"pending"] || [status isEqualToString:@"running"];
 
+    UIVisualEffectView *card = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial]];
+    card.layer.cornerRadius = 16;
+    card.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.10].CGColor;
+    card.layer.borderWidth = 0.5;
+    card.clipsToBounds = YES;
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+    [cell.contentView addSubview:card];
+    UIView *cardContent = card.contentView;
+
     UIView *row = [[UIView alloc] init];
     row.translatesAutoresizingMaskIntoConstraints = NO;
-    [cell.contentView addSubview:row];
+    [cardContent addSubview:row];
 
     UILabel *iconLabel = [[UILabel alloc] init];
     iconLabel.text = [self iconForTool:tool];
@@ -1314,7 +1331,7 @@ static UIColor *OCClaudeGlass(void) {
 
     UILabel *titleLabel = [[UILabel alloc] init];
     titleLabel.text = [self displayTitleForTool:tool];
-    titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+    titleLabel.font = OCRoundedFont(13, UIFontWeightMedium);
     titleLabel.textColor = OCTextBase();
     titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [row addSubview:titleLabel];
@@ -1339,9 +1356,12 @@ static UIColor *OCClaudeGlass(void) {
     if (running) titleLabel.textColor = OCAccent();
 
     NSMutableArray *constraints = [NSMutableArray arrayWithArray:@[
-        [row.topAnchor constraintEqualToAnchor:cell.contentView.topAnchor constant:4],
-        [row.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
-        [row.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-16],
+        [card.topAnchor constraintEqualToAnchor:cell.contentView.topAnchor constant:4],
+        [card.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
+        [card.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-16],
+        [row.topAnchor constraintEqualToAnchor:cardContent.topAnchor constant:6],
+        [row.leadingAnchor constraintEqualToAnchor:cardContent.leadingAnchor constant:12],
+        [row.trailingAnchor constraintEqualToAnchor:cardContent.trailingAnchor constant:-12],
         [row.heightAnchor constraintEqualToConstant:28],
         [iconLabel.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
         [iconLabel.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
@@ -1357,15 +1377,19 @@ static UIColor *OCClaudeGlass(void) {
     if (expanded) {
         UIView *detail = [self detailViewForTool:item];
         detail.translatesAutoresizingMaskIntoConstraints = NO;
-        [cell.contentView addSubview:detail];
+        [cardContent addSubview:detail];
         [constraints addObjectsFromArray:@[
             [detail.topAnchor constraintEqualToAnchor:row.bottomAnchor constant:4],
-            [detail.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
-            [detail.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-16],
-            [detail.bottomAnchor constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-4],
+            [detail.leadingAnchor constraintEqualToAnchor:cardContent.leadingAnchor constant:12],
+            [detail.trailingAnchor constraintEqualToAnchor:cardContent.trailingAnchor constant:-12],
+            [detail.bottomAnchor constraintEqualToAnchor:cardContent.bottomAnchor constant:-10],
+            [card.bottomAnchor constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-4],
         ]];
     } else {
-        [constraints addObject:[row.bottomAnchor constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-4]];
+        [constraints addObjectsFromArray:@[
+            [row.bottomAnchor constraintEqualToAnchor:cardContent.bottomAnchor constant:-6],
+            [card.bottomAnchor constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-4],
+        ]];
     }
     [NSLayoutConstraint activateConstraints:constraints];
 }
