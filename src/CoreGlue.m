@@ -27,6 +27,8 @@
 #include "debug.h"        // die_handler
 #include "tools/fakefs.h" // fakefs_import
 #include "app/LinuxRunner/DebianBootstrap.h" // lr_debian_bootstrap
+#include <signal.h>
+#include <fcntl.h>
 
 static NSString *const kGlueErrorDomain = @"OCCoreGlue";
 static NSString *const kGuestRootName = @"root";
@@ -34,6 +36,26 @@ static NSString *const kExchangeName = @"exchange";
 static NSString *const kRootTarName = @"debian-root.tar.gz";
 static NSString *const kBootInitPath = @"/usr/lib/linuxrunner/init.sh";
 static const NSTimeInterval kSpawnAckGraceSeconds = 1.0; // see CoreGlue.h
+
+// Diagnostic boot log (crash diagnosis): every boot step is written to
+// Documents/Engine/boot.log with unbuffered writes, so the last line
+// in the file is the step the boot died in. A signal handler records
+// a native crash (SIGSEGV/SIGBUS/SIGABRT/SIGILL/SIGTRAP) the same way;
+// a kill with no CRASH line (e.g. jetsam) leaves the log stopping at
+// the last completed step instead.
+static int oc_bootLogFd = -1;
+static void oc_boot_log(const char *msg) {
+    if (oc_bootLogFd >= 0) dprintf(oc_bootLogFd, "%s\n", msg);
+}
+static void oc_crash_handler(int sig) {
+    if (oc_bootLogFd >= 0) {
+        char buf[64];
+        int n = snprintf(buf, sizeof buf, "CRASH signal %d\n", sig);
+        if (n > 0) (void)!write(oc_bootLogFd, buf, (size_t)n);
+    }
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
 
 // ---------------------------------------------------------------------------
 // Per-command guest run. All fields except `output` are touched only on
@@ -213,6 +235,7 @@ static void oc_die_handler(const char *msg) {
 }
 
 - (void)finishBootWithSuccess:(BOOL)ok error:(nullable NSError *)error {
+    oc_boot_log(ok ? "boot finished ok" : "boot finished with error");
     NSArray *completions = [self.pendingBootCompletions copy];
     [self.pendingBootCompletions removeAllObjects];
     self.bootInProgress = NO;
@@ -229,6 +252,14 @@ static void oc_die_handler(const char *msg) {
     NSString *dataDir = [rootDir stringByAppendingPathComponent:@"data"];
     NSString *metaDb = [rootDir stringByAppendingPathComponent:@"meta.db"];
     NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *bootLogPath = [[self engineDirectory] stringByAppendingPathComponent:@"boot.log"];
+    oc_bootLogFd = open(bootLogPath.fileSystemRepresentation, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    oc_boot_log("boot start");
+    signal(SIGSEGV, oc_crash_handler);
+    signal(SIGBUS, oc_crash_handler);
+    signal(SIGABRT, oc_crash_handler);
+    signal(SIGILL, oc_crash_handler);
+    signal(SIGTRAP, oc_crash_handler);
 
     // First boot only: build the rootfs from the cached .debs.
     // fakefs_import() does mkdir(root) and fails with EEXIST if the
@@ -279,6 +310,7 @@ static void oc_die_handler(const char *msg) {
         }
     }
 
+    oc_boot_log("import phase done");
     // Mount the fakefs root. mount_root() is realpath + do_mount
     // (kernel/init.c:44).
     int err = mount_root(&fakefs, dataDir.fileSystemRepresentation);
@@ -289,6 +321,7 @@ static void oc_die_handler(const char *msg) {
         return;
     }
 
+    oc_boot_log("mount_root ok");
     // Exchange bind mount (RuntimeBridge prepareExchange, minus Swift):
     // a host dir the guest sees at /home/mobile/Downloads.
     NSError *dirError = nil;
@@ -315,17 +348,20 @@ static void oc_die_handler(const char *msg) {
         return;
     }
 
+    oc_boot_log("exchange ok");
     // First process + runtime dirs (AppDelegate boot order).
     err = become_first_process();
     if (err < 0) {
         [self finishBootWithSuccess:NO error:[OCCoreGlue errorWithCode:5 message:@"become_first_process failed"]];
         return;
     }
+    oc_boot_log("become_first_process ok");
     err = prepare_guest_runtime_dirs();
     if (err < 0) {
         [self finishBootWithSuccess:NO error:[OCCoreGlue errorWithCode:5 message:@"prepare_guest_runtime_dirs failed"]];
         return;
     }
+    oc_boot_log("runtime dirs ok");
     // FsInitialize() is intentionally skipped: on a fresh Debian root
     // /ish/version does not exist, so its version block never runs,
     // and FsApplyOverlay() no-ops when RootfsPatch.bundle is absent
@@ -366,7 +402,9 @@ static void oc_die_handler(const char *msg) {
     err = do_mount(&devptsfs, "devpts", "/dev/pts", "", 0);
     if (err < 0) { [self finishBootWithSuccess:NO error:[OCCoreGlue errorWithCode:7 message:@"Cannot mount /dev/pts"]]; return; }
 
+    oc_boot_log("mounts ok");
     [self configureDns];
+    oc_boot_log("dns ok");
 
     // AF_UNIX host backing paths must fit sun_path (104 bytes):
     // AppDelegate's /var + one-letter-prefix trick, verbatim.
@@ -383,6 +421,7 @@ static void oc_die_handler(const char *msg) {
         [self finishBootWithSuccess:NO error:[OCCoreGlue errorWithCode:9 message:@"Cannot open the guest console"]];
         return;
     }
+    oc_boot_log("console ok");
 
     exit_hook = oc_exit_hook;
     die_handler = oc_die_handler;
@@ -409,6 +448,7 @@ static void oc_die_handler(const char *msg) {
                                                       message:[NSString stringWithFormat:@"Guest init exec failed (%d)", err]]];
         return;
     }
+    oc_boot_log("execve ok");
     err = task_start(current);
     if (err < 0) {
         task_discard_unstarted(current);
@@ -418,6 +458,7 @@ static void oc_die_handler(const char *msg) {
                                                       message:[NSString stringWithFormat:@"Guest init start failed (%d)", err]]];
         return;
     }
+    oc_boot_log("task_start ok");
     current = NULL; // the guest owns the init task now
     NSLog(@"[CoreGlue] guest booted (Debian, interpreter, JITless)");
     [self finishBootWithSuccess:YES error:nil];
