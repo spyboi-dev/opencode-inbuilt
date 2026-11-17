@@ -42,6 +42,18 @@ typedef void (^OCGuestExecutor)(NSString *command, NSString *workingDirectory,
 @property (nonatomic, readonly) BOOL guestCoreLinked; // NO in this build, see BUILD-NOTE.md
 @property (nonatomic, copy, nullable) OCGuestExecutor guestExecutor; // set by the linked core
 @property (nonatomic, copy, nullable) void (^stateDidChange)(OCEngineState state);
+// In-app engine log + serve progress (for the Logs view and the Engine tab).
+// serveProgress is 0..1 while the engine is starting; serveStatus is the
+// current start stage ("Downloading Node...", "Installing OpenCode...", ...).
+@property (nonatomic, readonly) double serveProgress;
+@property (nonatomic, readonly, nullable) NSString *serveStatus;
+@property (nonatomic, copy, nullable) void (^serveProgressDidChange)(double progress, NSString * _Nullable status);
+// Append a timestamped line to the in-app engine log (also persisted to
+// Documents/Engine/engine.log). Never includes the server password.
+- (void)appendEngineLog:(NSString *)line;
+// Full diagnostic text: engine log + guest boot.log + guest serve.log.
+// Missing files are noted instead of failing.
+- (NSString *)fullLogText;
 
 - (void)refreshState;
 - (void)startEngineWithCompletion:(void (^)(BOOL started, NSError * _Nullable error))completion;

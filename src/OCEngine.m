@@ -19,6 +19,14 @@ static NSString *const kDebianCached = @"oc.debianCached";
 // health failures before this date are ignored so the engine is not
 // restarted while the install is still running.
 @property (nonatomic, strong, nullable) NSDate *healthGraceUntil;
+// Serve progress: the guest writes PROGRESS lines to the exchange
+// dir's serve.log; this timer polls it while the engine is starting
+// and drives serveProgress/serveStatus for the Engine tab.
+@property (nonatomic, strong, nullable) NSTimer *serveProgressTimer;
+@property (nonatomic, assign) double serveProgressValue;
+@property (nonatomic, strong, nullable) NSString *serveStatusValue;
+@property (nonatomic, assign) NSUInteger serveLogLinesSeen;
+@property (nonatomic, assign) BOOL serveProgressDone;
 // First-launch setup chain state. The chain is held STRONGLY by the
 // OCEngine singleton (which lives for the life of the app), and it is
 // driven by the -setupDownloadNext instance method, never by a block
@@ -69,7 +77,9 @@ static NSString *const kDebianCached = @"oc.debianCached";
 }
 
 - (void)setState:(OCEngineState)state {
+    if (_state == state) return;
     _state = state;
+    [self appendEngineLog:[NSString stringWithFormat:@"State: %@", self.stateDescription]];
     if (self.stateDidChange) self.stateDidChange(state);
 }
 
@@ -84,6 +94,141 @@ static NSString *const kDebianCached = @"oc.debianCached";
     // Password is never put in a log; this string is only handed to the guest.
     NSString *pw = [[OCSettings shared] ensureServerPassword];
     return [NSString stringWithFormat:@"OPENCODE_SERVER_PASSWORD=%@ opencode serve --port 4096 --hostname 0.0.0.0", pw];
+}
+
+#pragma mark - Engine log + serve progress (in-app diagnostics)
+
+// Serial queue so log appends from any thread (main, executor
+// completion, timers) cannot interleave in the file.
+static dispatch_queue_t OCEngineLogQueue(void) {
+    static dispatch_queue_t q;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ q = dispatch_queue_create("com.spyboy.opencode.engineLog", DISPATCH_QUEUE_SERIAL); });
+    return q;
+}
+
+- (NSString *)engineLogPath {
+    return [[self engineDirectory] stringByAppendingPathComponent:@"engine.log"];
+}
+
+- (NSString *)guestServeLogPath {
+    return [[[self engineDirectory] stringByAppendingPathComponent:@"exchange"] stringByAppendingPathComponent:@"serve.log"];
+}
+
+- (NSString *)guestBootLogPath {
+    return [[self engineDirectory] stringByAppendingPathComponent:@"boot.log"];
+}
+
+- (void)appendEngineLog:(NSString *)line {
+    if (!line.length) return;
+    NSString *copy = [line copy];
+    dispatch_async(OCEngineLogQueue(), ^{
+        NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
+        fmt.dateFormat = @"HH:mm:ss";
+        NSString *entry = [NSString stringWithFormat:@"[%@] %@\n", [fmt stringFromDate:[NSDate date]], copy];
+        NSString *path = [self engineLogPath];
+        NSFileManager *fm = [NSFileManager defaultManager];
+        [fm createDirectoryAtPath:[path stringByDeletingLastPathComponent] withIntermediateDirectories:YES attributes:nil error:nil];
+        NSData *data = [entry dataUsingEncoding:NSUTF8StringEncoding];
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
+        if (!fh) {
+            [data writeToFile:path atomically:NO];
+        } else {
+            [fh seekToEndOfFile];
+            [fh writeData:data];
+            unsigned long long size = [fh offsetInFile];
+            [fh closeFile];
+            if (size > 200 * 1024) {
+                NSString *old = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+                if (old.length > 100 * 1024) {
+                    NSString *tail = [old substringFromIndex:old.length - 100 * 1024];
+                    NSRange nl = [tail rangeOfString:@"\n"];
+                    if (nl.location != NSNotFound) tail = [tail substringFromIndex:nl.location + 1];
+                    [tail writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+                }
+            }
+        }
+    });
+}
+
++ (nullable NSString *)contentsOfFileOrNote:(NSString *)path label:(NSString *)label {
+    NSString *text = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+    if (!text) return [NSString stringWithFormat:@"(%@ not present yet)\n", label];
+    if (!text.length) return [NSString stringWithFormat:@"(%@ is empty)\n", label];
+    return text;
+}
+
+- (NSString *)fullLogText {
+    NSMutableString *out = [NSMutableString string];
+    [out appendString:@"=== Engine log ===\n"];
+    NSString *engine = [OCEngine contentsOfFileOrNote:[self engineLogPath] label:@"engine.log"];
+    [out appendString:engine];
+    if (![engine hasSuffix:@"\n"]) [out appendString:@"\n"];
+    [out appendString:@"\n=== Guest boot.log ===\n"];
+    [out appendString:[OCEngine contentsOfFileOrNote:[self guestBootLogPath] label:@"boot.log"]];
+    [out appendString:@"\n=== Guest serve.log ===\n"];
+    [out appendString:[OCEngine contentsOfFileOrNote:[self guestServeLogPath] label:@"serve.log"]];
+    return out;
+}
+
+- (double)serveProgress { return self.serveProgressValue; }
+- (nullable NSString *)serveStatus { return self.serveStatusValue; }
+
+- (void)setServeProgress:(double)progress status:(nullable NSString *)status {
+    self.serveProgressValue = progress;
+    self.serveStatusValue = status;
+    void (^cb)(double, NSString * _Nullable) = self.serveProgressDidChange;
+    if (cb) dispatch_async(dispatch_get_main_queue(), ^{ cb(progress, status); });
+}
+
+- (void)startServeProgressTimer {
+    [self.serveProgressTimer invalidate];
+    self.serveProgressTimer = nil;
+    self.serveLogLinesSeen = 0;
+    self.serveProgressDone = NO;
+    __weak typeof(self) weakSelf = self;
+    self.serveProgressTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
+        (void)timer;
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        [strongSelf pollServeLog];
+    }];
+}
+
+- (void)stopServeProgressTimer {
+    [self.serveProgressTimer invalidate];
+    self.serveProgressTimer = nil;
+}
+
+// Read the guest serve.log (exchange dir), apply the latest PROGRESS
+// line, and append any new guest lines to the in-app engine log.
+- (void)pollServeLog {
+    NSString *text = [NSString stringWithContentsOfFile:[self guestServeLogPath] encoding:NSUTF8StringEncoding error:nil];
+    if (!text) return;
+    NSArray<NSString *> *lines = [text componentsSeparatedByString:@"\n"];
+    if (lines.count > self.serveLogLinesSeen) {
+        for (NSUInteger i = self.serveLogLinesSeen; i < lines.count; i++) {
+            NSString *l = lines[i];
+            if (l.length) [self appendEngineLog:[NSString stringWithFormat:@"guest: %@", l]];
+        }
+        self.serveLogLinesSeen = lines.count;
+    }
+    for (NSInteger i = (NSInteger)lines.count - 1; i >= 0; i--) {
+        NSString *l = lines[(NSUInteger)i];
+        if ([l hasPrefix:@"PROGRESS "]) {
+            NSArray<NSString *> *parts = [l componentsSeparatedByString:@" "];
+            if (parts.count >= 3) {
+                double pct = [parts[1] doubleValue];
+                NSString *msg = [[parts subarrayWithRange:NSMakeRange(2, parts.count - 2)] componentsJoinedByString:@" "];
+                [self setServeProgress:pct / 100.0 status:msg];
+            }
+            return;
+        }
+        if ([l hasPrefix:@"ERROR "]) {
+            [self setServeProgress:self.serveProgressValue status:l];
+            return;
+        }
+    }
 }
 
 #pragma mark - First-launch setup (Debian package cache)
@@ -142,8 +287,10 @@ static NSString *const kDebianCached = @"oc.debianCached";
     NSError *finalError = error;
     if (!done && !finalError) finalError = [OCEngine setupErrorWithCode:9 message:@"Setup failed with no error reported"];
     if (done) {
+        [self appendEngineLog:@"First-launch setup done: Debian packages cached and verified"];
         [self setState:OCEngineStateInstalled];
     } else {
+        [self appendEngineLog:[NSString stringWithFormat:@"First-launch setup failed: %@", finalError.localizedDescription ?: @"unknown"]];
         [self setState:OCEngineStateError];
     }
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -267,6 +414,7 @@ static NSString *const kDebianCached = @"oc.debianCached";
     self.setupProgress = progress;
     self.setupCompletion = completion;
     self.setupIndex = 0;
+    [self appendEngineLog:@"First-launch setup started (Debian package download)"];
     [self setState:OCEngineStateInstalling];
     NSData *manifestData = [OCEngine debianManifestData];
     NSDictionary *manifest = nil;
@@ -351,16 +499,20 @@ static NSString *const kDebianCached = @"oc.debianCached";
     // not exist and behaviour is unchanged.
     if (![OCCoreGlue shared].booted) {
         [self setState:OCEngineStateStarting];
+        [self setServeProgress:0.05 status:@"Booting guest..."];
+        [self appendEngineLog:@"Guest boot started"];
         __weak typeof(self) weakSelf = self;
         [[OCCoreGlue shared] bootWithPackagePaths:[self cachedDebianPackagePaths]
                                        completion:^(BOOL ok, NSError * _Nullable error) {
             typeof(self) strongSelf = weakSelf;
             if (!strongSelf) return;
             if (!ok) {
+                [strongSelf appendEngineLog:[NSString stringWithFormat:@"Guest boot failed: %@", error.localizedDescription ?: @"unknown"]];
                 [strongSelf setState:OCEngineStateError];
                 dispatch_async(dispatch_get_main_queue(), ^{ completion(NO, error); });
                 return;
             }
+            [strongSelf appendEngineLog:@"Guest boot finished"];
             [strongSelf startServeWithCompletion:completion];
         }];
         return;
@@ -373,25 +525,40 @@ static NSString *const kDebianCached = @"oc.debianCached";
 // so the boot-on-demand path above can reuse it.
 - (void)startServeWithCompletion:(void (^)(BOOL, NSError * _Nullable))completion {
     [self setState:OCEngineStateStarting];
+    [self setServeProgress:0.05 status:@"Starting server..."];
+    [self appendEngineLog:@"Serve launch started"];
+    [self startServeProgressTimer];
     NSString *command = [self serveLaunchCommand];
     // Install Node + OpenCode once, then launch the server, inside the guest.
     // The Debian rootfs ships no Node, so the first Start downloads the
     // official Node 22 LTS arm64 binary (v22.23.5, verified live) and
-    // installs OpenCode with its npm. The install runs in a subshell so
-    // the serve still starts in $HOME/Projects.
+    // installs OpenCode with its npm. Every step writes a PROGRESS line
+    // (and any command output) to the exchange dir's serve.log, so the
+    // app can show a live progress bar and the Logs view can show
+    // exactly which step failed. The serve itself also logs there.
     NSString *bootstrap =
+        @"SLOG=/home/mobile/Downloads/serve.log; "
+        @"echo \"PROGRESS 5 Checking Node...\" > \"$SLOG\" 2>/dev/null; "
         @"if ! command -v node >/dev/null 2>&1; then "
-        @"(cd /tmp && curl -fsSL -o node.tar.xz https://nodejs.org/dist/v22.23.5/node-v22.23.5-linux-arm64.tar.xz && tar -xJf node.tar.xz -C /usr/local --strip-components=1 && rm -f node.tar.xz); fi; "
-        @"if ! command -v opencode >/dev/null 2>&1; then npm install -g opencode-ai@2.3.0; fi; ";
-    NSString *full = [bootstrap stringByAppendingString:command];
+        @"echo \"PROGRESS 10 Downloading Node 22 (25 MB)...\" >> \"$SLOG\" 2>/dev/null; "
+        @"(cd /tmp && curl -fsSL -o node.tar.xz https://nodejs.org/dist/v22.23.5/node-v22.23.5-linux-arm64.tar.xz >> \"$SLOG\" 2>&1 && echo \"PROGRESS 40 Node downloaded, extracting...\" >> \"$SLOG\" && tar -xJf node.tar.xz -C /usr/local --strip-components=1 >> \"$SLOG\" 2>&1 && rm -f node.tar.xz && echo \"PROGRESS 55 Node ready\" >> \"$SLOG\") || echo \"ERROR Node install failed (see above)\" >> \"$SLOG\"; fi; "
+        @"if ! command -v opencode >/dev/null 2>&1; then "
+        @"echo \"PROGRESS 60 Installing OpenCode...\" >> \"$SLOG\" 2>/dev/null; "
+        @"npm install -g opencode-ai@2.3.0 >> \"$SLOG\" 2>&1 && echo \"PROGRESS 85 OpenCode ready\" >> \"$SLOG\" || echo \"ERROR OpenCode install failed (see above)\" >> \"$SLOG\"; fi; "
+        @"echo \"PROGRESS 90 Starting server...\" >> \"$SLOG\" 2>/dev/null; ";
+    NSString *serveWithLog = [command stringByAppendingString:@" >> \"$SLOG\" 2>&1"];
+    NSString *full = [bootstrap stringByAppendingString:serveWithLog];
     __weak typeof(self) weakSelf = self;
     self.guestExecutor(full, @"$HOME/Projects", ^(NSString * _Nullable output, NSInteger exitCode) {
         typeof(self) strongSelf = weakSelf;
         if (!strongSelf) return;
+        // Pull the latest guest lines into the in-app log first.
+        [strongSelf pollServeLog];
         if (exitCode != 0) {
-            // Log the guest output so a failed Node/OpenCode install can
-            // be diagnosed from the app log instead of guessing.
+            [strongSelf stopServeProgressTimer];
+            [strongSelf appendEngineLog:[NSString stringWithFormat:@"Serve launch failed (exit %ld)", (long)exitCode]];
             if (output.length) NSLog(@"[OCEngine] serve launch failed, guest output: %@", output);
+            [strongSelf setServeProgress:strongSelf.serveProgressValue status:@"Serve launch failed, see Logs"];
             [strongSelf setState:OCEngineStateError];
             NSError *e = [NSError errorWithDomain:@"OCEngine" code:(NSInteger)exitCode
                                          userInfo:@{NSLocalizedDescriptionKey: @"Guest serve launch failed"}];
@@ -399,6 +566,7 @@ static NSString *const kDebianCached = @"oc.debianCached";
             return;
         }
         [strongSelf setState:OCEngineStateRunning];
+        [strongSelf setServeProgress:0.95 status:@"Waiting for server..."];
         // The Node/OpenCode install can still be running when the
         // executor acks; give the first start 5 minutes before health
         // failures can restart the engine.
@@ -411,6 +579,9 @@ static NSString *const kDebianCached = @"oc.debianCached";
 - (void)stopEngine {
     [self.healthTimer invalidate];
     self.healthTimer = nil;
+    [self stopServeProgressTimer];
+    [self setServeProgress:0 status:nil];
+    [self appendEngineLog:@"Engine stopped"];
     [self setState:OCEngineStateStopped];
 }
 
@@ -423,7 +594,16 @@ static NSString *const kDebianCached = @"oc.debianCached";
         if (!strongSelf) { [timer invalidate]; return; }
         [strongSelf checkHealthWithCompletion:^(BOOL healthy, NSDictionary * _Nullable info) {
             (void)info;
-            if (healthy) { strongSelf.healthFailures = 0; return; }
+            if (healthy) {
+                strongSelf.healthFailures = 0;
+                if (!strongSelf.serveProgressDone) {
+                    strongSelf.serveProgressDone = YES;
+                    [strongSelf setServeProgress:1.0 status:@"Engine running"];
+                    [strongSelf stopServeProgressTimer];
+                    [strongSelf appendEngineLog:@"Server healthy at 127.0.0.1:4096"];
+                }
+                return;
+            }
             // First start can still be installing Node/OpenCode; ignore
             // failures until the grace period ends.
             if (strongSelf.healthGraceUntil && [[NSDate date] compare:strongSelf.healthGraceUntil] == NSOrderedAscending) return;

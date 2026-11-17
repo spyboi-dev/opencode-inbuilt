@@ -2,6 +2,7 @@
 #import "OCEngineViewController.h"
 #import "OCEngine.h"
 #import "OCSettings.h"
+#import "OCLogViewController.h"
 
 @interface OCEngineViewController ()
 @property (nonatomic, strong) UILabel *stateLabel;
@@ -11,6 +12,7 @@
 @property (nonatomic, strong) UIButton *setupButton;
 @property (nonatomic, strong) UIButton *startButton;
 @property (nonatomic, strong) UIButton *stopButton;
+@property (nonatomic, strong) UIButton *logsButton;
 @end
 
 @implementation OCEngineViewController
@@ -32,10 +34,11 @@
     self.setupButton = [self buttonWithTitle:@"Run first-launch setup" action:@selector(setupTapped)];
     self.startButton = [self buttonWithTitle:@"Start engine" action:@selector(startTapped)];
     self.stopButton = [self buttonWithTitle:@"Stop engine" action:@selector(stopTapped)];
+    self.logsButton = [self buttonWithTitle:@"View logs" action:@selector(logsTapped)];
 
     UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[
         self.stateLabel, self.detailLabel, self.progressView, self.progressLabel,
-        self.setupButton, self.startButton, self.stopButton]];
+        self.setupButton, self.startButton, self.stopButton, self.logsButton]];
     stack.axis = UILayoutConstraintAxisVertical;
     stack.spacing = 16;
     stack.translatesAutoresizingMaskIntoConstraints = NO;
@@ -50,6 +53,27 @@
     [OCEngine shared].stateDidChange = ^(OCEngineState state) {
         (void)state;
         dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf refresh]; });
+    };
+    // Live serve progress: the guest writes PROGRESS lines to the
+    // exchange dir's serve.log and OCEngine polls them while the
+    // engine is starting. This drives the same progress bar the
+    // setup download already uses.
+    [OCEngine shared].serveProgressDidChange = ^(double progress, NSString * _Nullable status) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf) return;
+            strongSelf.progressView.hidden = NO;
+            strongSelf.progressView.progress = (float)progress;
+            if (status.length) strongSelf.progressLabel.text = status;
+            if (progress >= 1.0) {
+                // Engine running: leave the bar visible at full for a
+                // beat so the user sees it finish, then hide it.
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    strongSelf.progressView.hidden = YES;
+                    strongSelf.progressLabel.text = @"Engine running";
+                });
+            }
+        });
     };
 }
 
@@ -143,6 +167,12 @@
 }
 
 - (void)startTapped {
+    // Show the progress bar right away; the serve progress callback
+    // takes over from here (boot, Node download, OpenCode install,
+    // server start) and hides it once the engine is running.
+    self.progressView.hidden = NO;
+    self.progressView.progress = 0;
+    self.progressLabel.text = @"Starting engine...";
     [[OCEngine shared] startEngineWithCompletion:^(BOOL started, NSError *error) {
         dispatch_async(dispatch_get_main_queue(), ^{
             if (!started) {
@@ -159,6 +189,12 @@
 - (void)stopTapped {
     [[OCEngine shared] stopEngine];
     [self refresh];
+}
+
+- (void)logsTapped {
+    OCLogViewController *logs = [[OCLogViewController alloc] init];
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:logs];
+    [self presentViewController:nav animated:YES completion:nil];
 }
 
 @end
