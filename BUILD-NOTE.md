@@ -70,7 +70,9 @@ cloned at `~/workspace/opencode-ios-port/linuxrunner/`, commit
 - Runtime bridge: `app/LinuxRunner/RuntimeBridge.m` (2,278 lines).
 - Agent Mode install: `app/LinuxRunner/ModesView.swift:267` — installs
   Node.js, git, ripgrep, Python, then `npm install -g` Claude Code,
-  Codex CLI and OpenCode. This build pins `opencode-ai@2.3.0`.
+  Codex CLI and OpenCode. This build installs OpenCode 2.3.0 from the
+  official release binary (anomalyco/opencode); `opencode-ai` on npm is the
+  1.x line and has no 2.3.0, so the npm pin was wrong.
 - Localhost reachability: Liftoff (`ModesView.swift`) proves a guest
   server bound to `0.0.0.0` is reachable at iOS `localhost`; the
   serve command uses `--hostname 0.0.0.0` for exactly this reason.
@@ -187,7 +189,8 @@ link (above) is the one open item, not a hidden bug.
    every SHA-256, then marks setup done. Needs at least 1 GB free.
 3. Tap **Start engine**. The guest boots and runs
    `opencode serve --port 4096 --hostname 0.0.0.0`. First start
-   also installs Node and `opencode-ai@2.3.0` in the guest
+   also installs Node and OpenCode 2.3.0 (official release binary) in
+   the guest
    (a few more minutes, once).
 4. Sign in to a provider inside the guest (OpenCode free models
    or your own key) the first time an agent runs, then use the

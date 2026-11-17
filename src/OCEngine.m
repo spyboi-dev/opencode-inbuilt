@@ -531,8 +531,13 @@ static dispatch_queue_t OCEngineLogQueue(void) {
     NSString *command = [self serveLaunchCommand];
     // Install Node + OpenCode once, then launch the server, inside the guest.
     // The Debian rootfs ships no Node, so the first Start downloads the
-    // official Node 22 LTS arm64 binary (v22.23.5, verified live) and
-    // installs OpenCode with its npm. The .tar.gz is deliberate: the
+    // official Node 22 LTS arm64 binary (v22.23.5, verified live).
+    // OpenCode 2.3.0 is NOT on npm (opencode-ai is the 1.x line,
+    // latest 1.19.5, and has no 2.x versions), so it is installed
+    // from the official release binary instead: the repo moved
+    // sst/opencode -> anomalyco/opencode, asset
+    // opencode-linux-arm64.tar.gz (114 MB, single opencode binary).
+    // The .tar.gz is deliberate: the
     // guest has gzip but no xz binary, so tar -xJf fails with
     // "xz: Cannot exec" (seen in the 2026-11-17 device log).
     // Every step writes a PROGRESS line
@@ -546,8 +551,8 @@ static dispatch_queue_t OCEngineLogQueue(void) {
         @"echo \"PROGRESS 10 Downloading Node 22 (25 MB)...\" >> \"$SLOG\" 2>/dev/null; "
         @"(cd /tmp && curl -fsSL -o node.tar.gz https://nodejs.org/dist/v22.23.5/node-v22.23.5-linux-arm64.tar.gz >> \"$SLOG\" 2>&1 && echo \"PROGRESS 40 Node downloaded, extracting...\" >> \"$SLOG\" && tar -xzf node.tar.gz -C /usr/local --strip-components=1 >> \"$SLOG\" 2>&1 && rm -f node.tar.gz && echo \"PROGRESS 55 Node ready\" >> \"$SLOG\") || echo \"ERROR Node install failed (see above)\" >> \"$SLOG\"; fi; "
         @"if ! command -v opencode >/dev/null 2>&1; then "
-        @"echo \"PROGRESS 60 Installing OpenCode...\" >> \"$SLOG\" 2>/dev/null; "
-        @"npm install -g opencode-ai@2.3.0 >> \"$SLOG\" 2>&1 && echo \"PROGRESS 85 OpenCode ready\" >> \"$SLOG\" || echo \"ERROR OpenCode install failed (see above)\" >> \"$SLOG\"; fi; "
+        @"echo \"PROGRESS 60 Downloading OpenCode 2.3.0 (114 MB)...\" >> \"$SLOG\" 2>/dev/null; "
+        @"(cd /tmp && curl -fsSL -o opencode.tar.gz https://github.com/anomalyco/opencode/releases/download/v2.3.0/opencode-linux-arm64.tar.gz >> \"$SLOG\" 2>&1 && echo \"PROGRESS 80 OpenCode downloaded, installing...\" >> \"$SLOG\" && tar -xzf opencode.tar.gz -C /usr/local/bin opencode >> \"$SLOG\" 2>&1 && chmod +x /usr/local/bin/opencode && rm -f opencode.tar.gz && echo \"PROGRESS 85 OpenCode ready\" >> \"$SLOG\") || echo \"ERROR OpenCode install failed (see above)\" >> \"$SLOG\"; fi; "
         @"echo \"PROGRESS 90 Starting server...\" >> \"$SLOG\" 2>/dev/null; ";
     NSString *serveWithLog = [command stringByAppendingString:@" >> \"$SLOG\" 2>&1"];
     NSString *full = [bootstrap stringByAppendingString:serveWithLog];
