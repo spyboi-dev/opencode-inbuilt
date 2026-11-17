@@ -576,6 +576,20 @@ static dispatch_queue_t OCEngineLogQueue(void) {
         @"if ! command -v opencode >/dev/null 2>&1; then "
         @"echo \"PROGRESS 60 Downloading OpenCode 2.3.0 (114 MB)...\" >> \"$SLOG\" 2>/dev/null; "
         @"(cd /tmp && curl -fsSL -o opencode.tar.gz https://github.com/anomalyco/opencode/releases/download/v2.3.0/opencode-linux-arm64.tar.gz >> \"$SLOG\" 2>&1 && echo \"PROGRESS 80 OpenCode downloaded, installing...\" >> \"$SLOG\" && tar -xzf opencode.tar.gz -C /usr/local/bin opencode >> \"$SLOG\" 2>&1 && chmod +x /usr/local/bin/opencode && rm -f opencode.tar.gz && echo \"PROGRESS 85 OpenCode ready\" >> \"$SLOG\") || echo \"ERROR OpenCode install failed (see above)\" >> \"$SLOG\"; fi; "
+        // The stock Debian rootfs is missing the tools OpenCode's own
+        // tool check flags (2026-11-17 device log: git, python3, jq
+        // and rg/bun all absent). Install them once, only when any is
+        // missing, so the agent can clone repos and do git work. apt
+        // works in the guest and deb.debian.org is reachable. bun is
+        // not in Debian, so it comes from npm (Node is already
+        // installed above). A failure here is logged but never blocks
+        // the server start.
+        @"if ! command -v git >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1 || ! command -v rg >/dev/null 2>&1; then "
+        @"echo \"PROGRESS 86 Installing tools (git, python3, jq, ripgrep)...\" >> \"$SLOG\" 2>/dev/null; "
+        @"(apt-get update >> \"$SLOG\" 2>&1 && apt-get install -y git python3 jq ripgrep >> \"$SLOG\" 2>&1 && echo \"PROGRESS 88 Tools ready\" >> \"$SLOG\") || echo \"ERROR Tools install failed (see above)\" >> \"$SLOG\"; fi; "
+        @"if ! command -v bun >/dev/null 2>&1; then "
+        @"echo \"PROGRESS 88 Installing bun...\" >> \"$SLOG\" 2>/dev/null; "
+        @"(npm install -g bun >> \"$SLOG\" 2>&1 && echo \"PROGRESS 89 bun ready\" >> \"$SLOG\") || echo \"ERROR bun install failed (see above)\" >> \"$SLOG\"; fi; "
         @"echo \"PROGRESS 90 Starting server...\" >> \"$SLOG\" 2>/dev/null; ";
     NSString *serveWithLog = [command stringByAppendingString:@" >> \"$SLOG\" 2>&1"];
     NSString *full = [bootstrap stringByAppendingString:serveWithLog];

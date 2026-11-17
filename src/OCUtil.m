@@ -38,6 +38,15 @@
     UIFont *bold = [UIFont boldSystemFontOfSize:font.pointSize];
     UIFont *mono = [UIFont monospacedSystemFontOfSize:font.pointSize - 1 weight:UIFontWeightRegular];
     UIFont *hFont = [UIFont boldSystemFontOfSize:font.pointSize + 3];
+    // Every run carries an explicit foreground colour. Without it the
+    // text falls back to the label's default textColor, which is black,
+    // so in dark mode the body would be invisible; and the old inline
+    // code background (0.92 white) made white code text unreadable,
+    // the white boxes in the 2026-11-17 screenshots.
+    UIColor *fg = [UIColor labelColor];
+    UIColor *codeBG = [UIColor colorWithDynamicProvider:^UIColor * _Nonnull(UITraitCollection * _Nonnull traits) {
+        return traits.userInterfaceStyle == UIUserInterfaceStyleDark ? [UIColor colorWithRed:0x2e/255.0 green:0x2e/255.0 blue:0x2e/255.0 alpha:1.0] : [UIColor colorWithWhite:0.92 alpha:1];
+    }];
     NSArray<NSString *> *lines = [text componentsSeparatedByString:@"\n"];
     for (NSString *line in lines) {
         NSString *t = line;
@@ -54,25 +63,25 @@
             NSString *chunk = nil;
             if ([sc scanString:@"**" intoString:nil]) {
                 if ([sc scanUpToString:@"**" intoString:&chunk]) {
-                    [la appendAttributedString:[[NSAttributedString alloc] initWithString:chunk attributes:@{NSFontAttributeName: bold}]];
+                    [la appendAttributedString:[[NSAttributedString alloc] initWithString:chunk attributes:@{NSFontAttributeName: bold, NSForegroundColorAttributeName: fg}]];
                     [sc scanString:@"**" intoString:nil];
                 }
             } else if ([sc scanString:@"`" intoString:nil]) {
                 if ([sc scanUpToString:@"`" intoString:&chunk]) {
-                    [la appendAttributedString:[[NSAttributedString alloc] initWithString:chunk attributes:@{NSFontAttributeName: mono, NSBackgroundColorAttributeName: [UIColor colorWithWhite:0.92 alpha:1]}]];
+                    [la appendAttributedString:[[NSAttributedString alloc] initWithString:chunk attributes:@{NSFontAttributeName: mono, NSForegroundColorAttributeName: fg, NSBackgroundColorAttributeName: codeBG}]];
                     [sc scanString:@"`" intoString:nil];
                 }
             } else if ([sc scanUpToCharactersFromSet:[NSCharacterSet characterSetWithCharactersInString:@"*`"] intoString:&chunk]) {
-                [la appendAttributedString:[[NSAttributedString alloc] initWithString:chunk attributes:@{NSFontAttributeName: lineFont}]];
+                [la appendAttributedString:[[NSAttributedString alloc] initWithString:chunk attributes:@{NSFontAttributeName: lineFont, NSForegroundColorAttributeName: fg}]];
             } else {
                 // lone * or ` character
-                [la appendAttributedString:[[NSAttributedString alloc] initWithString:[t substringWithRange:NSMakeRange(sc.scanLocation, 1)] attributes:@{NSFontAttributeName: lineFont}]];
+                [la appendAttributedString:[[NSAttributedString alloc] initWithString:[t substringWithRange:NSMakeRange(sc.scanLocation, 1)] attributes:@{NSFontAttributeName: lineFont, NSForegroundColorAttributeName: fg}]];
                 sc.scanLocation += 1;
             }
         }
-        if (!la.length) [la appendAttributedString:[[NSAttributedString alloc] initWithString:@"" attributes:@{NSFontAttributeName: lineFont}]];
+        if (!la.length) [la appendAttributedString:[[NSAttributedString alloc] initWithString:@"" attributes:@{NSFontAttributeName: lineFont, NSForegroundColorAttributeName: fg}]];
         [out appendAttributedString:la];
-        [out appendAttributedString:[[NSAttributedString alloc] initWithString:@"\n" attributes:@{NSFontAttributeName: font}]];
+        [out appendAttributedString:[[NSAttributedString alloc] initWithString:@"\n" attributes:@{NSFontAttributeName: font, NSForegroundColorAttributeName: fg}]];
     }
     return out;
 }
@@ -110,14 +119,28 @@
 + (NSAttributedString *)attributedDiff:(NSArray<NSDictionary *> *)diff {
     NSMutableAttributedString *out = [[NSMutableAttributedString alloc] init];
     UIFont *mono = [UIFont monospacedSystemFontOfSize:13 weight:UIFontWeightRegular];
+    UIColor *fg = [UIColor labelColor];
     for (NSDictionary *d in diff) {
         NSString *type = d[@"type"];
-        UIColor *bg = [UIColor whiteColor];
+        // Dark mode gets dark tints, light mode the old pastels, so
+        // the text stays readable in both.
+        UIColor *bg = [UIColor colorWithDynamicProvider:^UIColor * _Nonnull(UITraitCollection * _Nonnull traits) {
+            return traits.userInterfaceStyle == UIUserInterfaceStyleDark ? [UIColor colorWithRed:0x1c/255.0 green:0x1c/255.0 blue:0x1c/255.0 alpha:1.0] : [UIColor whiteColor];
+        }];
         NSString *prefix = @"  ";
-        if ([type isEqualToString:@"add"]) { bg = [UIColor colorWithRed:0.85 green:0.97 blue:0.86 alpha:1]; prefix = @"+ "; }
-        else if ([type isEqualToString:@"del"]) { bg = [UIColor colorWithRed:0.99 green:0.88 blue:0.88 alpha:1]; prefix = @"- "; }
+        if ([type isEqualToString:@"add"]) {
+            bg = [UIColor colorWithDynamicProvider:^UIColor * _Nonnull(UITraitCollection * _Nonnull traits) {
+                return traits.userInterfaceStyle == UIUserInterfaceStyleDark ? [UIColor colorWithRed:0x14/255.0 green:0x33/255.0 blue:0x1e/255.0 alpha:1.0] : [UIColor colorWithRed:0.85 green:0.97 blue:0.86 alpha:1];
+            }];
+            prefix = @"+ ";
+        } else if ([type isEqualToString:@"del"]) {
+            bg = [UIColor colorWithDynamicProvider:^UIColor * _Nonnull(UITraitCollection * _Nonnull traits) {
+                return traits.userInterfaceStyle == UIUserInterfaceStyleDark ? [UIColor colorWithRed:0x3d/255.0 green:0x1a/255.0 blue:0x1a/255.0 alpha:1.0] : [UIColor colorWithRed:0.99 green:0.88 blue:0.88 alpha:1];
+            }];
+            prefix = @"- ";
+        }
         NSString *line = [prefix stringByAppendingString:[d[@"text"] stringByAppendingString:@"\n"]];
-        [out appendAttributedString:[[NSAttributedString alloc] initWithString:line attributes:@{NSFontAttributeName: mono, NSBackgroundColorAttributeName: bg}]];
+        [out appendAttributedString:[[NSAttributedString alloc] initWithString:line attributes:@{NSFontAttributeName: mono, NSForegroundColorAttributeName: fg, NSBackgroundColorAttributeName: bg}]];
     }
     return out;
 }
