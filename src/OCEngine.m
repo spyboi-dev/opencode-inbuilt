@@ -532,7 +532,10 @@ static dispatch_queue_t OCEngineLogQueue(void) {
     // Install Node + OpenCode once, then launch the server, inside the guest.
     // The Debian rootfs ships no Node, so the first Start downloads the
     // official Node 22 LTS arm64 binary (v22.23.5, verified live) and
-    // installs OpenCode with its npm. Every step writes a PROGRESS line
+    // installs OpenCode with its npm. The .tar.gz is deliberate: the
+    // guest has gzip but no xz binary, so tar -xJf fails with
+    // "xz: Cannot exec" (seen in the 2026-11-17 device log).
+    // Every step writes a PROGRESS line
     // (and any command output) to the exchange dir's serve.log, so the
     // app can show a live progress bar and the Logs view can show
     // exactly which step failed. The serve itself also logs there.
@@ -541,7 +544,7 @@ static dispatch_queue_t OCEngineLogQueue(void) {
         @"echo \"PROGRESS 5 Checking Node...\" > \"$SLOG\" 2>/dev/null; "
         @"if ! command -v node >/dev/null 2>&1; then "
         @"echo \"PROGRESS 10 Downloading Node 22 (25 MB)...\" >> \"$SLOG\" 2>/dev/null; "
-        @"(cd /tmp && curl -fsSL -o node.tar.xz https://nodejs.org/dist/v22.23.5/node-v22.23.5-linux-arm64.tar.xz >> \"$SLOG\" 2>&1 && echo \"PROGRESS 40 Node downloaded, extracting...\" >> \"$SLOG\" && tar -xJf node.tar.xz -C /usr/local --strip-components=1 >> \"$SLOG\" 2>&1 && rm -f node.tar.xz && echo \"PROGRESS 55 Node ready\" >> \"$SLOG\") || echo \"ERROR Node install failed (see above)\" >> \"$SLOG\"; fi; "
+        @"(cd /tmp && curl -fsSL -o node.tar.gz https://nodejs.org/dist/v22.23.5/node-v22.23.5-linux-arm64.tar.gz >> \"$SLOG\" 2>&1 && echo \"PROGRESS 40 Node downloaded, extracting...\" >> \"$SLOG\" && tar -xzf node.tar.gz -C /usr/local --strip-components=1 >> \"$SLOG\" 2>&1 && rm -f node.tar.gz && echo \"PROGRESS 55 Node ready\" >> \"$SLOG\") || echo \"ERROR Node install failed (see above)\" >> \"$SLOG\"; fi; "
         @"if ! command -v opencode >/dev/null 2>&1; then "
         @"echo \"PROGRESS 60 Installing OpenCode...\" >> \"$SLOG\" 2>/dev/null; "
         @"npm install -g opencode-ai@2.3.0 >> \"$SLOG\" 2>&1 && echo \"PROGRESS 85 OpenCode ready\" >> \"$SLOG\" || echo \"ERROR OpenCode install failed (see above)\" >> \"$SLOG\"; fi; "
