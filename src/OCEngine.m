@@ -84,6 +84,11 @@ static NSString *const kDebianCached = @"oc.debianCached";
 }
 
 - (void)refreshState {
+    // Do not clobber a live engine: viewWillAppear calls this every
+    // time the Engine tab is shown, and it was resetting a Running
+    // engine back to "Installed, guest stopped" while the server
+    // was up. The flags on disk only describe install state.
+    if (self.state == OCEngineStateRunning || self.state == OCEngineStateStarting) return;
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
     if (![d boolForKey:kEngineInstalled]) { [self setState:OCEngineStateNotInstalled]; return; }
     if (![d boolForKey:kDebianCached]) { [self setState:OCEngineStateNotInstalled]; return; }
@@ -213,14 +218,32 @@ static dispatch_queue_t OCEngineLogQueue(void) {
         }
         self.serveLogLinesSeen = lines.count;
     }
+    // The server prints "server listening on ..." when it is up.
+    // That is the definitive start signal: complete the bar and the
+    // state even if the HTTP health check has not confirmed it yet.
+    if ([text containsString:@"server listening"]) {
+        if (!self.serveProgressDone) {
+            self.serveProgressDone = YES;
+            [self setServeProgress:1.0 status:@"Engine running"];
+            [self stopServeProgressTimer];
+            [self appendEngineLog:@"Server listening (from guest serve.log)"];
+            if (self.state != OCEngineStateRunning) [self setState:OCEngineStateRunning];
+        }
+        return;
+    }
     for (NSInteger i = (NSInteger)lines.count - 1; i >= 0; i--) {
         NSString *l = lines[(NSUInteger)i];
         if ([l hasPrefix:@"PROGRESS "]) {
             NSArray<NSString *> *parts = [l componentsSeparatedByString:@" "];
             if (parts.count >= 3) {
-                double pct = [parts[1] doubleValue];
-                NSString *msg = [[parts subarrayWithRange:NSMakeRange(2, parts.count - 2)] componentsJoinedByString:@" "];
-                [self setServeProgress:pct / 100.0 status:msg];
+                double pct = [parts[1] doubleValue] / 100.0;
+                // Progress only moves forward: the executor already
+                // set 0.95 once the serve launched, and a stale
+                // PROGRESS 90 line must not pull it back down.
+                if (pct > self.serveProgressValue) {
+                    NSString *msg = [[parts subarrayWithRange:NSMakeRange(2, parts.count - 2)] componentsJoinedByString:@" "];
+                    [self setServeProgress:pct status:msg];
+                }
             }
             return;
         }

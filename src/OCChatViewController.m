@@ -8,6 +8,7 @@
 @property (nonatomic, strong) NSDictionary *session;
 @property (nonatomic, strong) UITableView *tableView;
 @property (nonatomic, strong) UITextView *composer;
+@property (nonatomic, strong) NSLayoutConstraint *composerHeightConstraint;
 @property (nonatomic, strong) UIButton *sendButton;
 @property (nonatomic, strong) UIButton *stopButton;
 @property (nonatomic, strong) NSLayoutConstraint *composerBottomConstraint;
@@ -68,6 +69,12 @@
     self.composer.backgroundColor = [UIColor systemBackgroundColor];
     self.composer.delegate = self;
     self.composer.translatesAutoresizingMaskIntoConstraints = NO;
+    // A UITextView has no intrinsic height when scrolling is on, so
+    // without an explicit height the composer bar's height was
+    // ambiguous (only >= 52) and Auto Layout stretched it to fill
+    // the screen. Pin it to one line; textViewDidChange grows it.
+    self.composerHeightConstraint = [self.composer.heightAnchor constraintEqualToConstant:36];
+    self.composerHeightConstraint.active = YES;
     [composerBar addSubview:self.composer];
 
     self.sendButton = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -127,6 +134,19 @@
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [self.pollTimer invalidate];
+}
+
+- (void)textViewDidChange:(UITextView *)textView {
+    // Grow the composer with the text, up to five lines, so long
+    // messages stay usable without the bar taking the screen.
+    CGFloat width = textView.frame.size.width;
+    if (width <= 0) return;
+    CGSize fit = [textView sizeThatFits:CGSizeMake(width, CGFLOAT_MAX)];
+    CGFloat height = MIN(MAX(fit.height, 36), 120);
+    if (fabs(self.composerHeightConstraint.constant - height) > 0.5) {
+        self.composerHeightConstraint.constant = height;
+        [self.view layoutIfNeeded];
+    }
 }
 
 #pragma mark - Keyboard
