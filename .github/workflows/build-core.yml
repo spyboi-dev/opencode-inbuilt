@@ -97,7 +97,7 @@ jobs:
         run: |
           xcodebuild -list -project linuxrunner/deps/libarchive.xcodeproj
           xcodebuild -project linuxrunner/deps/libarchive.xcodeproj \
-            -target libarchive -sdk iphoneos -configuration Release \
+            -scheme libarchive -sdk iphoneos -configuration Release \
             -derivedDataPath libarchive-dd CODE_SIGNING_ALLOWED=NO
           mkdir -p libarchive-build
           cp "$(find libarchive-dd -name libarchive.a | head -1)" libarchive-build/libarchive.a
