@@ -4,6 +4,7 @@
 NS_ASSUME_NONNULL_BEGIN
 
 @interface OCFilesViewController : UIViewController
+- (void)reload;
 @end
 
 NS_ASSUME_NONNULL_END

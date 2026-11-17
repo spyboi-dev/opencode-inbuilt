@@ -1,9 +1,9 @@
-// AppDelegate - tab bar: Sessions, Files, Engine, Settings.
+// AppDelegate - FreeMilk's two home tabs: Threads and Integrations.
+// The chat opens over them; Files lives inside the chat (Chat/Files
+// switch) and the Engine and Settings screens live in Integrations.
 #import "AppDelegate.h"
 #import "OCSessionsViewController.h"
-#import "OCFilesViewController.h"
-#import "OCEngineViewController.h"
-#import "OCSettingsViewController.h"
+#import "OCIntegrationsViewController.h"
 #import "OCEngine.h"
 
 #ifdef OC_CORE_LINKED
@@ -17,22 +17,14 @@
 
     OCSessionsViewController *sessions = [[OCSessionsViewController alloc] init];
     UINavigationController *sessionsNav = [[UINavigationController alloc] initWithRootViewController:sessions];
-    sessionsNav.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"Sessions" image:[UIImage systemImageNamed:@"bubble.left.and.bubble.right"] tag:0];
+    sessionsNav.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"Threads" image:[UIImage systemImageNamed:@"bubble.left.and.bubble.right"] tag:0];
 
-    OCFilesViewController *files = [[OCFilesViewController alloc] init];
-    UINavigationController *filesNav = [[UINavigationController alloc] initWithRootViewController:files];
-    filesNav.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"Files" image:[UIImage systemImageNamed:@"folder"] tag:1];
-
-    OCEngineViewController *engine = [[OCEngineViewController alloc] init];
-    UINavigationController *engineNav = [[UINavigationController alloc] initWithRootViewController:engine];
-    engineNav.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"Engine" image:[UIImage systemImageNamed:@"cpu"] tag:2];
-
-    OCSettingsViewController *settings = [[OCSettingsViewController alloc] init];
-    UINavigationController *settingsNav = [[UINavigationController alloc] initWithRootViewController:settings];
-    settingsNav.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"Settings" image:[UIImage systemImageNamed:@"gear"] tag:3];
+    OCIntegrationsViewController *integrations = [[OCIntegrationsViewController alloc] init];
+    UINavigationController *integrationsNav = [[UINavigationController alloc] initWithRootViewController:integrations];
+    integrationsNav.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"Integrations" image:[UIImage systemImageNamed:@"square.grid.2x2"] tag:1];
 
     UITabBarController *tabs = [[UITabBarController alloc] init];
-    tabs.viewControllers = @[sessionsNav, filesNav, engineNav, settingsNav];
+    tabs.viewControllers = @[sessionsNav, integrationsNav];
     self.window.rootViewController = tabs;
     [self.window makeKeyAndVisible];
 

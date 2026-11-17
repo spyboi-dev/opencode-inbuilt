@@ -1,17 +1,33 @@
 // OCChatViewController - chat thread for one OpenCode session.
-// Looks like the Claude iOS app: a full-screen chat with no nav bar
-// and no tab bar, a glass hamburger and ghost avatar up top, and an
-// empty state with a coral starburst, a serif greeting and a model
-// pill over a big rounded composer card. Messages themselves follow
-// OpenCode's own session-ui model (user bubbles, plain assistant
-// markdown, collapsible Thinking cards, 28px tool rows, Shell
-// command + result cards). Colours are Claude's dark tokens: near
-// black #1a1a1a background, #2a2a2a card, coral #d97757, cream
-// #f5f0e8 greeting.
+// Follows FreeMilk's chat layout: a glass toolbar with a back
+// chevron, the Chat/Files switch, a Run button and a globe for the
+// in-app browser; Files lives inside the chat as an embedded file
+// browser; a bar above the composer counts uncommitted changes and
+// opens the diff; the composer is a big rounded card over a Liquid
+// Glass blur, with rounded system type throughout. Messages
+// themselves follow OpenCode's own session-ui model (user bubbles,
+// plain assistant markdown, collapsible Thinking cards, 28px tool
+// rows, Shell command + result cards). FreeMilk's roadmap, milk
+// bottle mascot, flavours and sips are not copied: the roadmap has
+// no OpenCode equivalent, and the mascot/flavours/sips are
+// FreeMilk's own branding and currency.
 #import "OCChatViewController.h"
 #import "OCServerClient.h"
 #import "OCSettings.h"
 #import "OCUtil.h"
+#import "OCFilesViewController.h"
+#import "OCBrowserViewController.h"
+
+// FreeMilk's rounded system font for the chrome (toolbar, bar,
+// composer). Takes the system font at the given size and weight and
+// swaps its design to rounded, so the UI reads like FreeMilk's
+// rounded system type.
+static UIFont *OCRoundedFont(CGFloat size, UIFontWeight weight) {
+    UIFont *base = [UIFont systemFontOfSize:size weight:weight];
+    UIFontDescriptor *desc = [[base fontDescriptor] fontDescriptorWithDesign:UIFontDescriptorSystemDesignRounded];
+    UIFont *font = [UIFont fontWithDescriptor:desc size:size];
+    return font ?: base;
+}
 
 static UIColor *OCLayer01(void) {
     return [UIColor colorWithDynamicProvider:^UIColor * _Nonnull(UITraitCollection * _Nonnull traits) {
@@ -47,47 +63,9 @@ static UIColor *OCClaudeBackground(void) {
         return traits.userInterfaceStyle == UIUserInterfaceStyleDark ? [UIColor colorWithRed:0x1a/255.0 green:0x1a/255.0 blue:0x1a/255.0 alpha:1.0] : [UIColor systemBackgroundColor];
     }];
 }
-static UIColor *OCClaudeCard(void) {
-    return [UIColor colorWithDynamicProvider:^UIColor * _Nonnull(UITraitCollection * _Nonnull traits) {
-        return traits.userInterfaceStyle == UIUserInterfaceStyleDark ? [UIColor colorWithRed:0x2a/255.0 green:0x2a/255.0 blue:0x2a/255.0 alpha:1.0] : [UIColor systemGray5Color];
-    }];
-}
-static UIColor *OCClaudeCoral(void) {
-    return [UIColor colorWithRed:0xd9/255.0 green:0x77/255.0 blue:0x57/255.0 alpha:1.0];
-}
-static UIColor *OCClaudeCream(void) {
-    return [UIColor colorWithDynamicProvider:^UIColor * _Nonnull(UITraitCollection * _Nonnull traits) {
-        return traits.userInterfaceStyle == UIUserInterfaceStyleDark ? [UIColor colorWithRed:0xf5/255.0 green:0xf0/255.0 blue:0xe8/255.0 alpha:1.0] : [UIColor labelColor];
-    }];
-}
 static UIColor *OCClaudeGlass(void) {
     return [UIColor colorWithWhite:1.0 alpha:0.08];
 }
-
-// The coral starburst mark, drawn as radiating strokes like the
-// Claude asterisk. One view, no image asset needed.
-@interface OCStarburstView : UIView
-@end
-@implementation OCStarburstView
-- (void)drawRect:(CGRect)rect {
-    CGContextRef ctx = UIGraphicsGetCurrentContext();
-    CGContextSetStrokeColorWithColor(ctx, [OCClaudeCoral() CGColor]);
-    CGContextSetLineWidth(ctx, 3.0);
-    CGContextSetLineCap(ctx, kCGLineCapRound);
-    CGPoint c = CGPointMake(CGRectGetMidX(rect), CGRectGetMidY(rect));
-    CGFloat r = MIN(rect.size.width, rect.size.height) / 2.0;
-    // 8 spokes, alternating long and short, with a slight rotation
-    // so it reads as a starburst rather than a plain asterisk.
-    for (int i = 0; i < 8; i++) {
-        CGFloat angle = (M_PI / 4.0) * i + M_PI / 8.0;
-        CGFloat len = (i % 2 == 0) ? r : r * 0.62;
-        CGPoint p = CGPointMake(c.x + cos(angle) * len, c.y + sin(angle) * len);
-        CGContextMoveToPoint(ctx, c.x, c.y);
-        CGContextAddLineToPoint(ctx, p.x, p.y);
-    }
-    CGContextStrokePath(ctx);
-}
-@end
 
 @interface OCChatViewController () <UITableViewDataSource, UITableViewDelegate, OCServerEventDelegate, UITextViewDelegate>
 @property (nonatomic, strong) NSDictionary *session;
@@ -99,14 +77,21 @@ static UIColor *OCClaudeGlass(void) {
 @property (nonatomic, strong) UIButton *modelChipButton;
 @property (nonatomic, strong) UIButton *sendButton;
 @property (nonatomic, strong) NSLayoutConstraint *composerBottomConstraint;
-// Claude chrome: glass top bar, empty-state hero, composer extras.
+// Claude chrome: glass top bar, composer extras.
+@property (nonatomic, strong) UIVisualEffectView *toolbarGlass;
 @property (nonatomic, strong) UIView *topBar;
 @property (nonatomic, strong) UIButton *menuButton;
-@property (nonatomic, strong) UIButton *avatarButton;
-@property (nonatomic, strong) UIView *heroView;
-@property (nonatomic, strong) UIButton *heroPillButton;
 @property (nonatomic, strong) UIButton *plusButton;
 @property (nonatomic, strong) UIButton *micButton;
+// FreeMilk toolbar: Chat/Files switch, Run, globe. Files mode is an
+// embedded file browser; the uncommitted bar sits above the composer.
+@property (nonatomic, strong) UISegmentedControl *modeSegment;
+@property (nonatomic, strong) UIButton *runButton;
+@property (nonatomic, strong) UIButton *globeButton;
+@property (nonatomic, strong) OCFilesViewController *filesChild;
+@property (nonatomic, strong) UIButton *uncommittedBar;
+@property (nonatomic, strong) NSLayoutConstraint *uncommittedHeightConstraint;
+@property (nonatomic, assign) NSInteger diffCount;
 @property (nonatomic, strong) NSArray *displayItems; // @{kind, role, text, detail, output, state, model, duration, key}
 @property (nonatomic, strong) OCServerClient *client;
 @property (nonatomic, strong, nullable) NSTimer *pollTimer;
@@ -190,21 +175,37 @@ static UIColor *OCClaudeGlass(void) {
     [super viewDidLoad];
     self.view.backgroundColor = OCClaudeBackground();
 
-    // Claude has no nav bar and no title on the chat screen. A glass
-    // hamburger (back to sessions) and a ghost avatar (settings) sit
-    // in circular glass buttons at the top. The nav bar itself is
-    // hidden in viewWillAppear and restored in viewWillDisappear.
-    self.topBar = [[UIView alloc] init];
-    self.topBar.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.view addSubview:self.topBar];
+    // FreeMilk's chat toolbar: a glass bar with a back chevron, the
+    // Chat/Files switch, a Run button and a globe for the in-app
+    // browser. The nav bar itself is hidden in viewWillAppear and
+    // restored in viewWillDisappear.
+    UIVisualEffectView *toolbarGlass = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial]];
+    toolbarGlass.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:toolbarGlass];
+    self.toolbarGlass = toolbarGlass;
+    self.topBar = toolbarGlass.contentView;
 
-    self.menuButton = [self glassCircleButtonWithImage:@"line.horizontal.3" diameter:44];
+    self.menuButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [self.menuButton setImage:[[UIImage systemImageNamed:@"chevron.left"] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate] forState:UIControlStateNormal];
+    self.menuButton.tintColor = OCTextBase();
+    self.menuButton.translatesAutoresizingMaskIntoConstraints = NO;
     [self.menuButton addTarget:self action:@selector(menuTapped) forControlEvents:UIControlEventTouchUpInside];
     [self.topBar addSubview:self.menuButton];
 
-    self.avatarButton = [self glassCircleButtonWithImage:@"person.crop.circle.fill" diameter:44];
-    [self.avatarButton addTarget:self action:@selector(avatarTapped) forControlEvents:UIControlEventTouchUpInside];
-    [self.topBar addSubview:self.avatarButton];
+    self.modeSegment = [[UISegmentedControl alloc] initWithItems:@[@"Chat", @"Files"]];
+    self.modeSegment.selectedSegmentIndex = 0;
+    [self.modeSegment setTitleTextAttributes:@{NSFontAttributeName: OCRoundedFont(14, UIFontWeightSemibold)} forState:UIControlStateNormal];
+    self.modeSegment.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.modeSegment addTarget:self action:@selector(modeChanged) forControlEvents:UIControlEventValueChanged];
+    [self.topBar addSubview:self.modeSegment];
+
+    self.runButton = [self glassCircleButtonWithImage:@"play.fill" diameter:36];
+    [self.runButton addTarget:self action:@selector(runTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.topBar addSubview:self.runButton];
+
+    self.globeButton = [self glassCircleButtonWithImage:@"globe" diameter:36];
+    [self.globeButton addTarget:self action:@selector(globeTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.topBar addSubview:self.globeButton];
 
     // The timeline.
     self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
@@ -217,50 +218,55 @@ static UIColor *OCClaudeGlass(void) {
     self.tableView.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:self.tableView];
 
-    // Empty-state hero, Claude style: coral starburst, serif
-    // greeting, model pill. Shown only while there are no messages.
-    self.heroView = [[UIView alloc] init];
-    self.heroView.translatesAutoresizingMaskIntoConstraints = NO;
-    self.heroView.hidden = YES;
-    [self.view addSubview:self.heroView];
+    // Files mode: the guest file browser, embedded as a child view
+    // controller and swapped with the timeline by the Chat/Files
+    // switch. FreeMilk keeps Files inside the chat, not as a tab.
+    self.filesChild = [[OCFilesViewController alloc] init];
+    [self addChildViewController:self.filesChild];
+    self.filesChild.view.translatesAutoresizingMaskIntoConstraints = NO;
+    self.filesChild.view.hidden = YES;
+    [self.view addSubview:self.filesChild.view];
+    [self.filesChild didMoveToParentViewController:self];
 
-    OCStarburstView *starburst = [[OCStarburstView alloc] init];
-    starburst.backgroundColor = [UIColor clearColor];
-    starburst.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.heroView addSubview:starburst];
+    // Uncommitted-changes bar, FreeMilk style: a bar above the
+    // composer counting the session's uncommitted changes; tapping it
+    // opens the diff. Hidden while the session is clean.
+    self.uncommittedBar = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.uncommittedBar.backgroundColor = OCLayer01();
+    self.uncommittedBar.layer.cornerRadius = 12;
+    self.uncommittedBar.contentEdgeInsets = UIEdgeInsetsMake(10, 14, 10, 14);
+    self.uncommittedBar.titleLabel.font = OCRoundedFont(14, UIFontWeightMedium);
+    [self.uncommittedBar setTitleColor:OCTextBase() forState:UIControlStateNormal];
+    self.uncommittedBar.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
+    self.uncommittedBar.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.uncommittedBar addTarget:self action:@selector(showDiff) forControlEvents:UIControlEventTouchUpInside];
+    self.uncommittedBar.hidden = YES;
+    [self.view addSubview:self.uncommittedBar];
 
-    UILabel *greeting = [[UILabel alloc] init];
-    greeting.text = @"What are we building?";
-    UIFont *serif = [UIFont fontWithName:@"Georgia" size:32];
-    greeting.font = serif ?: [UIFont systemFontOfSize:32 weight:UIFontWeightSemibold];
-    greeting.textColor = OCClaudeCream();
-    greeting.textAlignment = NSTextAlignmentCenter;
-    greeting.numberOfLines = 0;
-    greeting.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.heroView addSubview:greeting];
-
-    self.heroPillButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    [self.heroPillButton setTitle:[self modelPillTitle] forState:UIControlStateNormal];
-    self.heroPillButton.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
-    [self.heroPillButton setTitleColor:OCTextBase() forState:UIControlStateNormal];
-    self.heroPillButton.backgroundColor = OCLayer02();
-    self.heroPillButton.layer.cornerRadius = 18;
-    self.heroPillButton.contentEdgeInsets = UIEdgeInsetsMake(10, 18, 10, 18);
-    self.heroPillButton.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.heroPillButton addTarget:self action:@selector(pickModel) forControlEvents:UIControlEventTouchUpInside];
-    [self.heroView addSubview:self.heroPillButton];
-
-    // Composer: Claude's big rounded card (28px radius). The text
-    // area sits on top; the bottom row holds a plus circle, the
-    // model pill, a mic circle and the white voice/send circle.
+    // Composer: FreeMilk's big rounded card (28px radius) over a
+    // Liquid Glass blur. The text area sits on top; the bottom row
+    // holds a plus circle, the model pill, a mic circle and the white
+    // voice/send circle.
     self.composerCard = [[UIView alloc] init];
-    self.composerCard.backgroundColor = OCClaudeCard();
+    self.composerCard.backgroundColor = [UIColor clearColor];
     self.composerCard.layer.cornerRadius = 28;
+    self.composerCard.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.12].CGColor;
+    self.composerCard.layer.borderWidth = 0.5;
+    self.composerCard.clipsToBounds = YES;
     self.composerCard.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:self.composerCard];
+    UIVisualEffectView *composerGlass = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial]];
+    composerGlass.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.composerCard addSubview:composerGlass];
+    [NSLayoutConstraint activateConstraints:@[
+        [composerGlass.topAnchor constraintEqualToAnchor:self.composerCard.topAnchor],
+        [composerGlass.leadingAnchor constraintEqualToAnchor:self.composerCard.leadingAnchor],
+        [composerGlass.trailingAnchor constraintEqualToAnchor:self.composerCard.trailingAnchor],
+        [composerGlass.bottomAnchor constraintEqualToAnchor:self.composerCard.bottomAnchor],
+    ]];
 
     self.composer = [[UITextView alloc] init];
-    self.composer.font = [UIFont systemFontOfSize:16];
+    self.composer.font = OCRoundedFont(16, UIFontWeightRegular);
     self.composer.backgroundColor = [UIColor clearColor];
     self.composer.textColor = OCTextBase();
     self.composer.delegate = self;
@@ -271,7 +277,7 @@ static UIColor *OCClaudeGlass(void) {
 
     self.composerPlaceholder = [[UILabel alloc] init];
     self.composerPlaceholder.text = @"Chat with OpenCode";
-    self.composerPlaceholder.font = [UIFont systemFontOfSize:16];
+    self.composerPlaceholder.font = OCRoundedFont(16, UIFontWeightRegular);
     self.composerPlaceholder.textColor = OCTextFaint();
     self.composerPlaceholder.translatesAutoresizingMaskIntoConstraints = NO;
     [self.composerCard addSubview:self.composerPlaceholder];
@@ -282,7 +288,7 @@ static UIColor *OCClaudeGlass(void) {
 
     self.modelChipButton = [UIButton buttonWithType:UIButtonTypeSystem];
     [self.modelChipButton setTitle:[self modelPillTitle] forState:UIControlStateNormal];
-    self.modelChipButton.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
+    self.modelChipButton.titleLabel.font = OCRoundedFont(14, UIFontWeightMedium);
     [self.modelChipButton setTitleColor:OCTextBase() forState:UIControlStateNormal];
     self.modelChipButton.backgroundColor = OCClaudeGlass();
     self.modelChipButton.layer.cornerRadius = 18;
@@ -304,37 +310,49 @@ static UIColor *OCClaudeGlass(void) {
     [self updateSendButton];
 
     self.composerBottomConstraint = [self.composerCard.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-8];
+    // The uncommitted bar sits between the content and the composer;
+    // the table and files views end at whichever is visible above it.
+    NSLayoutConstraint *tableBottom = [self.tableView.bottomAnchor constraintEqualToAnchor:self.uncommittedBar.topAnchor constant:-8];
+    NSLayoutConstraint *filesBottom = [self.filesChild.view.bottomAnchor constraintEqualToAnchor:self.uncommittedBar.topAnchor constant:-8];
+    NSLayoutConstraint *composerTop = [self.uncommittedBar.bottomAnchor constraintEqualToAnchor:self.composerCard.topAnchor constant:-8];
+    // When the bar is hidden it still occupies its height, so the
+    // content ends at the composer with a fixed 12pt gap instead.
+    // The bar's height constraint collapses it when hidden.
+    NSLayoutConstraint *uncommittedHeight = [self.uncommittedBar.heightAnchor constraintEqualToConstant:40];
+    self.uncommittedHeightConstraint = uncommittedHeight;
     [NSLayoutConstraint activateConstraints:@[
-        [self.topBar.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
-        [self.topBar.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
-        [self.topBar.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-        [self.topBar.heightAnchor constraintEqualToConstant:56],
-        [self.menuButton.leadingAnchor constraintEqualToAnchor:self.topBar.leadingAnchor constant:16],
+        [self.toolbarGlass.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
+        [self.toolbarGlass.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [self.toolbarGlass.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [self.toolbarGlass.heightAnchor constraintEqualToConstant:56],
+        [self.menuButton.leadingAnchor constraintEqualToAnchor:self.topBar.leadingAnchor constant:8],
         [self.menuButton.centerYAnchor constraintEqualToAnchor:self.topBar.centerYAnchor],
-        [self.menuButton.widthAnchor constraintEqualToConstant:44],
-        [self.menuButton.heightAnchor constraintEqualToConstant:44],
-        [self.avatarButton.trailingAnchor constraintEqualToAnchor:self.topBar.trailingAnchor constant:-16],
-        [self.avatarButton.centerYAnchor constraintEqualToAnchor:self.topBar.centerYAnchor],
-        [self.avatarButton.widthAnchor constraintEqualToConstant:44],
-        [self.avatarButton.heightAnchor constraintEqualToConstant:44],
-        [self.tableView.topAnchor constraintEqualToAnchor:self.topBar.bottomAnchor],
+        [self.menuButton.widthAnchor constraintEqualToConstant:36],
+        [self.menuButton.heightAnchor constraintEqualToConstant:36],
+        [self.modeSegment.leadingAnchor constraintEqualToAnchor:self.menuButton.trailingAnchor constant:8],
+        [self.modeSegment.centerYAnchor constraintEqualToAnchor:self.topBar.centerYAnchor],
+        [self.modeSegment.heightAnchor constraintEqualToConstant:32],
+        [self.modeSegment.trailingAnchor constraintEqualToAnchor:self.runButton.leadingAnchor constant:-8],
+        [self.runButton.trailingAnchor constraintEqualToAnchor:self.globeButton.leadingAnchor constant:-8],
+        [self.runButton.centerYAnchor constraintEqualToAnchor:self.topBar.centerYAnchor],
+        [self.runButton.widthAnchor constraintEqualToConstant:36],
+        [self.runButton.heightAnchor constraintEqualToConstant:36],
+        [self.globeButton.trailingAnchor constraintEqualToAnchor:self.topBar.trailingAnchor constant:-12],
+        [self.globeButton.centerYAnchor constraintEqualToAnchor:self.topBar.centerYAnchor],
+        [self.globeButton.widthAnchor constraintEqualToConstant:36],
+        [self.globeButton.heightAnchor constraintEqualToConstant:36],
+        [self.tableView.topAnchor constraintEqualToAnchor:self.toolbarGlass.bottomAnchor],
         [self.tableView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [self.tableView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-        [self.tableView.bottomAnchor constraintEqualToAnchor:self.composerCard.topAnchor constant:-12],
-        [self.heroView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:24],
-        [self.heroView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-24],
-        [self.heroView.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor constant:-60],
-        [starburst.topAnchor constraintEqualToAnchor:self.heroView.topAnchor],
-        [starburst.centerXAnchor constraintEqualToAnchor:self.heroView.centerXAnchor],
-        [starburst.widthAnchor constraintEqualToConstant:64],
-        [starburst.heightAnchor constraintEqualToConstant:64],
-        [greeting.topAnchor constraintEqualToAnchor:starburst.bottomAnchor constant:20],
-        [greeting.leadingAnchor constraintEqualToAnchor:self.heroView.leadingAnchor],
-        [greeting.trailingAnchor constraintEqualToAnchor:self.heroView.trailingAnchor],
-        [self.heroPillButton.topAnchor constraintEqualToAnchor:greeting.bottomAnchor constant:24],
-        [self.heroPillButton.centerXAnchor constraintEqualToAnchor:self.heroView.centerXAnchor],
-        [self.heroPillButton.heightAnchor constraintEqualToConstant:36],
-        [self.heroPillButton.bottomAnchor constraintEqualToAnchor:self.heroView.bottomAnchor],
+        tableBottom,
+        [self.filesChild.view.topAnchor constraintEqualToAnchor:self.toolbarGlass.bottomAnchor],
+        [self.filesChild.view.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [self.filesChild.view.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        filesBottom,
+        [self.uncommittedBar.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:12],
+        [self.uncommittedBar.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-12],
+        composerTop,
+        uncommittedHeight,
         [self.composerCard.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:12],
         [self.composerCard.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-12],
         self.composerBottomConstraint,
@@ -375,7 +393,7 @@ static UIColor *OCClaudeGlass(void) {
     [self.navigationController setNavigationBarHidden:YES animated:animated];
     self.serverClient.eventDelegate = self;
     [self.serverClient startEventStream];
-    [self updateHeroVisibility];
+    [self updateUncommittedBar];
     [self reloadMessages];
     [self checkPermissions];
 }
@@ -432,11 +450,6 @@ static UIColor *OCClaudeGlass(void) {
     [self.navigationController popViewControllerAnimated:YES];
 }
 
-- (void)avatarTapped {
-    // The ghost avatar opens Settings (tab 3).
-    self.tabBarController.selectedIndex = 3;
-}
-
 - (void)micTapped {
     // The keyboard already offers dictation; bring it up.
     [self.composer becomeFirstResponder];
@@ -448,17 +461,53 @@ static UIColor *OCClaudeGlass(void) {
         [self showDiff];
     }]];
     [sheet addAction:[UIAlertAction actionWithTitle:@"Open Files" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
-        self.tabBarController.selectedIndex = 1;
+        self.modeSegment.selectedSegmentIndex = 1;
+        [self modeChanged];
     }]];
     [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
     [self presentViewController:sheet animated:YES completion:nil];
 }
 
-// The hero shows only while the session has no messages.
-- (void)updateHeroVisibility {
-    BOOL empty = self.displayItems.count == 0;
-    self.heroView.hidden = !empty;
-    self.tableView.hidden = empty;
+// FreeMilk's Chat/Files switch: the timeline and the embedded file
+// browser swap; the composer stays put.
+- (void)modeChanged {
+    BOOL filesMode = self.modeSegment.selectedSegmentIndex == 1;
+    self.tableView.hidden = filesMode;
+    self.filesChild.view.hidden = !filesMode;
+    if (filesMode) [self.filesChild reload];
+}
+
+// FreeMilk's Run button: ask the agent to build and run the project.
+- (void)runTapped {
+    [self sendPromptText:@"Build and run the project"];
+}
+
+// FreeMilk's globe: the in-app browser for previewing a build.
+- (void)globeTapped {
+    OCBrowserViewController *browser = [[OCBrowserViewController alloc] init];
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:browser];
+    [self presentViewController:nav animated:YES completion:nil];
+}
+
+// FreeMilk's uncommitted-changes bar: counts the session's diff and
+// shows while there is anything uncommitted; tapping it opens the
+// diff. Hidden while the session is clean.
+- (void)updateUncommittedBar {
+    [[self serverClient] fetchDiffForSession:self.sessionID completion:^(NSArray *diff, NSError *error) {
+        if (error) return;
+        self.diffCount = (NSInteger)(diff ?: @[]).count;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (self.diffCount > 0) {
+                [self.uncommittedBar setTitle:[NSString stringWithFormat:@"%ld uncommitted change%@  ›", (long)self.diffCount, self.diffCount == 1 ? @"" : @"s"] forState:UIControlStateNormal];
+                self.uncommittedBar.hidden = NO;
+                self.uncommittedHeightConstraint.constant = 40;
+            } else {
+                self.uncommittedBar.hidden = YES;
+                self.uncommittedHeightConstraint.constant = 0;
+            }
+            [self.view layoutIfNeeded];
+        });
+    }];
 }
 
 #pragma mark - Messages
@@ -562,7 +611,7 @@ static UIColor *OCClaudeGlass(void) {
         // The server returns messages newest first; the thread reads oldest first.
         NSArray *chronological = [[messages reverseObjectEnumerator] allObjects];
         self.displayItems = [OCChatViewController displayItemsFromMessages:chronological];
-        [self updateHeroVisibility];
+        [self updateUncommittedBar];
         [self.tableView reloadData];
         [self scrollToBottom];
     }];
@@ -615,16 +664,10 @@ static UIColor *OCClaudeGlass(void) {
 
 #pragma mark - Send / stop
 
-- (void)sendTapped {
-    // The white circle is one button in three states: while a reply
-    // is in flight it stops, with text it sends, and when empty it
-    // just focuses the composer (the keyboard offers dictation).
-    if (self.waitingForReply) { [self stopTapped]; return; }
-    NSString *text = [self.composer.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    if (!text.length) { [self.composer becomeFirstResponder]; return; }
-    self.composer.text = @"";
-    [self textViewDidChange:self.composer];
-    [self.composer resignFirstResponder];
+// Send a prompt without going through the composer text view. Used
+// by the Run button and any other quick action.
+- (void)sendPromptText:(NSString *)text {
+    if (!text.length || self.waitingForReply) return;
     [self startPolling];
     [[self serverClient] sendPrompt:text toSession:self.sessionID completion:^(NSDictionary *message, NSError *error) {
         (void)message;
@@ -635,6 +678,19 @@ static UIColor *OCClaudeGlass(void) {
         }
         [self reloadMessages];
     }];
+}
+
+- (void)sendTapped {
+    // The white circle is one button in three states: while a reply
+    // is in flight it stops, with text it sends, and when empty it
+    // just focuses the composer (the keyboard offers dictation).
+    if (self.waitingForReply) { [self stopTapped]; return; }
+    NSString *text = [self.composer.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (!text.length) { [self.composer becomeFirstResponder]; return; }
+    self.composer.text = @"";
+    [self textViewDidChange:self.composer];
+    [self.composer resignFirstResponder];
+    [self sendPromptText:text];
 }
 
 - (void)stopTapped {
@@ -670,7 +726,6 @@ static UIColor *OCClaudeGlass(void) {
                         self.currentModelID = modelID;
                         self.currentProviderID = providerID;
                         [self.modelChipButton setTitle:[self modelPillTitle] forState:UIControlStateNormal];
-                        [self.heroPillButton setTitle:[self modelPillTitle] forState:UIControlStateNormal];
                     }
                 }];
             }]];

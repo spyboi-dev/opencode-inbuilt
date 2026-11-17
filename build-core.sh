@@ -45,7 +45,7 @@ OCFLAGS="-target arm64-apple-ios$MIN -isysroot $SDK -miphoneos-version-min=$MIN 
 CFLAGS_C="-target arm64-apple-ios$MIN -isysroot $SDK -miphoneos-version-min=$MIN -O2 -Wall -DLINUXRUNNER=1 -DGUEST_ARM64=1 -I$LINUXRUNNER_DIR -I$LIBARCHIVE_SRC/libarchive"
 
 # App sources (same list as build.sh) plus the core glue.
-for f in main AppDelegate OCKeychain OCUtil OCSettings OCServerClient OCEngine OCSessionsViewController OCChatViewController OCFilesViewController OCEngineViewController OCSettingsViewController CoreGlue; do
+for f in main AppDelegate OCKeychain OCUtil OCSettings OCServerClient OCEngine OCSessionsViewController OCChatViewController OCFilesViewController OCEngineViewController OCSettingsViewController OCIntegrationsViewController OCBrowserViewController CoreGlue; do
   echo "== $f.m"
   $CLANG $OCFLAGS -c "$SRC/$f.m" -o "$OUT/$f.o"
 done
@@ -60,9 +60,9 @@ $CLANG $CFLAGS_C -c "$LINUXRUNNER_DIR/tools/fakefs.c" -o "$OUT/fakefs.o"
 echo "== link"
 $CLANG -target arm64-apple-ios$MIN -isysroot "$SDK" -miphoneos-version-min=$MIN \
   -ObjC -Wl,-dead_strip \
-  "$OUT"/main.o "$OUT"/AppDelegate.o "$OUT"/OCKeychain.o "$OUT"/OCUtil.o "$OUT"/OCSettings.o "$OUT"/OCServerClient.o "$OUT"/OCEngine.o "$OUT"/OCSessionsViewController.o "$OUT"/OCChatViewController.o "$OUT"/OCFilesViewController.o "$OUT"/OCEngineViewController.o "$OUT"/OCSettingsViewController.o "$OUT"/CoreGlue.o "$OUT"/DebianBootstrap.o "$OUT"/fakefs.o \
+  "$OUT"/main.o "$OUT"/AppDelegate.o "$OUT"/OCKeychain.o "$OUT"/OCUtil.o "$OUT"/OCSettings.o "$OUT"/OCServerClient.o "$OUT"/OCEngine.o "$OUT"/OCSessionsViewController.o "$OUT"/OCChatViewController.o "$OUT"/OCFilesViewController.o "$OUT"/OCEngineViewController.o "$OUT"/OCSettingsViewController.o "$OUT"/OCIntegrationsViewController.o "$OUT"/OCBrowserViewController.o "$OUT"/CoreGlue.o "$OUT"/DebianBootstrap.o "$OUT"/fakefs.o \
   "$CORE_DIR/libish.a" "$CORE_DIR/libish_emu.a" "$CORE_DIR/libfakefs.a" "$LIBARCHIVE_A" \
-  -framework UIKit -framework Foundation -framework Security -framework CoreGraphics -framework QuartzCore \
+  -framework UIKit -framework Foundation -framework Security -framework CoreGraphics -framework QuartzCore -framework WebKit \
   -lobjc -lSystem -lsqlite3 -lz -lbz2 -llzma -liconv -lresolv -lm \
   -o "$APP/OpenCode"
 
