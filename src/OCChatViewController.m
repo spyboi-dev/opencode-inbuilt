@@ -82,12 +82,13 @@ static UIColor *OCClaudeGlass(void) {
 @property (nonatomic, strong) UIView *topBar;
 @property (nonatomic, strong) UIButton *menuButton;
 @property (nonatomic, strong) UIButton *plusButton;
-@property (nonatomic, strong) UIButton *micButton;
+@property (nonatomic, strong) UIButton *sparkleButton;
 // FreeMilk toolbar: Chat/Files switch, Run, globe. Files mode is an
 // embedded file browser; the uncommitted bar sits above the composer.
 // The roadmap sits at the bottom of the chat, fed by the session's
 // todos (the todowrite tool calls), one ticket per milestone.
 @property (nonatomic, strong) UISegmentedControl *modeSegment;
+@property (nonatomic, strong) UIButton *projectFolderButton;
 @property (nonatomic, strong) UIButton *runButton;
 @property (nonatomic, strong) UIButton *globeButton;
 @property (nonatomic, strong) OCFilesViewController *filesChild;
@@ -118,7 +119,7 @@ static UIColor *OCClaudeGlass(void) {
         _shownPermissionIDs = [NSMutableSet set];
         _expandedKeys = [NSMutableSet set];
         _expandedUserKeys = [NSMutableSet set];
-        // Claude is a full-screen chat: no tab bar on this screen.
+        // FreeMilk is a full-screen chat: no tab bar on this screen.
         self.hidesBottomBarWhenPushed = YES;
         id model = session[@"model"];
         if ([model isKindOfClass:[NSDictionary class]]) {
@@ -141,28 +142,25 @@ static UIColor *OCClaudeGlass(void) {
 
 - (NSString *)sessionID { return self.session[@"id"]; }
 
-// The short model label for the Claude-style pills (hero + composer):
-// just the model id, so it fits like "Sonnet 5.5 Medium" does.
+// The model pill in the composer, FreeMilk's way: the model name
+// with a chevron, like "GPT 6 Luna" with a down chevron.
 - (NSString *)modelPillTitle {
-    if (self.currentModelID.length) return self.currentModelID;
-    return @"Choose a model";
+    NSString *name = self.currentModelID.length ? self.currentModelID : @"Choose a model";
+    return [name stringByAppendingString:@"  ⌄"];
 }
 
-// The white circle at the right of the composer is the send button in
-// all three states: a waveform when the input is empty (tap focuses
-// the composer), an arrow-up when there is text (tap sends), and a
-// stop square while a reply is in flight (tap stops).
+// FreeMilk's send button: a dark gray circle with an up arrow. While
+// a reply is in flight it shows a stop square instead. The keyboard
+// offers dictation, so there is no waveform/voice state.
 - (void)updateSendButton {
     UIImage *icon = nil;
     if (self.waitingForReply) {
         icon = [UIImage systemImageNamed:@"stop.fill"];
-    } else if (self.composer.text.length) {
-        icon = [UIImage systemImageNamed:@"arrow.up"];
     } else {
-        icon = [UIImage systemImageNamed:@"waveform"];
+        icon = [UIImage systemImageNamed:@"arrow.up"];
     }
     [self.sendButton setImage:[icon imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate] forState:UIControlStateNormal];
-    self.sendButton.tintColor = [UIColor blackColor];
+    self.sendButton.tintColor = [UIColor whiteColor];
 }
 
 - (UIButton *)glassCircleButtonWithImage:(NSString *)imageName diameter:(CGFloat)diameter {
@@ -181,37 +179,44 @@ static UIColor *OCClaudeGlass(void) {
     [super viewDidLoad];
     self.view.backgroundColor = OCClaudeBackground();
 
-    // FreeMilk's chat toolbar: a glass bar with a back chevron, the
-    // Chat/Files switch, a Run button and a globe for the in-app
-    // browser. The nav bar itself is hidden in viewWillAppear and
-    // restored in viewWillDisappear.
+    // FreeMilk's chat toolbar, from the screenshot: a single glass
+    // pill bar floating over the thread, not a full-width bar. Left
+    // to right: a back chevron in a dark circle, a folder button,
+    // the Chat/Files switch as a centered pill with two icon
+    // segments (a chat bubble and a folder), then a globe and a play
+    // button in dark circles. The nav bar itself is hidden in
+    // viewWillAppear and restored in viewWillDisappear.
     UIVisualEffectView *toolbarGlass = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial]];
+    toolbarGlass.layer.cornerRadius = 28;
+    toolbarGlass.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.12].CGColor;
+    toolbarGlass.layer.borderWidth = 0.5;
+    toolbarGlass.clipsToBounds = YES;
     toolbarGlass.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:toolbarGlass];
     self.toolbarGlass = toolbarGlass;
     self.topBar = toolbarGlass.contentView;
 
-    self.menuButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    [self.menuButton setImage:[[UIImage systemImageNamed:@"chevron.left"] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate] forState:UIControlStateNormal];
-    self.menuButton.tintColor = OCTextBase();
-    self.menuButton.translatesAutoresizingMaskIntoConstraints = NO;
+    self.menuButton = [self glassCircleButtonWithImage:@"chevron.left" diameter:44];
     [self.menuButton addTarget:self action:@selector(menuTapped) forControlEvents:UIControlEventTouchUpInside];
     [self.topBar addSubview:self.menuButton];
 
-    self.modeSegment = [[UISegmentedControl alloc] initWithItems:@[@"Chat", @"Files"]];
+    self.projectFolderButton = [self glassCircleButtonWithImage:@"folder" diameter:44];
+    [self.projectFolderButton addTarget:self action:@selector(projectFolderTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.topBar addSubview:self.projectFolderButton];
+
+    self.modeSegment = [[UISegmentedControl alloc] initWithItems:@[[UIImage systemImageNamed:@"bubble.left.and.bubble.right"], [UIImage systemImageNamed:@"folder"]]];
     self.modeSegment.selectedSegmentIndex = 0;
-    [self.modeSegment setTitleTextAttributes:@{NSFontAttributeName: OCRoundedFont(14, UIFontWeightSemibold)} forState:UIControlStateNormal];
     self.modeSegment.translatesAutoresizingMaskIntoConstraints = NO;
     [self.modeSegment addTarget:self action:@selector(modeChanged) forControlEvents:UIControlEventValueChanged];
     [self.topBar addSubview:self.modeSegment];
 
-    self.runButton = [self glassCircleButtonWithImage:@"play.fill" diameter:36];
-    [self.runButton addTarget:self action:@selector(runTapped) forControlEvents:UIControlEventTouchUpInside];
-    [self.topBar addSubview:self.runButton];
-
-    self.globeButton = [self glassCircleButtonWithImage:@"globe" diameter:36];
+    self.globeButton = [self glassCircleButtonWithImage:@"globe" diameter:44];
     [self.globeButton addTarget:self action:@selector(globeTapped) forControlEvents:UIControlEventTouchUpInside];
     [self.topBar addSubview:self.globeButton];
+
+    self.runButton = [self glassCircleButtonWithImage:@"play.fill" diameter:44];
+    [self.runButton addTarget:self action:@selector(runTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.topBar addSubview:self.runButton];
 
     // The timeline.
     self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
@@ -280,10 +285,11 @@ static UIColor *OCClaudeGlass(void) {
         [self.roadmapScroll.bottomAnchor constraintEqualToAnchor:self.roadmapContainer.bottomAnchor],
     ]];
 
-    // Composer: FreeMilk's big rounded card (28px radius) over a
-    // Liquid Glass blur. The text area sits on top; the bottom row
-    // holds a plus circle, the model pill, a mic circle and the white
-    // voice/send circle.
+    // Composer: FreeMilk's big rounded card over a Liquid Glass
+    // blur, two rows. Top row: the text area (placeholder
+    // "Follow up...") with a dark send arrow at its right. Bottom
+    // row: a plus circle, the model pill (model name with a chevron),
+    // and a sparkle for the theme picker at the right.
     self.composerCard = [[UIView alloc] init];
     self.composerCard.backgroundColor = [UIColor clearColor];
     self.composerCard.layer.cornerRadius = 28;
@@ -303,7 +309,7 @@ static UIColor *OCClaudeGlass(void) {
     ]];
 
     self.composer = [[UITextView alloc] init];
-    self.composer.font = OCRoundedFont(16, UIFontWeightRegular);
+    self.composer.font = OCRoundedFont(17, UIFontWeightRegular);
     self.composer.backgroundColor = [UIColor clearColor];
     self.composer.textColor = OCTextBase();
     self.composer.delegate = self;
@@ -313,8 +319,8 @@ static UIColor *OCClaudeGlass(void) {
     [self.composerCard addSubview:self.composer];
 
     self.composerPlaceholder = [[UILabel alloc] init];
-    self.composerPlaceholder.text = @"Chat with OpenCode";
-    self.composerPlaceholder.font = OCRoundedFont(16, UIFontWeightRegular);
+    self.composerPlaceholder.text = @"Follow up...";
+    self.composerPlaceholder.font = OCRoundedFont(17, UIFontWeightRegular);
     self.composerPlaceholder.textColor = OCTextFaint();
     self.composerPlaceholder.translatesAutoresizingMaskIntoConstraints = NO;
     [self.composerCard addSubview:self.composerPlaceholder];
@@ -325,21 +331,23 @@ static UIColor *OCClaudeGlass(void) {
 
     self.modelChipButton = [UIButton buttonWithType:UIButtonTypeSystem];
     [self.modelChipButton setTitle:[self modelPillTitle] forState:UIControlStateNormal];
-    self.modelChipButton.titleLabel.font = OCRoundedFont(14, UIFontWeightMedium);
+    self.modelChipButton.titleLabel.font = OCRoundedFont(17, UIFontWeightSemibold);
     [self.modelChipButton setTitleColor:OCTextBase() forState:UIControlStateNormal];
-    self.modelChipButton.backgroundColor = OCClaudeGlass();
-    self.modelChipButton.layer.cornerRadius = 18;
-    self.modelChipButton.contentEdgeInsets = UIEdgeInsetsMake(6, 12, 6, 12);
+    self.modelChipButton.backgroundColor = [UIColor clearColor];
+    self.modelChipButton.contentEdgeInsets = UIEdgeInsetsMake(6, 4, 6, 4);
     self.modelChipButton.translatesAutoresizingMaskIntoConstraints = NO;
     [self.modelChipButton addTarget:self action:@selector(pickModel) forControlEvents:UIControlEventTouchUpInside];
     [self.composerCard addSubview:self.modelChipButton];
 
-    self.micButton = [self glassCircleButtonWithImage:@"mic.fill" diameter:36];
-    [self.micButton addTarget:self action:@selector(micTapped) forControlEvents:UIControlEventTouchUpInside];
-    [self.composerCard addSubview:self.micButton];
+    self.sparkleButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [self.sparkleButton setImage:[[UIImage systemImageNamed:@"sparkles"] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate] forState:UIControlStateNormal];
+    self.sparkleButton.tintColor = OCTextMuted();
+    self.sparkleButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.sparkleButton addTarget:self action:@selector(sparkleTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.composerCard addSubview:self.sparkleButton];
 
     self.sendButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    self.sendButton.backgroundColor = [UIColor whiteColor];
+    self.sendButton.backgroundColor = [UIColor systemGrayColor];
     self.sendButton.layer.cornerRadius = 18;
     self.sendButton.translatesAutoresizingMaskIntoConstraints = NO;
     [self.sendButton addTarget:self action:@selector(sendTapped) forControlEvents:UIControlEventTouchUpInside];
@@ -363,26 +371,30 @@ static UIColor *OCClaudeGlass(void) {
     NSLayoutConstraint *uncommittedHeight = [self.uncommittedBar.heightAnchor constraintEqualToConstant:40];
     self.uncommittedHeightConstraint = uncommittedHeight;
     [NSLayoutConstraint activateConstraints:@[
-        [self.toolbarGlass.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
-        [self.toolbarGlass.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
-        [self.toolbarGlass.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [self.toolbarGlass.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:8],
+        [self.toolbarGlass.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:12],
+        [self.toolbarGlass.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-12],
         [self.toolbarGlass.heightAnchor constraintEqualToConstant:56],
-        [self.menuButton.leadingAnchor constraintEqualToAnchor:self.topBar.leadingAnchor constant:8],
+        [self.menuButton.leadingAnchor constraintEqualToAnchor:self.topBar.leadingAnchor constant:6],
         [self.menuButton.centerYAnchor constraintEqualToAnchor:self.topBar.centerYAnchor],
-        [self.menuButton.widthAnchor constraintEqualToConstant:36],
-        [self.menuButton.heightAnchor constraintEqualToConstant:36],
-        [self.modeSegment.leadingAnchor constraintEqualToAnchor:self.menuButton.trailingAnchor constant:8],
+        [self.menuButton.widthAnchor constraintEqualToConstant:44],
+        [self.menuButton.heightAnchor constraintEqualToConstant:44],
+        [self.projectFolderButton.leadingAnchor constraintEqualToAnchor:self.menuButton.trailingAnchor constant:6],
+        [self.projectFolderButton.centerYAnchor constraintEqualToAnchor:self.topBar.centerYAnchor],
+        [self.projectFolderButton.widthAnchor constraintEqualToConstant:44],
+        [self.projectFolderButton.heightAnchor constraintEqualToConstant:44],
+        [self.modeSegment.centerXAnchor constraintEqualToAnchor:self.topBar.centerXAnchor],
         [self.modeSegment.centerYAnchor constraintEqualToAnchor:self.topBar.centerYAnchor],
-        [self.modeSegment.heightAnchor constraintEqualToConstant:32],
-        [self.modeSegment.trailingAnchor constraintEqualToAnchor:self.runButton.leadingAnchor constant:-8],
-        [self.runButton.trailingAnchor constraintEqualToAnchor:self.globeButton.leadingAnchor constant:-8],
-        [self.runButton.centerYAnchor constraintEqualToAnchor:self.topBar.centerYAnchor],
-        [self.runButton.widthAnchor constraintEqualToConstant:36],
-        [self.runButton.heightAnchor constraintEqualToConstant:36],
-        [self.globeButton.trailingAnchor constraintEqualToAnchor:self.topBar.trailingAnchor constant:-12],
+        [self.modeSegment.widthAnchor constraintEqualToConstant:120],
+        [self.modeSegment.heightAnchor constraintEqualToConstant:40],
+        [self.globeButton.trailingAnchor constraintEqualToAnchor:self.runButton.leadingAnchor constant:-6],
         [self.globeButton.centerYAnchor constraintEqualToAnchor:self.topBar.centerYAnchor],
-        [self.globeButton.widthAnchor constraintEqualToConstant:36],
-        [self.globeButton.heightAnchor constraintEqualToConstant:36],
+        [self.globeButton.widthAnchor constraintEqualToConstant:44],
+        [self.globeButton.heightAnchor constraintEqualToConstant:44],
+        [self.runButton.trailingAnchor constraintEqualToAnchor:self.topBar.trailingAnchor constant:-6],
+        [self.runButton.centerYAnchor constraintEqualToAnchor:self.topBar.centerYAnchor],
+        [self.runButton.widthAnchor constraintEqualToConstant:44],
+        [self.runButton.heightAnchor constraintEqualToConstant:44],
         [self.tableView.topAnchor constraintEqualToAnchor:self.toolbarGlass.bottomAnchor],
         [self.tableView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [self.tableView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
@@ -404,9 +416,13 @@ static UIColor *OCClaudeGlass(void) {
         self.composerBottomConstraint,
         [self.composer.topAnchor constraintEqualToAnchor:self.composerCard.topAnchor constant:14],
         [self.composer.leadingAnchor constraintEqualToAnchor:self.composerCard.leadingAnchor constant:18],
-        [self.composer.trailingAnchor constraintEqualToAnchor:self.composerCard.trailingAnchor constant:-18],
+        [self.composer.trailingAnchor constraintEqualToAnchor:self.sendButton.leadingAnchor constant:-8],
         [self.composerPlaceholder.leadingAnchor constraintEqualToAnchor:self.composer.leadingAnchor constant:5],
         [self.composerPlaceholder.centerYAnchor constraintEqualToAnchor:self.composer.centerYAnchor],
+        [self.sendButton.trailingAnchor constraintEqualToAnchor:self.composerCard.trailingAnchor constant:-12],
+        [self.sendButton.topAnchor constraintEqualToAnchor:self.composerCard.topAnchor constant:12],
+        [self.sendButton.widthAnchor constraintEqualToConstant:36],
+        [self.sendButton.heightAnchor constraintEqualToConstant:36],
         [self.plusButton.leadingAnchor constraintEqualToAnchor:self.composerCard.leadingAnchor constant:12],
         [self.plusButton.topAnchor constraintEqualToAnchor:self.composer.bottomAnchor constant:8],
         [self.plusButton.bottomAnchor constraintEqualToAnchor:self.composerCard.bottomAnchor constant:-12],
@@ -415,18 +431,13 @@ static UIColor *OCClaudeGlass(void) {
         [self.modelChipButton.leadingAnchor constraintEqualToAnchor:self.plusButton.trailingAnchor constant:8],
         [self.modelChipButton.centerYAnchor constraintEqualToAnchor:self.plusButton.centerYAnchor],
         [self.modelChipButton.heightAnchor constraintEqualToConstant:36],
-        [self.micButton.centerYAnchor constraintEqualToAnchor:self.plusButton.centerYAnchor],
-        [self.micButton.widthAnchor constraintEqualToConstant:36],
-        [self.micButton.heightAnchor constraintEqualToConstant:36],
-        [self.sendButton.trailingAnchor constraintEqualToAnchor:self.composerCard.trailingAnchor constant:-12],
-        [self.sendButton.centerYAnchor constraintEqualToAnchor:self.plusButton.centerYAnchor],
-        [self.sendButton.widthAnchor constraintEqualToConstant:36],
-        [self.sendButton.heightAnchor constraintEqualToConstant:36],
+        [self.sparkleButton.trailingAnchor constraintEqualToAnchor:self.composerCard.trailingAnchor constant:-16],
+        [self.sparkleButton.centerYAnchor constraintEqualToAnchor:self.plusButton.centerYAnchor],
+        [self.sparkleButton.widthAnchor constraintEqualToConstant:28],
+        [self.sparkleButton.heightAnchor constraintEqualToConstant:28],
     ]];
-    // The model pill takes the space between the plus and mic
-    // buttons; the mic sits just left of the send circle.
-    [self.modelChipButton.trailingAnchor constraintLessThanOrEqualToAnchor:self.micButton.leadingAnchor constant:-8].active = YES;
-    [self.micButton.trailingAnchor constraintEqualToAnchor:self.sendButton.leadingAnchor constant:-8].active = YES;
+    // The model pill takes the space between the plus and the sparkle.
+    [self.modelChipButton.trailingAnchor constraintLessThanOrEqualToAnchor:self.sparkleButton.leadingAnchor constant:-8].active = YES;
 
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(keyboardWillShow:) name:UIKeyboardWillShowNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(keyboardWillHide:) name:UIKeyboardWillHideNotification object:nil];
@@ -434,7 +445,7 @@ static UIColor *OCClaudeGlass(void) {
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
-    // Claude is a full-screen chat: the nav bar stays hidden here and
+    // FreeMilk is a full-screen chat: the nav bar stays hidden here and
     // is restored when leaving, so the sessions list keeps its bar.
     [self.navigationController setNavigationBarHidden:YES animated:animated];
     self.serverClient.eventDelegate = self;
@@ -496,9 +507,12 @@ static UIColor *OCClaudeGlass(void) {
     [self.navigationController popViewControllerAnimated:YES];
 }
 
-- (void)micTapped {
-    // The keyboard already offers dictation; bring it up.
-    [self.composer becomeFirstResponder];
+// The sparkle at the right of the composer's bottom row: FreeMilk
+// keeps its milk bottle there (the theme/flavour picker). The bottle
+// is FreeMilk's own mascot, so this app shows a sparkle instead and
+// opens the model picker, the closest matching action here.
+- (void)sparkleTapped {
+    [self pickModel];
 }
 
 - (void)plusTapped {
@@ -512,6 +526,12 @@ static UIColor *OCClaudeGlass(void) {
     }]];
     [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
     [self presentViewController:sheet animated:YES completion:nil];
+}
+
+// FreeMilk's project folder button: opens the project's files.
+- (void)projectFolderTapped {
+    self.modeSegment.selectedSegmentIndex = 1;
+    [self modeChanged];
 }
 
 // FreeMilk's Chat/Files switch: the timeline and the embedded file
@@ -867,9 +887,9 @@ static UIColor *OCClaudeGlass(void) {
 }
 
 - (void)sendTapped {
-    // The white circle is one button in three states: while a reply
-    // is in flight it stops, with text it sends, and when empty it
-    // just focuses the composer (the keyboard offers dictation).
+    // The dark send arrow: while a reply is in flight it stops,
+    // with text it sends, and when empty it just focuses the
+    // composer.
     if (self.waitingForReply) { [self stopTapped]; return; }
     NSString *text = [self.composer.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (!text.length) { [self.composer becomeFirstResponder]; return; }
