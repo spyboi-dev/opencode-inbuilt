@@ -584,8 +584,8 @@ static dispatch_queue_t OCEngineLogQueue(void) {
         // not in Debian, so it comes from npm (Node is already
         // installed above). A failure here is logged but never blocks
         // the server start.
-        @"if ! command -v git >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1 || ! command -v rg >/dev/null 2>&1; then "
-        @"echo \"PROGRESS 86 Installing tools (git, python3, jq, ripgrep)...\" >> \"$SLOG\" 2>/dev/null; "
+        @"if ! command -v git >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1 || ! command -v rg >/dev/null 2>&1 || ! command -v pip3 >/dev/null 2>&1 || ! command -v gh >/dev/null 2>&1; then "
+        @"echo \"PROGRESS 86 Installing tools (git, python3, pip3, gh, jq, ripgrep)...\" >> \"$SLOG\" 2>/dev/null; "
         // DEBIAN_FRONTEND=noninteractive is required: tzdata (pulled
         // in by git/python3) otherwise stops at an interactive
         // debconf prompt asking for the geographic area, and the
@@ -594,7 +594,7 @@ static dispatch_queue_t OCEngineLogQueue(void) {
         // dpkg --configure -a first recovers the half-configured
         // state left by that stuck run. A failure here is logged but
         // never blocks the server start.
-        @"(export DEBIAN_FRONTEND=noninteractive; dpkg --configure -a >> \"$SLOG\" 2>&1; apt-get update >> \"$SLOG\" 2>&1 && apt-get install -y git python3 jq ripgrep >> \"$SLOG\" 2>&1 && echo \"PROGRESS 88 Tools ready\" >> \"$SLOG\") || echo \"ERROR Tools install failed (see above)\" >> \"$SLOG\"; fi; "
+        @"(export DEBIAN_FRONTEND=noninteractive; dpkg --configure -a >> \"$SLOG\" 2>&1; apt-get update >> \"$SLOG\" 2>&1 && apt-get install -y git python3 python3-pip gh jq ripgrep >> \"$SLOG\" 2>&1 && echo \"PROGRESS 88 Tools ready\" >> \"$SLOG\") || echo \"ERROR Tools install failed (see above)\" >> \"$SLOG\"; fi; "
         @"if ! command -v bun >/dev/null 2>&1; then "
         @"echo \"PROGRESS 88 Installing bun...\" >> \"$SLOG\" 2>/dev/null; "
         @"(npm install -g bun >> \"$SLOG\" 2>&1 && echo \"PROGRESS 89 bun ready\" >> \"$SLOG\") || echo \"ERROR bun install failed (see above)\" >> \"$SLOG\"; fi; "
