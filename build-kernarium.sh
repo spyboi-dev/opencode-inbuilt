@@ -1,8 +1,8 @@
 #!/bin/bash
-# OpenCode Kernarium-engine iOS build WITH the Kernarium runtime linked
-# (macOS, Xcode 26, iPhoneOS SDK). Used by
+# OpenCode Kernarium-engine iOS build WITH the Kernarium runtime
+# (macOS, Xcode 27, iPhoneOS SDK). Used by
 # .github/workflows/build-kernarium.yml; also runnable by hand on a Mac
-# with Xcode 26 installed.
+# with Xcode 27 installed.
 #
 #   ./build-kernarium.sh [KERNARIUM_DIR] [FRAMEWORKS_DIR]
 #
@@ -81,18 +81,15 @@ for f in main AppDelegate OCKeychain OCUtil OCSettings OCServerClient OCEngine O
 done
 
 echo "== link"
-# The four Kernarium frameworks are WEAK-linked on purpose. Strong
-# -framework makes dyld load them before any app code runs: one
-# framework that cannot load under LiveContainer (rpath resolving
-# against LiveContainer's own executable path, a signature problem
-# after LC re-signs, a static initializer in the 52 MB kernel
-# framework) kills the launch instantly with a dyld error — no app
-# code, no log, nothing, which is exactly the crash the user sees.
-# Weak-linked, a framework that cannot load just resolves to NULL
-# and the launch continues; KernGlue's dlopen-by-path (which already
-# handles the LiveContainer bundle-move case and NULL) takes over
-# and fails gracefully with a log line. The app references no
-# symbol from these frameworks directly, so weak linking changes
+# The four Kernarium frameworks are NOT linked at all — no -framework
+# and no -weak_framework flags. Weak linking was tried first (4ee90bc)
+# and still crashed at launch in LiveContainer: dyld loads weak
+# frameworks at launch too, and one unloadable framework kills the
+# launch before any app code runs, with no log at all. The old
+# working build had no dyld-loaded frameworks (core statically
+# linked). KernGlue loads KRuntime by path with dlopen + dlsym on
+# first Start (src/KernGlue.m loadRuntime), and the app references
+# no framework symbol directly, so dropping the flags changes
 # nothing in the standalone path. The frameworks are still copied
 # into Payload/Frameworks below.
 KRUNTIME_DIR="$(dirname "$KRUNTIME")"
@@ -101,7 +98,6 @@ $CLANG -target arm64-apple-ios$MIN -isysroot "$SDK" -miphoneos-version-min=$MIN 
   -F"$KRUNTIME_DIR" -F"Frameworks" \
   -rpath @executable_path/Frameworks \
   "$OUT"/main.o "$OUT"/AppDelegate.o "$OUT"/OCKeychain.o "$OUT"/OCUtil.o "$OUT"/OCSettings.o "$OUT"/OCServerClient.o "$OUT"/OCEngine.o "$OUT"/OCCrashLog.o "$OUT"/OCSessionsViewController.o "$OUT"/OCChatViewController.o "$OUT"/OCFilesViewController.o "$OUT"/OCEngineViewController.o "$OUT"/OCSettingsViewController.o "$OUT"/OCIntegrationsViewController.o "$OUT"/OCBrowserViewController.o "$OUT"/OCCodeViewController.o "$OUT"/OCStartupViewController.o "$OUT"/OCDesktopViewController.o "$OUT"/KernGlue.o "$OUT"/OCVsockBridge.o "$OUT"/OCGuestInstall.o \
-  -weak_framework KRuntime_6_18_4K -weak_framework KosmicKrisp -weak_framework MesaEGL -weak_framework MesaGallium \
   -framework UIKit -framework Foundation -framework Security -framework CoreGraphics -framework QuartzCore -framework WebKit -framework Metal -framework MetalKit -framework CoreLocation \
   -lobjc -lSystem -lz \
   -o "$APP/OpenCode"

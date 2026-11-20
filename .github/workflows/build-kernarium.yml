@@ -38,6 +38,14 @@
 # the iOS 27 SDK. If GitHub retires the xcode-27 label, the fallback is
 # macos-27 once it is GA, or patching the audio file to the older APIs.
 #
+# Xcode pin (2026-11-20): the Select step pins a STABLE Xcode 27.0
+# GA, never a beta. The Kernarium IPAs built with Xcode 27.3 beta die
+# ~1s after launch in LiveContainer (before didFinishLaunching,
+# SIGKILL-class, no log) while the old stable-Xcode-26 build ran
+# fine there, so the beta toolchain is a prime suspect. If no
+# Xcode_27.0.app is on the runner, the step takes the newest
+# non-beta Xcode 27 and says so in the log.
+#
 # Runner limits (xcode-27 standard: same class as macos-26 standard, 3
 # vCPU, 7 GB RAM; disk was a 320 Gi volume with ~96 Gi free on macos-26,
 # verify again if the build ever complains about disk): the GPU prefix
@@ -111,10 +119,27 @@ jobs:
 
       - name: Select Xcode 27
         run: |
-          # Prefer Xcode 27 (the iOS 27 SDK upstream targets); fall back
-          # to the newest Xcode present if 27 is not installed.
-          XCODE="$(ls -d /Applications/Xcode_27*.app 2>/dev/null | sort -V | tail -1)"
-          if [ -z "$XCODE" ]; then XCODE="$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)"; fi
+          # Pin a STABLE Xcode 27 (GA), never a beta. The Kernarium IPAs
+          # built with Xcode 27.3 beta (the newest Xcode_27* on the
+          # runner) die ~1s after launch in LiveContainer, before
+          # didFinishLaunching, SIGKILL-class with no log, while the
+          # old stable-Xcode-26 build ran fine there — so the beta
+          # toolchain is a prime suspect. Prefer Xcode_27.0.app
+          # exactly; else the newest Xcode 27 whose name contains no
+          # "beta"; else any Xcode 27 (loud warning — only a beta was
+          # available); else any Xcode at all.
+          XCODE=""
+          for cand in /Applications/Xcode_27.0.app /Applications/Xcode_27.0.0.app; do
+            if [ -d "$cand" ]; then XCODE="$cand"; break; fi
+          done
+          if [ -z "$XCODE" ]; then
+            XCODE="$(ls -d /Applications/Xcode_27*.app 2>/dev/null | grep -vi beta | sort -V | tail -1 || true)"
+          fi
+          if [ -z "$XCODE" ]; then
+            echo "WARNING: no stable Xcode 27 found; falling back to the newest Xcode 27 (possibly beta)"
+            XCODE="$(ls -d /Applications/Xcode_27*.app 2>/dev/null | sort -V | tail -1 || true)"
+          fi
+          if [ -z "$XCODE" ]; then XCODE="$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1 || true)"; fi
           if [ -z "$XCODE" ]; then echo "no Xcode found:"; ls /Applications | grep -i xcode || true; exit 1; fi
           # The versioned names (Xcode_26.6.0.app) can be symlinks to
           # the short-named install (Xcode_26.6.app); resolve to the
@@ -130,6 +155,8 @@ jobs:
           echo "DEVELOPER_DIR=$XCODE/Contents/Developer" >> "$GITHUB_ENV"
           sudo xcode-select -s "$XCODE/Contents/Developer"
           xcodebuild -version
+          # Record whether the selected Xcode is a beta, for the record.
+          if xcodebuild -version 2>/dev/null | grep -qi beta; then echo "WARNING: selected Xcode reports itself as a beta"; fi
 
       - name: Install Metal Toolchain
         run: |
@@ -532,25 +559,27 @@ jobs:
             || { echo "Kernarium runtime symbol missing from the embedded framework"; exit 1; }
           strings build/Payload/OpenCode.app/OpenCode | grep -q 'kernarium_runtime_get_api_v28' \
             || { echo "dlsym string missing from the app binary"; exit 1; }
-          echo "Kernarium frameworks must be weak-linked (LC_LOAD_WEAK_DYLIB) or"
-          echo "absent as load commands, never strongly linked: dyld loads strong"
-          echo "frameworks before any app code runs, so one unloadable framework"
-          echo "under LiveContainer kills the launch with a dyld error and no log"
-          echo "at all. Weak ones fall back to KernGlue's dlopen-by-path, which"
-          echo "fails gracefully with a log line; absent ones are dlopen-only."
-          echo "Fail only on a strong load command for any of the four."
+          echo "No Kernarium framework may appear as a load command at"
+          echo "all (strong or weak): the app must be dlopen-only. The"
+          echo "old working build had no dyld-loaded frameworks (core"
+          echo "statically linked); the Kernarium builds carried weak"
+          echo "load commands, and dyld still loads weak frameworks at"
+          echo "launch — one unloadable framework under LiveContainer"
+          echo "kills the launch before any app code runs, with no log"
+          echo "at all. KernGlue loads KRuntime by path with dlopen +"
+          echo "dlsym on first Start instead. Fail on ANY load command"
+          echo "mentioning any of the four frameworks."
           for fw in KRuntime_6_18_4K KosmicKrisp MesaEGL MesaGallium; do
-            otool -l build/Payload/OpenCode.app/OpenCode | grep -A2 "LC_LOAD_DYLIB" | grep -q "$fw" \
-              && { echo "$fw is strongly linked (must be weak or absent)"; exit 1; }
+            if otool -L build/Payload/OpenCode.app/OpenCode | grep -q "$fw"; then
+              echo "$fw appears as a load command (must be dlopen-only)"; exit 1
+            fi
           done
-          echo "weak load commands present (informational):"
-          otool -l build/Payload/OpenCode.app/OpenCode | grep -A2 "LC_LOAD_WEAK_DYLIB" | grep -E "KRuntime|KosmicKrisp|MesaEGL|MesaGallium" || echo "(none: dlopen-only)"
-          echo "no Kernarium framework is strongly linked"
+          echo "no Kernarium load commands: dlopen-only"
           for fw in KRuntime_6_18_4K KosmicKrisp MesaEGL MesaGallium; do
             test -d "build/Payload/OpenCode.app/Frameworks/$fw.framework" \
               || { echo "missing embedded framework: $fw"; exit 1; }
           done
-          echo "Kernarium runtime linked and all four frameworks embedded"
+          echo "Kernarium runtime present (dlopen-only) and all four frameworks embedded"
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
