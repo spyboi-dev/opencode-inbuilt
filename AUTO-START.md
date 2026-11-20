@@ -84,3 +84,46 @@ ignored (logged, no state change, no completion call).
    the dimmed Start button, exactly as before; the log has the
    "Auto-start skipped: engine not ready yet" line and nothing
    else changed.
+
+## App auto-start — /root/Projects/app.py (2026-11-20)
+
+The user's own app starts with the engine, so it is up without
+anyone typing a command. Why the bootstrap does it: the guest
+agent cannot start it itself. It treats its shell as read-only and
+refuses state-changing commands, and a fresh re-test on 2026-11-20
+confirmed the server was never actually up: curl to
+127.0.0.1:8000 fails and server.log is still 0 bytes. (An earlier
+note saying the server was up was wrong.)
+
+What happens on every engine start, in the guest bootstrap
+(`OCEngine.m`, `startServeWithCompletion`, before the old server
+is killed and the OpenCode server starts):
+
+```sh
+if [ -f /root/Projects/app.py ]; then
+  (cd /root/Projects && nohup python3 app.py > server.log 2>&1 &)
+  echo "app.py started" >> "$SLOG"
+fi
+```
+
+This is the exact command the guest agent itself gave. Guards:
+
+- **File must exist.** `[ -f /root/Projects/app.py ]` — a missing
+  app.py changes nothing.
+- **Detached.** `nohup` plus `&` in a subshell, so the app
+  survives the bootstrap shell exiting. Its output goes to
+  `/root/Projects/server.log`.
+- **Never fails the engine start.** The block always exits 0, and
+  it runs before the OpenCode server launch, so a broken app.py
+  cannot stop the engine. If an older app.py still holds port
+  8000, the new one just exits while the old one keeps serving;
+  no process is killed.
+- **Every engine start**, manual or auto: the app comes up with
+  the engine, and dies with it when the app is closed (iOS kills
+  the guest with the app; files persist).
+
+How to test on device: start the engine, then in a guest shell
+run `curl -s http://127.0.0.1:8000 | grep -o 'Hello from Python'`
+— it should print the line. `server.log` in /root/Projects should
+be non-empty. The startup screen's Log button shows the
+"app.py started" line in the guest serve.log.

@@ -688,6 +688,20 @@ static dispatch_queue_t OCEngineLogQueue(void) {
         @"if ! command -v bun >/dev/null 2>&1; then "
         @"echo \"PROGRESS 88 Installing bun...\" >> \"$SLOG\" 2>/dev/null; "
         @"(npm install -g bun >> \"$SLOG\" 2>&1 && echo \"PROGRESS 89 bun ready\" >> \"$SLOG\") || echo \"ERROR bun install failed (see above)\" >> \"$SLOG\"; fi; "
+        // The user's own app in /root/Projects: start it detached
+        // whenever the engine starts, so it is up without anyone
+        // typing a command. The guest agent cannot start it itself:
+        // it treats its shell as read-only and refuses state-changing
+        // commands, and the server was never actually up (re-tested
+        // 2026-11-20: curl to 127.0.0.1:8000 fails, server.log still
+        // 0 bytes). Guarded on the file existing, so a missing
+        // app.py changes nothing. Run detached with nohup so it
+        // survives the bootstrap shell exiting, logging to
+        // /root/Projects/server.log. A failure here never blocks the
+        // server start: the block always exits 0, and if an older
+        // app.py still holds port 8000 the new one just exits while
+        // the old one keeps serving.
+        @"if [ -f /root/Projects/app.py ]; then (cd /root/Projects && nohup python3 app.py > server.log 2>&1 &); echo \"app.py started\" >> \"$SLOG\" 2>/dev/null; fi; "
         // A previous opencode server can survive an engine stop and
         // keep holding port 4096, so a quick stop/start fails with
         // "Failed to start server. Is port 4096 in use?" (seen

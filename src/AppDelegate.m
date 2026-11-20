@@ -4,6 +4,7 @@
 #import "AppDelegate.h"
 #import "OCSessionsViewController.h"
 #import "OCIntegrationsViewController.h"
+#import "OCStartupViewController.h"
 #import "OCEngine.h"
 
 #ifdef OC_CORE_LINKED
@@ -42,6 +43,16 @@
     [[OCCoreGlue shared] installGuestExecutor];
 #endif
     [[OCEngine shared] maybeAutoStartEngine];
+    // Boot screen: Andarium-style, shows the real-time engine and
+    // server start, with a Log button opening the Engine tab's live
+    // log. It dismisses itself once the server is listening, and the
+    // user can always continue to the app from it, so a failed start
+    // never traps anyone on this screen.
+    OCStartupViewController *startup = [[OCStartupViewController alloc] init];
+    startup.modalPresentationStyle = UIModalPresentationFullScreen;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [tabs presentViewController:startup animated:NO completion:nil];
+    });
     return YES;
 }
 
