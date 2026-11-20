@@ -262,7 +262,12 @@ jobs:
           rm -f "$IMG"
           hdiutil create -size 20g -fs "Case-sensitive APFS" -volname KernCase -type SPARSE "$IMG"
           hdiutil attach "$IMG" -mountpoint /Volumes/KernCase
-          mkdir -p /Volumes/KernCase/deps-sources /Volumes/KernCase/linux /Volumes/KernCase/kernel-build
+          # Do NOT create /Volumes/KernCase/linux here: prepare-source.sh
+          # materializes the pinned kernel source into it with
+          # materialize-git.sh, which refuses any existing destination
+          # (even an empty one). /Volumes/KernCase/kernel-build IS
+          # created here because build-kernel.sh does mkdir -p on it.
+          mkdir -p /Volumes/KernCase/deps-sources /Volumes/KernCase/kernel-build
           # Prove the volume is case-sensitive.
           mkdir -p /Volumes/KernCase/.casetest
           touch /Volumes/KernCase/.casetest/a /Volumes/KernCase/.casetest/A
@@ -357,6 +362,11 @@ jobs:
           fi
           echo "kernel bundle missing or invalid; rebuilding from source"
           rm -rf "$BUNDLE"
+          # Guard: materialize-git.sh refuses an existing destination,
+          # so the kernel source dir must not exist when
+          # prepare-source.sh runs (the volume is fresh per run, but
+          # never let a stray dir fail the step).
+          rm -rf /Volumes/KernCase/linux
           ./kernel/mainline-6.18/scripts/prepare-source.sh --slice arm64
           export PATH="$LLVM_BIN:$PATH"
           export UML_KERNEL_CC="$LLVM_BIN/clang"
