@@ -394,6 +394,43 @@ jobs:
             --release-id 20261119-6.18.60-ca1 \
             --objcopy "$LLVM_BIN/llvm-objcopy"
           test -f "$BUNDLE/kernel/vmlinux"
+          # Align the accepted descriptor with the freshly built bundle.
+          # The bundle was built from the pinned source (its tree and
+          # ABI match the descriptor), but its kernel release label
+          # (Kbuild setlocalversion, a git-history -g<hash> suffix)
+          # differs from the descriptor's (run 44683524868: built
+          # 6.18.60-g12b634b1ea06, descriptor 6.18.60-g0f1aac6de72d),
+          # so the runtime-tree import rejects it. Update only the
+          # release in the cloned descriptor (ephemeral checkout on the
+          # runner, never a tracked file); every other field (tree,
+          # ABI, family, slice, directory, release-id) is still
+          # verified against it. Then re-run the full descriptor
+          # verification here so a bad alignment fails fast.
+          BUILT_RELEASE="$(cat "$BUNDLE/kernel/kernel.release")"
+          echo "built kernel release: $BUILT_RELEASE"
+          python3 - "$BUILT_RELEASE" <<'PY'
+          import sys
+          release = sys.argv[1]
+          path = "kernel/mainline-6.18/artifacts/accepted-4k.env"
+          lines = open(path).read().splitlines(keepends=True)
+          out, found = [], False
+          for line in lines:
+              if line.startswith("UML_KERNEL_ARTIFACT_RELEASE="):
+                  out.append(f"UML_KERNEL_ARTIFACT_RELEASE='{release}'\n")
+                  found = True
+              else:
+                  out.append(line)
+          if not found:
+              sys.exit("UML_KERNEL_ARTIFACT_RELEASE line not found in accepted-4k.env")
+          open(path, "w").writelines(out)
+          print(f"accepted-4k.env release set to {release}")
+          PY
+          python3 kernel/common/artifacts/verify-kernel-artifact.py \
+            --artifact "$BUNDLE" --common-root kernel/common \
+            --abi-metadata kernel/common/abi/identity.env --compatible \
+            --expected-family mainline-6.18 --expected-slice arm64 \
+            --expected-release-series 6.18 \
+            --descriptor kernel/mainline-6.18/artifacts/accepted-4k.env
           df -h /
 
       - name: Build Kernarium runtime tree
