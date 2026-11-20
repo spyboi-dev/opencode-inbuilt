@@ -11,8 +11,14 @@
 #                   packaged frameworks; the runtime itself is NOT
 #                   compiled here.
 #   FRAMEWORKS_DIR  dir holding KRuntime_6_18_4K.framework, built on
-#                   the Mac by Kernarium/scripts/package-ios-frameworks.sh
-#                   --sdk device (default: ./kernarium-frameworks).
+#                   the Mac by the Kernarium runtime-tree CMake build
+#                   (cmake --preset kernarium-ios-device in the
+#                   kernarium-engine workflow; see
+#                   .github/workflows/build-kernarium.yml). The
+#                   upstream packaging script
+#                   (Kernarium/scripts/package-ios-frameworks.sh) is
+#                   deliberately NOT used: it demands the Android
+#                   runtime too and only verifies prebuilt artifacts.
 #                   The three GPU frameworks (KosmicKrisp, MesaEGL,
 #                   MesaGallium) come from Frameworks/ in this repo,
 #                   vendored from the Andarium release IPA (as in
@@ -38,9 +44,12 @@ SRC=src
 OUT=build
 APP=$OUT/Payload/OpenCode.app
 
-# The framework the packaging script writes. The script's output dir
-# is .build/kernarium-xcframeworks under the checkout; the device
-# slice of KRuntime_6_18_4K.xcframework holds the .framework.
+# The framework the runtime-tree CMake build writes. The build's
+# output dir is .build/kernarium-runtime-ios-device under the
+# checkout; KRuntime_6_18_4K.framework sits directly in
+# Kernarium/Runtime/ (that is exactly the slice the upstream
+# packaging script consumes as its input). The two xcframework
+# candidates below are kept for a hand-built framework dir.
 KRUNTIME=""
 for cand in \
   "$FRAMEWORKS_DIR/KRuntime_6_18_4K.framework" \
@@ -50,10 +59,10 @@ for cand in \
 done
 if [ -z "$KRUNTIME" ]; then
   echo "missing KRuntime_6_18_4K.framework" >&2
-  echo "Build it on this Mac first:" >&2
+  echo "Build it on this Mac first (see .github/workflows/build-kernarium.yml):" >&2
   echo "  cd $KERNARIUM_DIR" >&2
-  echo "  Kernarium/scripts/package-ios-frameworks.sh --sdk device" >&2
-  echo "then re-run with the frameworks dir as the 2nd argument." >&2
+  echo "  cmake --preset kernarium-ios-device && cmake --build --preset kernarium-ios-device" >&2
+  echo "then re-run with the runtime dir as the 2nd argument." >&2
   exit 1
 fi
 for f in Frameworks/KosmicKrisp.framework Frameworks/MesaEGL.framework Frameworks/MesaGallium.framework; do
