@@ -1,0 +1,92 @@
+# Build the Kernarium guest runtime for iOS arm64, link it into the
+# OpenCode inbuilt app, and upload the IPA as an artifact.
+#
+# Pipeline (see KERNARIUM-ENGINE.md for the full design):
+#   1. Clone Kernarium at the pinned commit fbe12ee (no vendoring).
+#   2. Run Kernarium/scripts/package-ios-frameworks.sh --sdk device,
+#      which writes KRuntime_6_18_4K.xcframework to
+#      .build/kernarium-xcframeworks/ (plus the GPU frameworks).
+#   3. ./build-kernarium.sh links the app with the runtime
+#      (OC_KERNARIUM_LINKED) and produces build/OpenCode-Inbuilt.ipa.
+#      The GPU frameworks come from Frameworks/ in this repo,
+#      vendored from the Andarium release IPA.
+#
+# Triggered manually, or on pushes to kernarium-engine that touch the
+# app, the build script, the resources, or this workflow. main is
+# untouched: the LinuxRunner build keeps shipping from build-core.yml.
+name: Build Kernarium engine + IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [kernarium-engine]
+    paths:
+      - 'src/**'
+      - 'build-kernarium.sh'
+      - 'Frameworks/**'
+      - 'resources/**'
+      - 'rootfs-build/**'
+      - '.github/workflows/build-kernarium.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    env:
+      # Apple's clang reads this when no -miphoneos-version-min flag
+      # is given; the framework packaging relies on it.
+      IPHONEOS_DEPLOYMENT_TARGET: '27.0'
+    steps:
+      - name: Check out app
+        uses: actions/checkout@v4
+
+      - name: Select Xcode 26
+        run: |
+          XCODE="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)"
+          if [ -z "$XCODE" ]; then echo "no Xcode 26 found:"; ls /Applications | grep -i xcode || true; exit 1; fi
+          echo "Using $XCODE"
+          sudo xcode-select -s "$XCODE/Contents/Developer"
+          xcodebuild -version
+
+      - name: Clone Kernarium (pinned commit)
+        # Pinned to the commit the design note was written against;
+        # nothing is vendored in this repo. A shallow fetch of the
+        # exact SHA keeps it small.
+        run: |
+          git init kernarium
+          cd kernarium
+          git remote add origin https://github.com/imxieyi/Kernarium.git
+          git fetch --depth 1 origin fbe12ee72d195f0241c4fc24090a98b259026604
+          git checkout FETCH_HEAD
+          test "$(git rev-parse HEAD)" = fbe12ee72d195f0241c4fc24090a98b259026604
+
+      - name: Package iOS frameworks
+        # Writes .build/kernarium-xcframeworks/, including the Linux
+        # runtime KRuntime_6_18_4K.xcframework (device slice). Needs
+        # Xcode + Metal; this is the step that cannot run on Linux.
+        run: |
+          cd kernarium
+          Kernarium/scripts/package-ios-frameworks.sh --sdk device
+          find .build/kernarium-xcframeworks -maxdepth 2 -name "*KRuntime_6_18_4K*" | head
+
+      - name: Build IPA with Kernarium engine linked
+        run: ./build-kernarium.sh kernarium kernarium/.build/kernarium-xcframeworks
+
+      - name: Verify the runtime is in the binary
+        run: |
+          lipo -info build/Payload/OpenCode.app/OpenCode
+          nm -arch arm64 build/Payload/OpenCode.app/OpenCode | grep -q ' _kernarium_runtime_get_api_v28' \
+            || { echo "Kernarium runtime symbol missing from the app binary"; exit 1; }
+          for fw in KRuntime_6_18_4K KosmicKrisp MesaEGL MesaGallium; do
+            test -d "build/Payload/OpenCode.app/Frameworks/$fw.framework" \
+              || { echo "missing embedded framework: $fw"; exit 1; }
+          done
+          echo "Kernarium runtime linked and all four frameworks embedded"
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenCode-Inbuilt-kernarium
+          path: build/OpenCode-Inbuilt.ipa
