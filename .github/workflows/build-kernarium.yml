@@ -155,6 +155,17 @@ jobs:
             echo "$(brew --prefix "$f")/bin" >> "$GITHUB_PATH"
           done
           export PATH="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$(brew --prefix make)/bin:$(brew --prefix libtool)/bin:$(brew --prefix gettext)/bin:$PATH"
+          # The GPU build script runs meson under `env -i` with a
+          # hardcoded PATH (python/meson/ninja dirs plus
+          # /usr/bin:/bin:/usr/sbin:/sbin), so the keg-only dirs above
+          # never reach it and meson finds the system bison 2.3, which
+          # cannot parse Mesa's grammar (run 44673473954). meson and
+          # ninja live in /opt/homebrew/bin, which IS in that tool
+          # path, so link bison/flex there. The env -i lines below
+          # prove the script's sanitized PATH finds the new versions.
+          brew link --force bison flex
+          env -i PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin" bison --version | head -1
+          env -i PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin" flex --version
           # autoreconf looks for `libtoolize`; Homebrew installs it as
           # `glibtoolize`. A symlink makes the elfutils/libffi builds work.
           if ! command -v libtoolize >/dev/null 2>&1; then
