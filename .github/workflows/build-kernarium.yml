@@ -26,13 +26,17 @@
 # build output -- exactly the slice the packaging script itself
 # consumes as its input. The Android runtime is never built.
 #
-# Runner limits (macos-26 standard: 3 vCPU, 7 GB RAM, 14 GB disk):
-# the GPU prefix build (full Mesa) and the kernel build are the long
-# poles; every heavy step runs at --jobs 3, unneeded Xcode versions
-# and simulator runtimes are removed up front, and the built prefixes
-# + kernel bundle are cached (actions/cache) so a retry reuses them.
-# Bump the cache key suffix (v1 -> v2 ...) when the workflow or the
-# pinned commit changes in a way that must invalidate the cache.
+# Runner limits (macos-26 standard: 3 vCPU, 7 GB RAM; disk is a 320 Gi
+# volume with ~96 Gi free as observed on run 44672237845, so disk is
+# not a constraint): the GPU prefix build (full Mesa) and the kernel
+# build are the long poles; every heavy step runs at --jobs 3, and the
+# built prefixes + kernel bundle are cached (actions/cache) so a retry
+# reuses them. Bump the cache key suffix (v1 -> v2 ...) when the
+# workflow or the pinned commit changes in a way that must invalidate
+# the cache. Do NOT delete Xcode installs to free disk: the versioned
+# Xcode names are symlinks to the short-named install, and deleting
+# the real directory breaks the selected Xcode (xcrun: missing
+# DEVELOPER_DIR path, run 44672237845).
 #
 # Triggered manually, or on pushes to kernarium-engine that touch the
 # app, the build script, the resources, or this workflow. main is
@@ -73,6 +77,10 @@ jobs:
         run: |
           XCODE="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)"
           if [ -z "$XCODE" ]; then echo "no Xcode 26 found:"; ls /Applications | grep -i xcode || true; exit 1; fi
+          # The versioned names (Xcode_26.6.0.app) can be symlinks to
+          # the short-named install (Xcode_26.6.app); resolve to the
+          # real directory so nothing later can break the link.
+          XCODE="$(realpath "$XCODE" 2>/dev/null || echo "$XCODE")"
           echo "Using $XCODE"
           echo "XCODE=$XCODE" >> "$GITHUB_ENV"
           # Pin the developer dir for every later step: xcrun honors
@@ -84,20 +92,15 @@ jobs:
           sudo xcode-select -s "$XCODE/Contents/Developer"
           xcodebuild -version
 
-      - name: Free disk space
-        run: |
-          df -h /
-          echo "--- Xcode versions ---"
-          ls -d /Applications/Xcode_*.app 2>/dev/null || true
-          # Keep only the selected Xcode; other versions are ~15 GB each.
-          for x in /Applications/Xcode_*.app; do
-            if [ "$x" != "$XCODE" ]; then echo "removing $x"; sudo rm -rf "$x"; fi
-          done
-          # Simulator runtimes are not used by a device-only build.
-          if [ -d /Library/Developer/CoreSimulator/Profiles/Runtimes ]; then
-            sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes/* || true
-          fi
-          df -h /
+      - name: Check disk space
+        # The runner has ~96 Gi free (observed on run 44672237845), so
+        # no cleanup is needed. An earlier version of this step deleted
+        # the other Xcode versions to free disk; that broke the build
+        # because the versioned Xcode names are symlinks to the
+        # short-named install, and deleting the real directory left the
+        # selected Xcode pointing at nothing (xcrun: missing
+        # DEVELOPER_DIR path). Never delete Xcode installs here.
+        run: df -h /
 
       - name: Install host tools
         run: |
