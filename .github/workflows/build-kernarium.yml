@@ -520,8 +520,20 @@ jobs:
       - name: Verify the runtime is in the binary
         run: |
           lipo -info build/Payload/OpenCode.app/OpenCode
-          nm -arch arm64 build/Payload/OpenCode.app/OpenCode | grep -q ' _kernarium_runtime_get_api_v28' \
-            || { echo "Kernarium runtime symbol missing from the app binary"; exit 1; }
+          # The app loads the runtime via dlopen + dlsym (KernGlue.m),
+          # so the runtime symbol is NOT in the app binary's symbol
+          # table — it lives in the embedded framework, and the app
+          # holds only the dlsym string. An nm check on the app binary
+          # is the wrong test for this design (it failed run 44719562892
+          # although the framework was built and linked). Verify instead:
+          # the embedded framework exports the API symbol, and the app
+          # binary contains the dlsym string.
+          nm -arch arm64 build/Payload/OpenCode.app/Frameworks/KRuntime_6_18_4K.framework/KRuntime_6_18_4K | grep -q ' _kernarium_runtime_get_api_v28' \
+            || { echo "Kernarium runtime symbol missing from the embedded framework"; exit 1; }
+          strings build/Payload/OpenCode.app/OpenCode | grep -q 'kernarium_runtime_get_api_v28' \
+            || { echo "dlsym string missing from the app binary"; exit 1; }
+          echo "linked framework (if the linker kept it):"
+          otool -L build/Payload/OpenCode.app/OpenCode | grep -i 'KRuntime' || echo "(no KRuntime load command; dlopen loads it by path)"
           for fw in KRuntime_6_18_4K KosmicKrisp MesaEGL MesaGallium; do
             test -d "build/Payload/OpenCode.app/Frameworks/$fw.framework" \
               || { echo "missing embedded framework: $fw"; exit 1; }
