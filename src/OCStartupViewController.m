@@ -5,8 +5,8 @@
 // dot plus "Starting" on the left and a live elapsed timer on the
 // right, a big bold app title, and one rounded card holding
 // checklist rows. Each row is a real boot stage, driven only by
-// what the engine actually reports (OCEngine state and the serve.log
-// PROGRESS lines OCEngine already polls): a row flips to a green
+// what the engine actually reports (OCEngine state and the PROGRESS
+// lines the guest prints over the console): a row flips to a green
 // check only when that stage really completed, the current stage
 // shows a spinner, later stages stay dim. Nothing is faked.
 //
@@ -380,7 +380,7 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
     // own. While it is starting or running there is nothing to say.
     NSString *reason = nil;
     if (!engine.guestCoreLinked) {
-        reason = @"The engine is not ready yet in this build. Setup already saved the Debian packages, but the engine cannot start here.";
+        reason = @"The engine is not ready yet in this build. Setup downloads the guest image first, but the engine cannot start here.";
     } else if (engine.state == OCEngineStateNotInstalled) {
         reason = @"First-launch setup has not finished yet. Continue to the app to run setup from the Engine tab.";
     } else if (engine.state == OCEngineStateInstalling) {
@@ -441,12 +441,13 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
         [self setRow:OCStartupRowOpenCode state:OCStartupRowPending detail:@"OpenCode 2.3.0"];
     }
 
+    BOOL desktop = [[engine engineMode] isEqualToString:OCEngineModeDesktop];
     if (running) {
-        [self setRow:OCStartupRowServer state:OCStartupRowDone detail:@"Listening on 127.0.0.1:4096"];
+        [self setRow:OCStartupRowServer state:OCStartupRowDone detail:desktop ? @"Desktop window ready" : @"Listening on 127.0.0.1:4096"];
     } else if (starting && p >= 0.85) {
-        [self setRow:OCStartupRowServer state:OCStartupRowActive detail:@"Starting server..."];
+        [self setRow:OCStartupRowServer state:OCStartupRowActive detail:desktop ? @"Starting desktop..." : @"Starting server..."];
     } else {
-        [self setRow:OCStartupRowServer state:OCStartupRowPending detail:@"Port 4096"];
+        [self setRow:OCStartupRowServer state:OCStartupRowPending detail:desktop ? @"Desktop UI" : @"Port 4096"];
     }
 }
 

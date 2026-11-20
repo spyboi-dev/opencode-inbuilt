@@ -6,6 +6,7 @@ static NSString *const kServerURL = @"oc.serverURL";
 static NSString *const kModel = @"oc.model";
 static NSString *const kModelProvider = @"oc.modelProvider";
 static NSString *const kAgent = @"oc.agent";
+static NSString *const kEngineMode = @"oc.engineMode";
 static NSString *const kPasswordAccount = @"opencode-server-password";
 
 @implementation OCSettings
@@ -22,6 +23,8 @@ static NSString *const kPasswordAccount = @"opencode-server-password";
     _model = [d stringForKey:kModel] ?: @"";
     _modelProviderID = [d stringForKey:kModelProvider] ?: @"";
     _agent = [d stringForKey:kAgent] ?: @"build";
+    _engineMode = [d stringForKey:kEngineMode] ?: @"cli";
+    if (![_engineMode isEqualToString:@"desktop"]) _engineMode = @"cli";
 }
 
 - (void)save {
@@ -30,6 +33,7 @@ static NSString *const kPasswordAccount = @"opencode-server-password";
     [d setObject:_model forKey:kModel];
     [d setObject:_modelProviderID forKey:kModelProvider];
     [d setObject:_agent forKey:kAgent];
+    [d setObject:_engineMode forKey:kEngineMode];
     [d synchronize];
 }
 

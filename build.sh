@@ -2,6 +2,14 @@
 # OpenCode inbuilt-engine iOS build (Linux, clang-18 + ld64.lld-18, iPhoneOS 26.5 SDK).
 # Same workflow as SPYTube iOS (~/workspace/spytube-ios/native/build26.sh).
 # -Wall -Wextra, zero warnings required (see BUILD-NOTE.md bug pass).
+#
+# Kernarium-engine branch: this build compiles the Kernarium glue
+# (KernGlue, OCVsockBridge, OCGuestInstall) but does NOT link the
+# runtime framework — it is loaded at run time with dlopen, and the
+# framework only exists in the Mac-built IPA (build-kernarium.sh).
+# So this build runs and reports the engine honestly as "not ready
+# yet", exactly like the old no-core build. The Mac build defines
+# OC_KERNARIUM_LINKED=1 and links + embeds the frameworks.
 set -e
 cd "$(dirname "$0")"
 SDK="$HOME/workspace/spytube-ios/sdks/iPhoneOS26.5.sdk"
@@ -16,7 +24,7 @@ mkdir -p "$APP"
 CLANG=clang-18
 CFLAGS="-target arm64-apple-ios$MIN -isysroot $SDK -miphoneos-version-min=$MIN -fobjc-arc -O2 -Wall -Wextra -Wno-deprecated-declarations -F$SDK/System/Library/SubFrameworks -F$SDK/System/Library/PrivateFrameworks"
 
-for f in main AppDelegate OCKeychain OCUtil OCSettings OCServerClient OCEngine OCSessionsViewController OCChatViewController OCFilesViewController OCEngineViewController OCSettingsViewController OCIntegrationsViewController OCBrowserViewController OCCodeViewController OCStartupViewController; do
+for f in main AppDelegate OCKeychain OCUtil OCSettings OCServerClient OCEngine OCSessionsViewController OCChatViewController OCFilesViewController OCEngineViewController OCSettingsViewController OCIntegrationsViewController OCBrowserViewController OCCodeViewController OCStartupViewController OCDesktopViewController KernGlue OCVsockBridge OCGuestInstall; do
   echo "== $f.m"
   $CLANG $CFLAGS -c "$SRC/$f.m" -o "$OUT/$f.o"
 done
@@ -27,13 +35,12 @@ ld64.lld-18 -arch arm64 -platform_version ios $MIN 26.5 \
   -F"$SDK/System/Library/Frameworks" -F"$SDK/System/Library/SubFrameworks" -F"$SDK/System/Library/PrivateFrameworks" \
   -L"$SDK/usr/lib" \
   -adhoc_codesign -ObjC -dead_strip \
-  "$OUT"/main.o "$OUT"/AppDelegate.o "$OUT"/OCKeychain.o "$OUT"/OCUtil.o "$OUT"/OCSettings.o "$OUT"/OCServerClient.o "$OUT"/OCEngine.o "$OUT"/OCSessionsViewController.o "$OUT"/OCChatViewController.o "$OUT"/OCFilesViewController.o "$OUT"/OCEngineViewController.o "$OUT"/OCSettingsViewController.o "$OUT"/OCIntegrationsViewController.o "$OUT"/OCBrowserViewController.o "$OUT"/OCCodeViewController.o "$OUT"/OCStartupViewController.o \
-  -framework UIKit -framework Foundation -framework Security -framework CoreGraphics -framework QuartzCore -framework WebKit \
-  -lobjc -lSystem \
+  "$OUT"/main.o "$OUT"/AppDelegate.o "$OUT"/OCKeychain.o "$OUT"/OCUtil.o "$OUT"/OCSettings.o "$OUT"/OCServerClient.o "$OUT"/OCEngine.o "$OUT"/OCSessionsViewController.o "$OUT"/OCChatViewController.o "$OUT"/OCFilesViewController.o "$OUT"/OCEngineViewController.o "$OUT"/OCSettingsViewController.o "$OUT"/OCIntegrationsViewController.o "$OUT"/OCBrowserViewController.o "$OUT"/OCCodeViewController.o "$OUT"/OCStartupViewController.o "$OUT"/OCDesktopViewController.o "$OUT"/KernGlue.o "$OUT"/OCVsockBridge.o "$OUT"/OCGuestInstall.o \
+  -framework UIKit -framework Foundation -framework Security -framework CoreGraphics -framework QuartzCore -framework WebKit -framework Metal -framework MetalKit -framework CoreLocation \
+  -lobjc -lSystem -lz \
   -o "$APP/OpenCode"
 
 cp "$SRC/Info.plist" "$APP/Info.plist"
-cp resources/debian-manifest.json "$APP/debian-manifest.json"
 OLD="$HOME/workspace/spytube-ios/native/build/Payload/SPYTube.app"
 ICONS_DIR="resources/icons"
 [ -f "$ICONS_DIR/AppIcon1024.png" ] || ICONS_DIR="$OLD"

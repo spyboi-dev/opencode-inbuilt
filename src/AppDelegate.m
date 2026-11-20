@@ -7,8 +7,8 @@
 #import "OCStartupViewController.h"
 #import "OCEngine.h"
 
-#ifdef OC_CORE_LINKED
-#import "CoreGlue.h"
+#ifdef OC_KERNARIUM_LINKED
+#import "KernGlue.h"
 #endif
 
 @implementation OCAppDelegate
@@ -29,18 +29,28 @@
     self.window.rootViewController = tabs;
     [self.window makeKeyAndVisible];
 
+    // Background execution: Always location keeps the app (and the
+    // in-process guest engine) alive in the background. The prompt
+    // copy in Info.plist says plainly what it is for. Location
+    // updates start once permission is granted; until then the app
+    // behaves as before.
+    [self startLocationForBackground];
+
     // Engine state only, then auto-start when it can start: the
     // guest core is linked and first-launch setup already saved the
-    // Debian packages. A first launch never blocks on a download:
+    // guest image. A first launch never blocks on a download:
     // auto-start does nothing until setup is done, and nothing at
     // all in a build where the core is not linked.
     [[OCEngine shared] refreshState];
-#ifdef OC_CORE_LINKED
+#ifdef OC_KERNARIUM_LINKED
     // The core is linked: register the guest executor so
     // OCEngine.guestCoreLinked is YES and Start boots the guest.
     // Without the define this line does not exist and the no-core
-    // path (core pending link) is unchanged.
-    [[OCCoreGlue shared] installGuestExecutor];
+    // path (core pending link) is unchanged. The guest framebuffer
+    // view parks behind the tab bar; the Desktop screen moves it
+    // into its own view while visible.
+    [[OCKernGlue shared] installGuestExecutor];
+    [[OCKernGlue shared] parkGuestView];
 #endif
     [[OCEngine shared] maybeAutoStartEngine];
     // Boot screen: Andarium-style, shows the real-time engine and
@@ -57,9 +67,60 @@
 }
 
 - (void)applicationDidEnterBackground:(UIApplication *)application {
-    // iOS may suspend or kill the app; the guest dies with it (files
-    // persist, processes do not). The engine health timer restarts the
-    // server when the app comes back.
+    // iOS may suspend or kill the app; the guest dies with it. With
+    // the location background mode the app is kept alive instead, so
+    // the guest keeps running; the GPU hold keeps the guest from
+    // touching the host GPU while the app is in the background, where
+    // the GPU is revoked within seconds.
+#ifdef OC_KERNARIUM_LINKED
+    [[OCKernGlue shared] setGpuHold:YES];
+#endif
+}
+
+- (void)applicationWillEnterForeground:(UIApplication *)application {
+#ifdef OC_KERNARIUM_LINKED
+    [[OCKernGlue shared] setGpuHold:NO];
+#endif
+}
+
+#pragma mark - Background location
+
+- (void)startLocationForBackground {
+    CLLocationManager *manager = [[CLLocationManager alloc] init];
+    manager.delegate = self;
+    // Coarse fixes are enough: location is only the reason iOS
+    // keeps the app alive, not data the app uses. No automatic
+    // pausing: a paused update session would let the app suspend.
+    manager.desiredAccuracy = kCLLocationAccuracyThreeKilometers;
+    manager.distanceFilter = kCLDistanceFilterNone;
+    manager.pausesLocationUpdatesAutomatically = NO;
+    manager.allowsBackgroundLocationUpdates = YES;
+    self.locationManager = manager;
+    CLAuthorizationStatus status = manager.authorizationStatus;
+    if (status == kCLAuthorizationStatusAuthorizedAlways) {
+        [manager startUpdatingLocation];
+    } else if (status == kCLAuthorizationStatusNotDetermined) {
+        [manager requestAlwaysAuthorization];
+    }
+    // When-in-use only, or denied: no background keep-alive. The
+    // app still works; the engine just stops with the app, as
+    // before. Nothing nags the user again from here.
+}
+
+- (void)locationManagerDidChangeAuthorization:(CLLocationManager *)manager {
+    if (manager.authorizationStatus == kCLAuthorizationStatusAuthorizedAlways) {
+        [manager startUpdatingLocation];
+    }
+}
+
+// Location fixes are never stored, never sent, and never used for
+// anything except keeping the app alive in the background.
+- (void)locationManager:(CLLocationManager *)manager didUpdateLocations:(NSArray<CLLocation *> *)locations {
+    (void)manager; (void)locations;
+}
+
+- (void)locationManager:(CLLocationManager *)manager didFailWithError:(NSError *)error {
+    (void)manager; (void)error;
 }
 
 @end

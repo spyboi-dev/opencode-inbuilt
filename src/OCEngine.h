@@ -1,32 +1,43 @@
 // OCEngine - the in-app engine host.
 //
-// ONE app, real OpenCode inside it. The engine is the LinuxRunner core:
-// an ARM64 interpreter + Linux syscall layer running a Debian 13 guest
-// in-process, with Node and OpenCode (opencode-ai@2.3.0) installed in it.
-// On launch the engine boots the guest and runs:
-//   opencode serve --port 4096 --hostname 0.0.0.0
-// with OPENCODE_SERVER_PASSWORD from the Keychain. Node runs --jitless
-// under the interpreter. The UI talks to the server at 127.0.0.1:4096.
+// ONE app, real OpenCode inside it. The engine is the Kernarium core:
+// a real Linux 6.18 kernel running a Debian 13 guest in-process, with
+// Node and OpenCode (2.3.0) baked into the guest image. On launch the
+// engine boots the guest and, depending on the engine mode, runs
+// either the OpenCode CLI server or the real OpenCode desktop app:
+//   CLI        - `opencode serve --port 4096 --hostname 0.0.0.0`
+//                with OPENCODE_SERVER_PASSWORD from the Keychain. The
+//                native iOS UI talks to the server at 127.0.0.1:4096
+//                through the vsock bridge (see KernGlue).
+//   Desktop UI - the real OpenCode Linux desktop app runs in the
+//                guest and its window shows through the guest display
+//                (Virtio-GPU to a Metal view). The native UI stays
+//                available; the desktop window is a second surface.
+// The mode is the user's choice, persisted in OCSettings, default
+// CLI. Switching modes restarts the engine in the new mode.
 //
 // Guest boot interface: the embedded core provides a guest executor
-// (a block that runs a command inside the guest and returns its output).
-// The executor is registered by the linked core at app start. In this
-// build the core library is NOT yet linked (see BUILD-NOTE.md, "Embedding
-// decision"): the engine reports that state honestly and never pretends
-// the guest is running. Everything else in this class is real and works
-// today: first-launch Debian package cache (download + SHA-256 verify
-// against the bundled manifest), password handling, health checks and
-// auto-restart.
+// (a block that types a command at the guest console; see KernGlue).
+// The executor is registered by the linked core at app start. In a
+// build where the runtime framework did not load, the engine reports
+// that state honestly and never pretends the guest is running.
+// Everything else in this class is real and works today:
+// first-launch guest image download (SHA-256 verified), password
+// handling, health checks and auto-restart.
 #import <Foundation/Foundation.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
+// Engine modes. CLI is the default.
+extern NSString *const OCEngineModeCLI;     // @"cli"
+extern NSString *const OCEngineModeDesktop; // @"desktop"
+
 typedef NS_ENUM(NSInteger, OCEngineState) {
     OCEngineStateNotInstalled, // first launch setup not done
-    OCEngineStateInstalling,   // downloading/verifying Debian packages
-    OCEngineStateInstalled,    // packages cached, guest not started
+    OCEngineStateInstalling,   // downloading/verifying the guest image
+    OCEngineStateInstalled,    // image ready, guest not started
     OCEngineStateStarting,     // guest booting / serve launching
-    OCEngineStateRunning,      // /api/info answers
+    OCEngineStateRunning,      // server answering (CLI) / desktop up (Desktop UI)
     OCEngineStateStopped,      // guest stopped (app killed, iOS suspend)
     OCEngineStateCorePending,  // guest core library not linked in this build
     OCEngineStateError
@@ -39,7 +50,7 @@ typedef void (^OCGuestExecutor)(NSString *command, NSString *workingDirectory,
 + (instancetype)shared;
 @property (nonatomic, readonly) OCEngineState state;
 @property (nonatomic, readonly) NSString *stateDescription;
-@property (nonatomic, readonly) BOOL guestCoreLinked; // NO in this build, see BUILD-NOTE.md
+@property (nonatomic, readonly) BOOL guestCoreLinked; // NO when the runtime framework did not load
 @property (nonatomic, copy, nullable) OCGuestExecutor guestExecutor; // set by the linked core
 @property (nonatomic, copy, nullable) void (^stateDidChange)(OCEngineState state);
 // Multicast state observers. stateDidChange above is a single
@@ -63,27 +74,38 @@ typedef void (^OCGuestExecutor)(NSString *command, NSString *workingDirectory,
 - (void)maybeAutoStartEngine;
 // In-app engine log + serve progress (for the Logs view and the Engine tab).
 // serveProgress is 0..1 while the engine is starting; serveStatus is the
-// current start stage ("Downloading Node...", "Installing OpenCode...", ...).
+// current start stage ("Checking Node...", "Starting desktop...", ...).
 @property (nonatomic, readonly) double serveProgress;
 @property (nonatomic, readonly, nullable) NSString *serveStatus;
 @property (nonatomic, copy, nullable) void (^serveProgressDidChange)(double progress, NSString * _Nullable status);
 // Append a timestamped line to the in-app engine log (also persisted to
 // Documents/Engine/engine.log). Never includes the server password.
 - (void)appendEngineLog:(NSString *)line;
-// Full diagnostic text: engine log + guest boot.log + guest serve.log.
-// Missing files are noted instead of failing.
+// Full diagnostic text: engine log + guest console log. Missing files
+// are noted instead of failing.
 - (NSString *)fullLogText;
+// Feed one chunk of guest console output (from KernGlue). Parses
+// PROGRESS / ERROR / `server listening` / `DESKTOP READY` lines and
+// appends the text to the guest console log.
+- (void)handleGuestConsoleText:(NSString *)text;
 
 - (void)refreshState;
 - (void)startEngineWithCompletion:(void (^)(BOOL started, NSError * _Nullable error))completion;
 - (void)stopEngine;
 - (void)checkHealthWithCompletion:(void (^)(BOOL healthy, NSDictionary * _Nullable info))completion;
-// First-launch setup: downloads the Debian 13.7 package set from
-// deb.debian.org (37 MB, 103 packages) and verifies every SHA-256
-// against the bundled manifest. Safe to call again; verified files skip.
+// First-launch setup: downloads the prebuilt Debian guest image
+// (ext4, Node + OpenCode baked in) and verifies the SHA-256 of the
+// archive and of the extracted image. Safe to call again; a verified
+// image on disk skips the download.
 - (void)runFirstLaunchSetupWithProgress:(void (^)(double fraction, NSString *message))progress
                              completion:(void (^)(BOOL done, NSError * _Nullable error))completion;
-- (NSString *)serveLaunchCommand; // the exact command run inside the guest
+// Engine mode: OCEngineModeCLI (default) or OCEngineModeDesktop.
+// Persisted in OCSettings. Setting a different mode while the engine
+// is running or starting restarts the engine in the new mode;
+// otherwise it takes effect on the next start.
+@property (nonatomic, readonly) NSString *engineMode;
+- (void)setEngineMode:(NSString *)mode;
+- (NSString *)serveLaunchCommand; // the exact CLI serve command run inside the guest
 - (NSString *)engineDirectory;    // Documents/Engine
 @end
 

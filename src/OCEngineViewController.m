@@ -3,10 +3,13 @@
 #import "OCEngineViewController.h"
 #import "OCEngine.h"
 #import "OCSettings.h"
+#import "OCDesktopViewController.h"
 
 @interface OCEngineViewController ()
 @property (nonatomic, strong) UILabel *stateLabel;
 @property (nonatomic, strong) UILabel *detailLabel;
+@property (nonatomic, strong) UISegmentedControl *modeSegment;
+@property (nonatomic, strong) UIButton *showDesktopButton;
 @property (nonatomic, strong) UIProgressView *progressView;
 @property (nonatomic, strong) UILabel *progressLabel;
 @property (nonatomic, strong) UIButton *setupButton;
@@ -37,6 +40,15 @@
     self.setupButton = [self buttonWithTitle:@"Run first-launch setup" action:@selector(setupTapped)];
     self.startButton = [self buttonWithTitle:@"Start engine" action:@selector(startTapped)];
     self.stopButton = [self buttonWithTitle:@"Stop engine" action:@selector(stopTapped)];
+
+    // Engine mode: CLI (native iOS UI talks to `opencode serve`) or
+    // Desktop UI (the real OpenCode desktop app in the guest, shown
+    // on its own screen). The choice is saved, and switching while
+    // the engine runs restarts it in the new mode.
+    self.modeSegment = [[UISegmentedControl alloc] initWithItems:@[@"CLI", @"Desktop UI"]];
+    self.modeSegment.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.modeSegment addTarget:self action:@selector(modeChanged) forControlEvents:UIControlEventValueChanged];
+    self.showDesktopButton = [self buttonWithTitle:@"Show desktop" action:@selector(showDesktopTapped)];
 
     // Live log, PancakeStore style: a "Logs" header with a terminal icon
     // over a dark rounded card holding the monospace log. It sits on this
@@ -73,8 +85,8 @@
     self.shareLogButton = [self buttonWithTitle:@"Copy log" action:@selector(shareLogTapped)];
 
     UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[
-        self.stateLabel, self.detailLabel, self.progressView, self.progressLabel,
-        self.setupButton, self.startButton, self.stopButton,
+        self.stateLabel, self.detailLabel, self.modeSegment, self.progressView, self.progressLabel,
+        self.setupButton, self.startButton, self.stopButton, self.showDesktopButton,
         logHeader, self.logTextView, self.shareLogButton]];
     stack.axis = UILayoutConstraintAxisVertical;
     stack.spacing = 16;
@@ -228,10 +240,16 @@
 - (void)refresh {
     OCEngine *engine = [OCEngine shared];
     self.stateLabel.text = [NSString stringWithFormat:@"Engine: %@", engine.stateDescription];
+    BOOL desktop = [[engine engineMode] isEqualToString:OCEngineModeDesktop];
+    self.modeSegment.selectedSegmentIndex = desktop ? 1 : 0;
     if (engine.guestCoreLinked) {
-        self.detailLabel.text = @"Guest core linked. Debian 13 guest with Node and OpenCode 2.3.0. Server on 127.0.0.1:4096.";
+        if (desktop) {
+            self.detailLabel.text = @"Guest core linked. Debian 13 guest with the OpenCode desktop app. Open the desktop from below once it is running.";
+        } else {
+            self.detailLabel.text = @"Guest core linked. Debian 13 guest with Node and OpenCode 2.3.0. Server on 127.0.0.1:4096.";
+        }
     } else {
-        self.detailLabel.text = @"Engine not ready yet. Setup already saved the Debian packages. The engine cannot start in this build.";
+        self.detailLabel.text = @"Engine not ready yet. Setup downloads the guest image first. The engine cannot start in this build.";
     }
     self.setupButton.hidden = ([OCEngine shared].state != OCEngineStateNotInstalled && [OCEngine shared].state != OCEngineStateError);
     self.startButton.hidden = ([OCEngine shared].state == OCEngineStateRunning || [OCEngine shared].state == OCEngineStateStarting);
@@ -245,6 +263,21 @@
     // a start can hang on a big download, and stopping it has to
     // work. The engine ignores the late start result after a stop.
     self.stopButton.hidden = ([OCEngine shared].state != OCEngineStateRunning && [OCEngine shared].state != OCEngineStateStarting);
+    // The desktop screen only makes sense once the desktop app is
+    // up (or starting) in Desktop UI mode.
+    BOOL showDesktop = desktop && ([OCEngine shared].state == OCEngineStateRunning || [OCEngine shared].state == OCEngineStateStarting);
+    self.showDesktopButton.hidden = !showDesktop;
+}
+
+- (void)modeChanged {
+    NSString *mode = self.modeSegment.selectedSegmentIndex == 1 ? OCEngineModeDesktop : OCEngineModeCLI;
+    [[OCEngine shared] setEngineMode:mode];
+    [self refresh];
+}
+
+- (void)showDesktopTapped {
+    OCDesktopViewController *desktop = [[OCDesktopViewController alloc] init];
+    [self.navigationController pushViewController:desktop animated:YES];
 }
 
 - (void)setupTapped {
@@ -256,12 +289,12 @@
     self.progressView.hidden = NO;
     self.progressView.progress = 0;
     if (![OCEngine shared].guestCoreLinked) {
-        // Setup only caches the Debian packages in this build; the
+        // Setup only downloads the guest image in this build; the
         // guest core is not linked yet, so the engine cannot start
         // after setup. Say so up front instead of implying otherwise.
-        self.progressLabel.text = @"Setup only saves the Debian packages (37 MB). The engine cannot start yet.";
+        self.progressLabel.text = @"Setup only downloads the guest image. The engine cannot start yet.";
     } else {
-        self.progressLabel.text = @"Downloading Debian 13.7 packages (37 MB, 103 packages)…";
+        self.progressLabel.text = @"Downloading the Debian guest image (Node and OpenCode baked in)…";
     }
     [[OCEngine shared] runFirstLaunchSetupWithProgress:^(double fraction, NSString *message) {
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -277,9 +310,9 @@
             self.progressView.hidden = YES;
             if (done) {
                 if (![OCEngine shared].guestCoreLinked) {
-                    self.progressLabel.text = @"Setup done. Debian packages saved. The engine cannot start yet.";
+                    self.progressLabel.text = @"Setup done. Guest image saved. The engine cannot start yet.";
                 } else {
-                    self.progressLabel.text = @"Setup done. Debian packages cached and verified.";
+                    self.progressLabel.text = @"Setup done. Guest image downloaded and verified.";
                 }
                 [[OCEngine shared] refreshState];
                 [self refresh];
