@@ -264,6 +264,13 @@ static void ConsoleOutput(void *context, const void *buffer, size_t length) {
     }
     _api->set_console_output_callback(ConsoleOutput, (__bridge void *)self);
     MTKView *view = self.guestView;
+    // The guest framebuffer view is created and parked here, on the
+    // first real boot — never at app launch. run() needs a valid
+    // Metal view, and parking it behind the tab bar keeps the same
+    // end state the launch-time park used to produce, just later.
+    // bootWithCompletion runs on the main thread, so this UIKit
+    // work is on the right thread.
+    [self parkGuestView];
     CGFloat scale = [UIScreen mainScreen].scale;
     _rootfsPath = [self guestImagePath];
     _sessionRecordPath = [[self guestDirectory] stringByAppendingPathComponent:@"session.json"];

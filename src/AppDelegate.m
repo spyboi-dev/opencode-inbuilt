@@ -17,7 +17,11 @@
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
     // Crash recording is already installed in main(), before
     // UIApplicationMain: OCCrashLogInstallEarly() wrote the launch
-    // line and checked the previous run. Nothing to do here.
+    // line and checked the previous run. Step markers below are
+    // synchronous (appendEngineLogSync writes to
+    // Documents/Engine/engine.log before returning), so a launch
+    // death leaves the exact step that died as the last line.
+    [[OCEngine shared] appendEngineLogSync:@"Launch step 1/7: didFinishLaunching entered"];
     self.window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
 
     OCSessionsViewController *sessions = [[OCSessionsViewController alloc] init];
@@ -32,6 +36,7 @@
     tabs.viewControllers = @[sessionsNav, integrationsNav];
     self.window.rootViewController = tabs;
     [self.window makeKeyAndVisible];
+    [[OCEngine shared] appendEngineLogSync:@"Launch step 2/7: window and tabs shown"];
 
     // Background execution: Always location keeps the app (and the
     // in-process guest engine) alive in the background. The prompt
@@ -39,6 +44,7 @@
     // updates start once permission is granted; until then the app
     // behaves as before.
     [self startLocationForBackground];
+    [[OCEngine shared] appendEngineLogSync:@"Launch step 3/7: location started"];
 
     // Engine state only, then auto-start when it can start. The
     // runtime framework is NOT loaded here: it loads on the first
@@ -47,14 +53,19 @@
     // At launch the guest executor is nil, so auto-start skips
     // cleanly and the app opens to the tabs and startup screen.
     [[OCEngine shared] refreshState];
+    [[OCEngine shared] appendEngineLogSync:@"Launch step 4/7: engine state refreshed"];
 #ifdef OC_KERNARIUM_LINKED
-    // The guest framebuffer view parks behind the tab bar; the
-    // Desktop screen moves it into its own view while visible.
-    // Creating the Metal view here is safe: it touches no runtime
-    // code (the framework loads later, on Start).
-    [[OCKernGlue shared] parkGuestView];
+    // The guest framebuffer view (MTKView) is NOT created here any
+    // more: creating Metal work at launch is the last untested
+    // piece of the launch window, and the 9e5e9bb device log showed
+    // the app dying before this point anyway. The view is created
+    // and parked in bootWithCompletion, where run() actually needs
+    // it; the Desktop screen moves it into its own view while
+    // visible, as before. No Metal work happens at launch now.
+    [[OCEngine shared] appendEngineLogSync:@"Launch step 5/7: guest view deferred until first Start (no Metal at launch)"];
 #endif
     [[OCEngine shared] maybeAutoStartEngine];
+    [[OCEngine shared] appendEngineLogSync:@"Launch step 6/7: auto-start check done"];
     // Boot screen: Andarium-style, shows the real-time engine and
     // server start, with a Log button opening the Engine tab's live
     // log. It dismisses itself once the server is listening, and the
@@ -65,6 +76,7 @@
     dispatch_async(dispatch_get_main_queue(), ^{
         [tabs presentViewController:startup animated:NO completion:nil];
     });
+    [[OCEngine shared] appendEngineLogSync:@"Launch step 7/7: didFinishLaunching done"];
     return YES;
 }
 
