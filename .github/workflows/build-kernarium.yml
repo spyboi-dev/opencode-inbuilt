@@ -62,13 +62,21 @@ jobs:
   build:
     runs-on: macos-26
     env:
-      # Apple's clang reads this when no -miphoneos-version-min flag
-      # is given; the framework packaging relies on it.
-      IPHONEOS_DEPLOYMENT_TARGET: '27.0'
       # Prepared dependency sources live on the case-sensitive volume
       # (some upstream trees have case-colliding paths); every
       # dependency build script reads this variable.
       UML_DEPENDENCY_SOURCE_ROOT: /Volumes/KernCase/deps-sources
+      # Do NOT set IPHONEOS_DEPLOYMENT_TARGET at job level. Apple's
+      # clang reads it from the environment and targets iPhone for
+      # EVERY compile, including the host tools (gawk, elfutils,
+      # pahole): they build as iOS binaries that the macOS kernel
+      # kills on execution (Killed: 9, run 44673055527), and gawk's
+      # configure then dies with "cannot run C compiled programs"
+      # (run 44670686952). Every iOS target in this pipeline is set
+      # explicitly where it belongs: build-kernarium.sh passes
+      # -target arm64-apple-ios27.0, the dependency scripts hardcode
+      # DEPLOYMENT_TARGET=27.0, and cmake/toolchains/Apple.cmake
+      # hardcodes 27.0.
     steps:
       - name: Check out app
         uses: actions/checkout@v4
