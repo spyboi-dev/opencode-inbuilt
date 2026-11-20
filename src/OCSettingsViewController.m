@@ -8,6 +8,7 @@
 @property (nonatomic, strong) UITableView *tableView;
 @property (nonatomic, strong) UITextField *serverField;
 @property (nonatomic, strong) NSArray *providers;
+@property (nonatomic, copy, nullable) NSString *modelNote; // shown in the Model row when the server cannot be reached
 @end
 
 @implementation OCSettingsViewController
@@ -88,7 +89,9 @@
         cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     } else if (indexPath.section == 1 && indexPath.row == 1) {
         cell.textLabel.text = @"Model";
-        cell.detailTextLabel.text = s.model.length ? s.model : @"Server default";
+        // When the server is down the picker cannot open; the row
+        // says so inline instead of doing nothing on tap.
+        cell.detailTextLabel.text = self.modelNote ?: (s.model.length ? s.model : @"Server default");
         cell.selectionStyle = UITableViewCellSelectionStyleDefault;
         cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     } else if (indexPath.section == 2) {
@@ -108,7 +111,7 @@
         cell.detailTextLabel.text = @"Agent files live in the guest workspace (~/Projects). Nothing leaves the phone except calls to your AI provider.";
     } else {
         cell.textLabel.text = @"Limits";
-        cell.detailTextLabel.text = @"Guest dies if the app is killed; files persist, the server restarts. See BUILD-NOTE.md.";
+        cell.detailTextLabel.text = @"If the app is closed, the engine stops. Your files stay saved, and the engine restarts next time.";
     }
     return cell;
 }
@@ -126,7 +129,12 @@
         OCSettings *s = [OCSettings shared];
         OCServerClient *client = [[OCServerClient alloc] initWithServerURL:s.serverURL password:[s serverPassword]];
         [client listModelsWithCompletion:^(NSArray *models, NSError *error) {
-            if (error || !models.count) return;
+            if (error || !models.count) {
+                self.modelNote = @"Could not reach the server. Start the engine first.";
+                [self.tableView reloadData];
+                return;
+            }
+            self.modelNote = nil;
             UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Model" message:nil preferredStyle:UIAlertControllerStyleActionSheet];
             for (NSDictionary *model in models) {
                 NSString *modelID = model[@"modelID"] ?: model[@"id"];

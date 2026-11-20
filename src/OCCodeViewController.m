@@ -22,6 +22,21 @@
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = [UIColor systemBackgroundColor];
+    if (!self.codeContent.length) {
+        // An empty file is not a blank screen: say so in the view.
+        UILabel *label = [[UILabel alloc] init];
+        label.text = @"This file is empty.";
+        label.font = [UIFont systemFontOfSize:15];
+        label.textColor = [UIColor secondaryLabelColor];
+        label.textAlignment = NSTextAlignmentCenter;
+        label.translatesAutoresizingMaskIntoConstraints = NO;
+        [self.view addSubview:label];
+        [NSLayoutConstraint activateConstraints:@[
+            [label.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+            [label.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor],
+        ]];
+        return;
+    }
     UIFont *mono = [UIFont monospacedSystemFontOfSize:13 weight:UIFontWeightRegular];
     NSArray *lines = [self.codeContent componentsSeparatedByString:@"\n"];
     // The gutter: one right-aligned number per line, faint.

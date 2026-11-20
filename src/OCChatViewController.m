@@ -116,6 +116,17 @@ static UIColor *OCClaudeGlass(void) {
 @property (nonatomic, strong) NSMutableSet *expandedUserKeys; // keys of expanded (unfolded) user bubbles
 @property (nonatomic, copy, nullable) NSString *currentModelID;
 @property (nonatomic, copy, nullable) NSString *currentProviderID;
+// Inline error banner: a short reason shown at the top of the
+// thread when a send, model pick or diff fails. It replaces the
+// old modal "Error" alert, which blocked the whole screen for a
+// normal state (the engine not running). It hides itself after
+// a few seconds; errorBannerToken keeps a stale hide from
+// dismissing a newer message.
+@property (nonatomic, strong) UILabel *errorBanner;
+@property (nonatomic, assign) NSInteger errorBannerToken;
+// YES when the last message fetch failed: the empty thread then
+// explains the server is down instead of saying "no messages".
+@property (nonatomic, assign) BOOL loadError;
 @end
 
 @implementation OCChatViewController
@@ -447,8 +458,29 @@ static UIColor *OCClaudeGlass(void) {
     // The model pill takes the space between the plus and the sparkle.
     [self.modelChipButton.trailingAnchor constraintLessThanOrEqualToAnchor:self.sparkleButton.leadingAnchor constant:-8].active = YES;
 
+    // Inline error banner, over the top of the thread. Hidden until
+    // a send, model pick or diff fails; see showError:.
+    self.errorBanner = [[UILabel alloc] init];
+    self.errorBanner.backgroundColor = OCLayer01();
+    self.errorBanner.layer.cornerRadius = 10;
+    self.errorBanner.layer.masksToBounds = YES;
+    self.errorBanner.font = OCRoundedFont(13, UIFontWeightMedium);
+    self.errorBanner.textColor = OCTextBase();
+    self.errorBanner.textAlignment = NSTextAlignmentCenter;
+    self.errorBanner.numberOfLines = 2;
+    self.errorBanner.hidden = YES;
+    self.errorBanner.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:self.errorBanner];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.errorBanner.topAnchor constraintEqualToAnchor:self.toolbarGlass.bottomAnchor constant:8],
+        [self.errorBanner.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:12],
+        [self.errorBanner.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-12],
+        [self.errorBanner.heightAnchor constraintGreaterThanOrEqualToConstant:36],
+    ]];
+
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(keyboardWillShow:) name:UIKeyboardWillShowNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(keyboardWillHide:) name:UIKeyboardWillHideNotification object:nil];
+    [self updateEmptyState];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -526,9 +558,11 @@ static UIColor *OCClaudeGlass(void) {
 - (void)plusTapped {
     UIAlertController *sheet = [UIAlertController alertControllerWithTitle:nil message:nil preferredStyle:UIAlertControllerStyleActionSheet];
     [sheet addAction:[UIAlertAction actionWithTitle:@"View diff" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+        (void)action;
         [self showDiff];
     }]];
     [sheet addAction:[UIAlertAction actionWithTitle:@"Open Files" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+        (void)action;
         self.modeSegment.selectedSegmentIndex = 1;
         [self modeChanged];
     }]];
@@ -787,18 +821,50 @@ static UIColor *OCClaudeGlass(void) {
 }
 
 - (void)reloadMessages {
+    __weak typeof(self) weakSelf = self;
     [[self serverClient] fetchMessagesForSession:self.sessionID completion:^(NSArray *messages, NSError *error) {
-        if (error || !messages) return;
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        if (error || !messages) {
+            // A failed refresh is a normal state (engine down).
+            // Keep the messages already on screen; the empty
+            // thread explains itself instead of going blank.
+            strongSelf.loadError = YES;
+            [strongSelf updateEmptyState];
+            return;
+        }
+        strongSelf.loadError = NO;
         // The server returns messages newest first; the thread reads oldest first.
         NSArray *chronological = [[messages reverseObjectEnumerator] allObjects];
-        self.displayItems = [OCChatViewController displayItemsFromMessages:chronological];
-        self.roadmapItems = [OCChatViewController roadmapFromMessages:chronological];
-        [self updateUncommittedBar];
-        [self updateRoadmap];
-        [self.tableView reloadData];
-        [self scrollToBottom];
+        strongSelf.displayItems = [OCChatViewController displayItemsFromMessages:chronological];
+        strongSelf.roadmapItems = [OCChatViewController roadmapFromMessages:chronological];
+        [strongSelf updateUncommittedBar];
+        [strongSelf updateRoadmap];
+        [strongSelf.tableView reloadData];
+        [strongSelf updateEmptyState];
+        [strongSelf scrollToBottom];
     }];
     [self checkPermissions];
+}
+
+// Empty thread: never a bare black screen. With messages the
+// background is plain; without them it says why, and a failed
+// fetch says the engine is down instead of "no messages yet".
+- (void)updateEmptyState {
+    if (self.displayItems.count) {
+        self.tableView.backgroundView = nil;
+        return;
+    }
+    UILabel *label = [[UILabel alloc] initWithFrame:self.tableView.bounds];
+    label.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    label.text = self.loadError
+        ? @"Could not load this chat.\nStart the engine and try again."
+        : @"No messages yet.\nType below to start.";
+    label.font = OCRoundedFont(15, UIFontWeightRegular);
+    label.textColor = OCTextFaint();
+    label.textAlignment = NSTextAlignmentCenter;
+    label.numberOfLines = 0;
+    self.tableView.backgroundView = label;
 }
 
 - (void)scrollToBottom {
@@ -916,9 +982,20 @@ static UIColor *OCClaudeGlass(void) {
 }
 
 - (void)showError:(NSError *)error {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Error" message:error.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-    [self presentViewController:alert animated:YES completion:nil];
+    // Inline, not modal: a short reason at the top of the thread
+    // that fades away on its own. A failed send or model pick is a
+    // normal state (the engine is not running), not something to
+    // block the whole screen with an OK button for.
+    NSString *message = error.localizedDescription ?: @"Something went wrong.";
+    dispatch_async(dispatch_get_main_queue(), ^{
+        self.errorBanner.text = message;
+        self.errorBanner.hidden = NO;
+        self.errorBannerToken++;
+        NSInteger token = self.errorBannerToken;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (token == self.errorBannerToken) self.errorBanner.hidden = YES;
+        });
+    });
 }
 
 #pragma mark - Model picker / diff
@@ -1180,7 +1257,7 @@ static UIColor *OCClaudeGlass(void) {
 
 - (void)foldButtonTapped:(UIButton *)sender {
     NSInteger row = sender.tag;
-    if (row < 0 || row >= self.displayItems.count) return;
+    if (row < 0 || row >= (NSInteger)self.displayItems.count) return;
     NSDictionary *item = self.displayItems[row];
     NSString *key = item[@"key"];
     if (![key isKindOfClass:[NSString class]]) return;
@@ -1247,7 +1324,7 @@ static UIColor *OCClaudeGlass(void) {
 
 - (void)copyButtonTapped:(UIButton *)sender {
     NSInteger row = sender.tag;
-    if (row < 0 || row >= self.displayItems.count) return;
+    if (row < 0 || row >= (NSInteger)self.displayItems.count) return;
     NSString *text = self.displayItems[row][@"text"];
     if ([text isKindOfClass:[NSString class]] && text.length) {
         [UIPasteboard generalPasteboard].string = text;

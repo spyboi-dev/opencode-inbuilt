@@ -77,8 +77,17 @@
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         } else {
             BOOL running = engine.state == OCEngineStateRunning || engine.state == OCEngineStateStarting;
-            cell.textLabel.text = running ? @"Stop engine" : @"Start engine";
-            cell.textLabel.textColor = running ? [UIColor systemRedColor] : [UIColor systemBlueColor];
+            if (!engine.guestCoreLinked) {
+                // The engine cannot start in this build: the row
+                // looks unavailable and says why, instead of
+                // looking tappable and doing nothing on tap.
+                cell.textLabel.text = @"Start engine";
+                cell.textLabel.textColor = [UIColor secondaryLabelColor];
+                cell.detailTextLabel.text = @"Not ready yet";
+            } else {
+                cell.textLabel.text = running ? @"Stop engine" : @"Start engine";
+                cell.textLabel.textColor = running ? [UIColor systemRedColor] : [UIColor systemBlueColor];
+            }
         }
         return cell;
     }
@@ -109,6 +118,11 @@
             return;
         }
         OCEngine *engine = [OCEngine shared];
+        if (!engine.guestCoreLinked) {
+            // Nothing to do: the row already says "Not ready yet".
+            // No alert for this normal state.
+            return;
+        }
         if (engine.state == OCEngineStateRunning || engine.state == OCEngineStateStarting) {
             [engine stopEngine];
         } else {

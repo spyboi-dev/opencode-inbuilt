@@ -95,7 +95,9 @@ static NSString *OCGreetingForNow(void) {
     [[self client] listSessionsWithCompletion:^(NSArray *sessions, NSError *error) {
         [self.refreshControl endRefreshing];
         if (error) {
-            self.statusLabel.text = [NSString stringWithFormat:@"Engine: %@  ·  %@", engine.stateDescription, error.localizedDescription];
+            // No modal for this normal state: the reason stays in
+            // the status line, and pull to refresh retries.
+            self.statusLabel.text = [NSString stringWithFormat:@"Engine: %@  ·  Could not load chats. Start the engine, then pull to retry.", engine.stateDescription];
             return;
         }
         self.sessions = sessions ?: @[];
@@ -107,7 +109,9 @@ static NSString *OCGreetingForNow(void) {
 - (void)newChat {
     [[self client] createSessionWithTitle:nil agent:[OCSettings shared].agent completion:^(NSDictionary *session, NSError *error) {
         if (error || !session) {
-            [self showError:error ?: [NSError errorWithDomain:@"OC" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"Could not create a session. Is the engine running?"}]];
+            // No modal for this normal state: the engine is not
+            // running. Say so in the status line instead.
+            self.statusLabel.text = @"Could not start a chat. Start the engine first.";
             return;
         }
         [self openSession:session];
@@ -118,12 +122,6 @@ static NSString *OCGreetingForNow(void) {
 - (void)openSession:(NSDictionary *)session {
     OCChatViewController *chat = [[OCChatViewController alloc] initWithSession:session];
     [self.navigationController pushViewController:chat animated:YES];
-}
-
-- (void)showError:(NSError *)error {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Error" message:error.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-    [self presentViewController:alert animated:YES completion:nil];
 }
 
 #pragma mark - Table

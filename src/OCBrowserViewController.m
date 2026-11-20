@@ -12,6 +12,7 @@
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+    self.title = @"Browser";
     self.view.backgroundColor = [UIColor systemBackgroundColor];
     self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone target:self action:@selector(doneTapped)];
 
@@ -83,6 +84,27 @@
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
     (void)navigation;
     self.addressField.text = webView.URL.absoluteString;
+}
+
+- (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)navigation withError:(NSError *)error {
+    (void)navigation;
+    [self showLoadError:error];
+}
+
+- (void)webView:(WKWebView *)webView didFailNavigation:(WKNavigation *)navigation withError:(NSError *)error {
+    (void)navigation;
+    [self showLoadError:error];
+}
+
+// A page that fails to load never leaves a blank screen: the view
+// itself says what happened and what to try next.
+- (void)showLoadError:(NSError *)error {
+    NSString *reason = error.localizedDescription ?: @"The page could not be opened.";
+    NSString *html = [NSString stringWithFormat:
+        @"<html><body style=\"background:#242424;color:#f2f2f2;font-family:-apple-system;font-size:16px;padding:40px 24px;text-align:center;\">"
+        @"<p><b>Could not open this page.</b></p><p style=\"color:#aeaeae;\">%@</p>"
+        @"<p style=\"color:#aeaeae;\">Check the address and try again.</p></body></html>", reason];
+    [self.webView loadHTMLString:html baseURL:nil];
 }
 
 @end

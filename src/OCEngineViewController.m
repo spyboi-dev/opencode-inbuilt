@@ -206,10 +206,16 @@
     if (engine.guestCoreLinked) {
         self.detailLabel.text = @"Guest core linked. Debian 13 guest with Node and OpenCode 2.3.0. Server on 127.0.0.1:4096.";
     } else {
-        self.detailLabel.text = @"Guest core is not linked in this build. The engine host, the Debian package cache and the server client are ready; the core link is the remaining step (see BUILD-NOTE.md). The app will start the guest as soon as the core is linked.";
+        self.detailLabel.text = @"Engine not ready yet. Setup already saved the Debian packages. The engine cannot start in this build.";
     }
     self.setupButton.hidden = ([OCEngine shared].state != OCEngineStateNotInstalled && [OCEngine shared].state != OCEngineStateError);
     self.startButton.hidden = ([OCEngine shared].state == OCEngineStateRunning || [OCEngine shared].state == OCEngineStateStarting);
+    // When the engine cannot start, the button looks unavailable
+    // (dimmed and disabled) instead of looking tappable and then
+    // popping an alert. The reason is already on screen, inline.
+    BOOL canStart = [OCEngine shared].guestCoreLinked;
+    self.startButton.enabled = canStart;
+    self.startButton.alpha = canStart ? 1.0 : 0.4;
     self.stopButton.hidden = ([OCEngine shared].state != OCEngineStateRunning);
 }
 
@@ -225,7 +231,7 @@
         // Setup only caches the Debian packages in this build; the
         // guest core is not linked yet, so the engine cannot start
         // after setup. Say so up front instead of implying otherwise.
-        self.progressLabel.text = @"Engine core is pending link. This setup only caches the Debian packages (37 MB, 103 packages); the engine cannot start yet.";
+        self.progressLabel.text = @"Setup only saves the Debian packages (37 MB). The engine cannot start yet.";
     } else {
         self.progressLabel.text = @"Downloading Debian 13.7 packages (37 MB, 103 packages)…";
     }
@@ -243,10 +249,7 @@
             self.progressView.hidden = YES;
             if (done) {
                 if (![OCEngine shared].guestCoreLinked) {
-                    self.progressLabel.text = @"Setup done. Debian packages cached and verified. Engine core is still pending link, so Start is not available yet.";
-                    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Engine core pending link" message:@"Debian packages are cached and verified. The engine itself cannot start in this build: the LinuxRunner guest core still needs to be linked (see BUILD-NOTE.md). The app will work as a client as soon as a server is reachable at 127.0.0.1:4096." preferredStyle:UIAlertControllerStyleAlert];
-                    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-                    [self presentViewController:alert animated:YES completion:nil];
+                    self.progressLabel.text = @"Setup done. Debian packages saved. The engine cannot start yet.";
                 } else {
                     self.progressLabel.text = @"Setup done. Debian packages cached and verified.";
                 }
@@ -263,6 +266,13 @@
 }
 
 - (void)startTapped {
+    // The button is disabled while the engine cannot start, but
+    // guard anyway: a tap must never pop an alert for this normal
+    // state. The reason stays on screen, inline.
+    if (![OCEngine shared].guestCoreLinked) {
+        self.progressLabel.text = @"Engine cannot start yet. Setup is done, but the engine is not ready in this build.";
+        return;
+    }
     // Show the progress bar right away; the serve progress callback
     // takes over from here (boot, Node download, OpenCode install,
     // server start) and hides it once the engine is running.
@@ -273,9 +283,8 @@
         dispatch_async(dispatch_get_main_queue(), ^{
             if (!started) {
                 NSString *msg = error.localizedDescription ?: @"Unknown error";
-                UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Engine did not start" message:msg preferredStyle:UIAlertControllerStyleAlert];
-                [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-                [self presentViewController:alert animated:YES completion:nil];
+                self.progressView.hidden = YES;
+                self.progressLabel.text = [NSString stringWithFormat:@"Engine did not start: %@", msg];
             }
             [self refresh];
         });

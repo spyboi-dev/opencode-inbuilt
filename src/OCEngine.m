@@ -71,7 +71,7 @@ static NSString *const kDebianCached = @"oc.debianCached";
         case OCEngineStateStarting: return @"Starting engine";
         case OCEngineStateRunning: return @"Engine running";
         case OCEngineStateStopped: return @"Engine stopped";
-        case OCEngineStateCorePending: return @"Engine core pending link";
+        case OCEngineStateCorePending: return @"Not ready yet";
         case OCEngineStateError: return @"Engine error";
     }
 }
@@ -511,7 +511,7 @@ static dispatch_queue_t OCEngineLogQueue(void) {
         // pretending the server is running. See BUILD-NOTE.md.
         [self setState:OCEngineStateCorePending];
         NSError *e = [NSError errorWithDomain:@"OCEngine" code:4
-                                     userInfo:@{NSLocalizedDescriptionKey: @"Guest engine core is not linked in this build. Link the LinuxRunner core (see BUILD-NOTE.md) and rebuild."}];
+                                     userInfo:@{NSLocalizedDescriptionKey: @"The engine is not ready yet in this build, so it cannot start."}];
         dispatch_async(dispatch_get_main_queue(), ^{ completion(NO, e); });
         return;
     }
