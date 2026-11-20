@@ -436,6 +436,45 @@ jobs:
             --descriptor kernel/mainline-6.18/artifacts/accepted-4k.env
           df -h /
 
+      - name: Provide boot base archive
+        run: |
+          # The runtime tree embeds the guest boot base initramfs
+          # (uml-boot-base-aarch64.cpio.gz). No published copy exists in
+          # any Kernarium release and the macOS runner cannot build it
+          # (Buildroot needs Linux), so it is vendored in bootbase/
+          # (built 2026-11-20 from the pinned commit fbe12ee; see
+          # bootbase/README.md and KERNARIUM-BUILD.md). Place it where
+          # the runtime configure expects it, and update the boot-base
+          # descriptor in the cloned checkout to this file's size and
+          # SHA-256: a locally built base never matches the upstream
+          # descriptor (Buildroot output is not bit-reproducible), the
+          # same "accept" pattern already used for the kernel descriptor.
+          # Release, file name and architecture are unchanged.
+          mkdir -p kernarium/.build/rootfs/starter-20260928-boot-base-r1
+          cp bootbase/uml-boot-base-aarch64.cpio.gz \
+            kernarium/.build/rootfs/starter-20260928-boot-base-r1/
+          SIZE="$(stat -f%z bootbase/uml-boot-base-aarch64.cpio.gz)"
+          SHA="$(shasum -a 256 bootbase/uml-boot-base-aarch64.cpio.gz | awk '{print $1}')"
+          echo "boot base: $SIZE bytes, sha256 $SHA"
+          python3 - "$SIZE" "$SHA" <<'PY'
+          import sys
+          size, sha = sys.argv[1], sys.argv[2]
+          path = "kernarium/tools/rootfs/boot-ramdisk/accepted-aarch64.env"
+          lines = open(path).read().splitlines(keepends=True)
+          out, found_size, found_sha = [], False, False
+          for line in lines:
+              if line.startswith("UML_BOOT_BASE_SIZE="):
+                  out.append(f"UML_BOOT_BASE_SIZE={size}\n"); found_size = True
+              elif line.startswith("UML_BOOT_BASE_SHA256="):
+                  out.append(f"UML_BOOT_BASE_SHA256='{sha}'\n"); found_sha = True
+              else:
+                  out.append(line)
+          if not (found_size and found_sha):
+              sys.exit("boot base descriptor lines not found in accepted-aarch64.env")
+          open(path, "w").writelines(out)
+          print(f"accepted-aarch64.env set to size={size} sha256={sha}")
+          PY
+
       - name: Build Kernarium runtime tree
         run: |
           cd kernarium
