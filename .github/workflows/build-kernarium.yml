@@ -38,6 +38,22 @@
 # the real directory breaks the selected Xcode (xcrun: missing
 # DEVELOPER_DIR path, run 44672237845).
 #
+# Mesa endianness patch (run 44675218407): the Mesa GL config fails at
+# u_endian.h:98 "UTIL_ARCH_LITTLE_ENDIAN and/or UTIL_ARCH_BIG_ENDIAN were
+# unset". Meson defines HAVE_ENDIAN_H because <endian.h> exists in the
+# iPhoneOS SDK, but Darwin's endian.h does not provide the glibc
+# __BYTE_ORDER / BSD BYTE_ORDER macros that branch tests, and the
+# __APPLE__ branch that uses __DARWIN_BYTE_ORDER is skipped because
+# HAVE_ENDIAN_H is already defined. Patching the prepared Mesa source is
+# NOT an option: prepare.sh's verify step requires the prepared tree to
+# be clean and at the pinned tree, and rejects a dirty tree. So the
+# workflow patches the build script itself (the cloned checkout, which
+# nothing verifies): it appends -DUTIL_ARCH_LITTLE_ENDIAN=1 and
+# -DUTIL_ARCH_BIG_ENDIAN=0 to the four EPOXY_CROSS arg lines. VIRGL_CROSS
+# is derived from EPOXY_CROSS by awk, so the defines flow into both Mesa
+# configs, virglrenderer, and libepoxy. arm64 iOS is little-endian, so
+# the values are correct for the target.
+#
 # Triggered manually, or on pushes to kernarium-engine that touch the
 # app, the build script, the resources, or this workflow. main is
 # untouched: the LinuxRunner build keeps shipping from build-core.yml.
@@ -284,6 +300,34 @@ jobs:
           # rebuilt instead of failing the job.
           ./dependencies/build-kernel-host-tools.sh --verify-only || rm -rf .build/dependencies/kernel-host-tools
           ./dependencies/build-kernel-host-tools.sh --jobs 3
+
+      - name: Patch GPU build (Mesa endianness)
+        run: |
+          # See the header note: Mesa 26.2.6's u_endian.h errors out on
+          # the iOS device cross build because meson's HAVE_ENDIAN_H
+          # branch does not satisfy Darwin's endian.h, and the prepared
+          # Mesa source cannot be patched (prepare.sh verify rejects a
+          # dirty tree). Patch the build script instead: append the two
+          # endianness defines to the four EPOXY_CROSS arg lines (c,
+          # cpp, objc, objcpp). VIRGL_CROSS is derived from EPOXY_CROSS
+          # by awk, so both Mesa configs, virglrenderer and libepoxy
+          # all get them. Fail loudly if the upstream script changes.
+          python3 - <<'PY'
+          import sys
+          path = "kernarium/dependencies/build-apple-gpu.sh"
+          old = "'-I$STAGE/include']"
+          new = "'-I$STAGE/include', '-DUTIL_ARCH_LITTLE_ENDIAN=1', '-DUTIL_ARCH_BIG_ENDIAN=0']"
+          with open(path) as f:
+              text = f.read()
+          n = text.count(old)
+          if n != 4:
+              print(f"expected 4 EPOXY_CROSS arg lines, found {n}; upstream script changed, aborting", file=sys.stderr)
+              sys.exit(1)
+          with open(path, "w") as f:
+              f.write(text.replace(old, new))
+          print("patched 4 EPOXY_CROSS arg lines with UTIL_ARCH endianness defines")
+          PY
+          grep -n "UTIL_ARCH" kernarium/dependencies/build-apple-gpu.sh
 
       - name: Build Apple GPU prefix (iOS device)
         run: |
