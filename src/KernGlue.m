@@ -82,12 +82,28 @@ static void ConsoleOutput(void *context, const void *buffer, size_t length) {
     if ((self = [super init])) {
         _bootWaiters = [NSMutableArray array];
         _consoleQueue = dispatch_queue_create("com.spyboy.opencode.kernConsole", DISPATCH_QUEUE_SERIAL);
-        // loadRuntime logs the result itself (loaded, or exactly
-        // why not), synchronously, so a launch crash still leaves
-        // the reason on disk.
-        _api = [self loadRuntime];
+        // The runtime framework is deliberately NOT loaded here.
+        // dlopen runs the framework's static initializers, and one
+        // that dies under LiveContainer would kill the launch before
+        // any screen appears. It loads on the first real Start
+        // (ensureRuntimeLoaded), never at app launch; until then
+        // _api is NULL and the engine honestly reports not-ready.
+        [[OCEngine shared] appendEngineLogSync:@"Kernarium runtime load deferred until first Start"];
     }
     return self;
+}
+
+// Load the runtime framework on demand (first Start), and install
+// the guest executor once it is up. Safe to call again: a loaded
+// runtime returns YES at once. A failed load logs the exact reason
+// (loadRuntime) and returns NO; the caller reports it honestly and
+// never boots. Must not be called at app launch.
+- (BOOL)ensureRuntimeLoaded {
+    if (_api) return YES;
+    _api = [self loadRuntime];
+    if (!_api) return NO;
+    [self installGuestExecutor];
+    return YES;
 }
 
 // The framework is linked into the Mac-built IPA only, so resolve it
@@ -215,7 +231,7 @@ static void ConsoleOutput(void *context, const void *buffer, size_t length) {
     }
     if (completion) [_bootWaiters addObject:[completion copy]];
     if (_booting) return;
-    if (!_api) {
+    if (!_api && ![self ensureRuntimeLoaded]) {
         [self finishBootWithSuccess:NO error:GlueError(1, @"The Kernarium runtime framework did not load in this build")];
         return;
     }

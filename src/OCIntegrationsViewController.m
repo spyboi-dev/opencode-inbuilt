@@ -95,7 +95,7 @@
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         } else {
             BOOL running = engine.state == OCEngineStateRunning || engine.state == OCEngineStateStarting;
-            if (!engine.guestCoreLinked) {
+            if (!engine.engineCanStart) {
                 // The engine cannot start in this build: the row
                 // looks unavailable and says why, instead of
                 // looking tappable and doing nothing on tap.
@@ -136,7 +136,7 @@
             return;
         }
         OCEngine *engine = [OCEngine shared];
-        if (!engine.guestCoreLinked) {
+        if (!engine.engineCanStart) {
             // Nothing to do: the row already says "Not ready yet".
             // No alert for this normal state.
             return;

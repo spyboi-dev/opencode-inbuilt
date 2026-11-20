@@ -2,10 +2,13 @@
 // runtime (KRuntime_6_18_4K), replacing CoreGlue (LinuxRunner).
 //
 // This file is compiled into the app by every build on this branch,
-// but the runtime itself is loaded at run time with dlopen: the
-// framework only exists in the Mac-built IPA (build-kernarium.sh),
-// never on this Linux VM. When the framework is absent the glue
-// reports that honestly and OCEngine.guestCoreLinked stays NO.
+// but the runtime itself is loaded at run time with dlopen, on the
+// FIRST Start — never at app launch (a framework whose static
+// initializers die under LiveContainer would otherwise kill the
+// launch before any screen appears). The framework only exists in
+// the Mac-built IPA (build-kernarium.sh), never on this Linux VM.
+// When the framework is absent the glue reports that honestly and
+// OCEngine.guestCoreLinked stays NO.
 //
 // What it does, with no Swift and no Kernarium UI:
 //
@@ -60,8 +63,16 @@ NS_ASSUME_NONNULL_BEGIN
 // screen; AppDelegate inserts it behind the tab bar. Never shown.
 @property (nonatomic, readonly, nullable) MTKView *guestView;
 
+// Load the runtime framework on demand (first Start) and install
+// the guest executor once it is up. Returns YES when the runtime is
+// loaded (or was already). A failed load logs the exact reason and
+// returns NO. Never call at app launch: that is what this exists
+// to avoid.
+- (BOOL)ensureRuntimeLoaded;
+
 // Registers the guest executor on [OCEngine shared], which makes
-// OCEngine.guestCoreLinked become YES. Call once at app launch.
+// OCEngine.guestCoreLinked become YES. Called by
+// ensureRuntimeLoaded on the first Start, not at app launch.
 // No-op (with a log line) when the runtime framework did not load.
 - (void)installGuestExecutor;
 

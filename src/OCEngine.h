@@ -18,7 +18,9 @@
 //
 // Guest boot interface: the embedded core provides a guest executor
 // (a block that types a command at the guest console; see KernGlue).
-// The executor is registered by the linked core at app start. In a
+// The executor is registered by the linked core on the first Start:
+// the runtime framework is dlopen'd there, never at app launch, so
+// a framework that dies while loading cannot kill the launch. In a
 // build where the runtime framework did not load, the engine reports
 // that state honestly and never pretends the guest is running.
 // Everything else in this class is real and works today:
@@ -51,6 +53,14 @@ typedef void (^OCGuestExecutor)(NSString *command, NSString *workingDirectory,
 @property (nonatomic, readonly) OCEngineState state;
 @property (nonatomic, readonly) NSString *stateDescription;
 @property (nonatomic, readonly) BOOL guestCoreLinked; // NO when the runtime framework did not load
+// Kernarium build only: the runtime framework has not been loaded
+// yet, so the executor is not installed — but it CAN load on the
+// first Start (see ensureRuntimeLoaded in KernGlue). NO in builds
+// without the runtime, where Start can never work.
+@property (nonatomic, readonly) BOOL guestCoreLoadable;
+// YES when a Start can be attempted: the core is linked, or it can
+// still be loaded on demand (Kernarium build, not loaded yet).
+@property (nonatomic, readonly) BOOL engineCanStart;
 @property (nonatomic, copy, nullable) OCGuestExecutor guestExecutor; // set by the linked core
 @property (nonatomic, copy, nullable) void (^stateDidChange)(OCEngineState state);
 // Multicast state observers. stateDidChange above is a single

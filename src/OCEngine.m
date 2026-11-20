@@ -85,7 +85,7 @@ static NSString *const kGuestImageInstalled = @"oc.guestImageInstalled";
     if (self.state == OCEngineStateRunning || self.state == OCEngineStateStarting) return;
     if (self.userStoppedEngineThisSession) return;
     if (!self.guestCoreLinked) {
-        [self appendEngineLogSync:@"Auto-start skipped: engine not ready yet in this build"];
+        [self appendEngineLogSync:@"Auto-start skipped: runtime not loaded yet, start the engine from the Engine tab"];
         return;
     }
     if (self.state == OCEngineStateNotInstalled || self.state == OCEngineStateInstalling) {
@@ -104,6 +104,20 @@ static NSString *const kGuestImageInstalled = @"oc.guestImageInstalled";
 }
 
 - (BOOL)guestCoreLinked { return self.guestExecutor != nil; }
+
+- (BOOL)guestCoreLoadable {
+#ifdef OC_KERNARIUM_LINKED
+    // Kernarium build: the runtime has not been loaded yet (it
+    // loads on the first Start), so the executor is not installed
+    // — but a Start can still load it. A build without the runtime
+    // never reaches this branch.
+    return self.guestExecutor == nil;
+#else
+    return NO;
+#endif
+}
+
+- (BOOL)engineCanStart { return self.guestCoreLinked || self.guestCoreLoadable; }
 
 - (NSString *)engineDirectory {
     NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
@@ -159,7 +173,10 @@ static NSString *const kGuestImageInstalled = @"oc.guestImageInstalled";
 - (void)setState:(OCEngineState)state {
     if (_state == state) return;
     _state = state;
-    [self appendEngineLog:[NSString stringWithFormat:@"State: %@", self.stateDescription]];
+    // Synchronous: a state change is a milestone, and a crash a
+    // moment later must not lose the line that says where the
+    // engine got to.
+    [self appendEngineLogSync:[NSString stringWithFormat:@"State: %@", self.stateDescription]];
     if (self.stateDidChange) self.stateDidChange(state);
     [self notifyStateObservers:state];
 }
@@ -212,6 +229,21 @@ static NSMutableString *OCEngineConsolePartial(void) {
     return [[self engineDirectory] stringByAppendingPathComponent:@"guest.log"];
 }
 
+// Keep a log file from growing forever: once it passes 512 KB,
+// keep only the last 256 KB, starting at a line boundary.
+// Byte-based, so a chunk of non-UTF-8 console output cannot defeat
+// it. Runs on OCEngineLogQueue only.
+static void OCEngineCapLogFileToTail(NSString *path) {
+    NSData *data = [NSData dataWithContentsOfFile:path];
+    if (!data || data.length <= 256 * 1024) return;
+    NSUInteger keepFrom = data.length - 256 * 1024;
+    const uint8_t *bytes = (const uint8_t *)data.bytes;
+    while (keepFrom < data.length && bytes[keepFrom] != '\n') keepFrom++;
+    if (keepFrom < data.length) keepFrom++; // skip the newline itself
+    NSData *tail = [data subdataWithRange:NSMakeRange(keepFrom, data.length - keepFrom)];
+    [tail writeToFile:path atomically:YES];
+}
+
 // The file write itself: queue-confined (see OCEngineLogQueue).
 // Creates the directory, appends one timestamped line, and keeps
 // the file from growing forever by keeping only the last 256 KB
@@ -234,15 +266,7 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
     [fh writeData:data];
     unsigned long long size = [fh offsetInFile];
     [fh closeFile];
-    if (size > 512 * 1024) {
-        NSString *old = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
-        if (old.length > 256 * 1024) {
-            NSString *tail = [old substringFromIndex:old.length - 256 * 1024];
-            NSRange nl = [tail rangeOfString:@"\n"];
-            if (nl.location != NSNotFound) tail = [tail substringFromIndex:nl.location + 1];
-            [tail writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
-        }
-    }
+    if (size > 512 * 1024) OCEngineCapLogFileToTail(path);
 }
 
 - (void)appendEngineLog:(NSString *)line {
@@ -314,7 +338,7 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
         if ([self.engineMode isEqualToString:OCEngineModeCLI] && !self.serveProgressDone) {
             self.serveProgressDone = YES;
             [self setServeProgress:1.0 status:@"Engine running"];
-            [self appendEngineLog:@"Server listening (from guest console)"];
+            [self appendEngineLogSync:@"Server listening (from guest console)"];
             if (self.state != OCEngineStateRunning) [self setState:OCEngineStateRunning];
         }
         return;
@@ -324,7 +348,7 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
             self.desktopReady = YES;
             self.serveProgressDone = YES;
             [self setServeProgress:1.0 status:@"Engine running"];
-            [self appendEngineLog:@"Desktop ready (from guest console)"];
+            [self appendEngineLogSync:@"Desktop ready (from guest console)"];
             if (self.state != OCEngineStateRunning) [self setState:OCEngineStateRunning];
         }
         return;
@@ -367,7 +391,11 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
         } else {
             [fh seekToEndOfFile];
             [fh writeData:data];
+            unsigned long long size = [fh offsetInFile];
             [fh closeFile];
+            // Same 512 KB cap as the engine log: a chatty guest
+            // console must not grow this file forever.
+            if (size > 512 * 1024) OCEngineCapLogFileToTail(path);
         }
         NSMutableString *partial = OCEngineConsolePartial();
         [partial appendString:copy];
@@ -401,7 +429,7 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
     // Setup is only the prebuilt guest image. It never touches the
     // guest core: guestExecutor is nil in a build without the runtime
     // framework, and is never called here.
-    [self appendEngineLog:@"First-launch setup started (guest image download)"];
+    [self appendEngineLogSync:@"First-launch setup started (guest image download)"];
     [self setState:OCEngineStateInstalling];
     NSString *imagePath =
 #ifdef OC_KERNARIUM_LINKED
@@ -416,11 +444,11 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
         if (!strongSelf) return;
         if (ok) {
             [[NSUserDefaults standardUserDefaults] setBool:YES forKey:kGuestImageInstalled];
-            [strongSelf appendEngineLog:@"First-launch setup done: guest image downloaded and verified"];
+            [strongSelf appendEngineLogSync:@"First-launch setup done: guest image downloaded and verified"];
             [strongSelf setState:OCEngineStateInstalled];
             dispatch_async(dispatch_get_main_queue(), ^{ completion(YES, nil); });
         } else {
-            [strongSelf appendEngineLog:[NSString stringWithFormat:@"First-launch setup failed: %@", error ?: @"unknown"]];
+            [strongSelf appendEngineLogSync:[NSString stringWithFormat:@"First-launch setup failed: %@", error ?: @"unknown"]];
             [strongSelf setState:OCEngineStateError];
             NSError *e = [OCEngine setupErrorWithCode:6 message:error ?: @"Setup failed"];
             dispatch_async(dispatch_get_main_queue(), ^{ completion(NO, e); });
@@ -443,6 +471,23 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
         dispatch_async(dispatch_get_main_queue(), ^{ completion(NO, e); });
         return;
     }
+#ifdef OC_KERNARIUM_LINKED
+    // Lazy runtime load: the framework is dlopen'd here, on the
+    // first real start — never at app launch, so a framework that
+    // dies while loading kills a Start tap, not the launch. The
+    // crash recorder is already installed (main), and the result
+    // is logged synchronously either way.
+    if (!self.guestCoreLinked) {
+        [self appendEngineLogSync:@"Loading Kernarium runtime..."];
+        if (![[OCKernGlue shared] ensureRuntimeLoaded]) {
+            [self setState:OCEngineStateCorePending];
+            NSError *e = [NSError errorWithDomain:@"OCEngine" code:4
+                                         userInfo:@{NSLocalizedDescriptionKey: @"The Kernarium runtime did not load. See the engine log for the exact reason."}];
+            dispatch_async(dispatch_get_main_queue(), ^{ completion(NO, e); });
+            return;
+        }
+    }
+#endif
     if (!self.guestCoreLinked) {
         // The guest core library is not linked in this build. The engine
         // cannot boot without it, and this method says so instead of
@@ -461,18 +506,18 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
     if (![OCKernGlue shared].booted) {
         [self setState:OCEngineStateStarting];
         [self setServeProgress:0.05 status:@"Booting guest..."];
-        [self appendEngineLog:@"Guest boot started"];
+        [self appendEngineLogSync:@"Guest boot started"];
         __weak typeof(self) weakSelf = self;
         [[OCKernGlue shared] bootWithCompletion:^(BOOL ok, NSError * _Nullable error) {
             typeof(self) strongSelf = weakSelf;
             if (!strongSelf) return;
             if (!ok) {
-                [strongSelf appendEngineLog:[NSString stringWithFormat:@"Guest boot failed: %@", error.localizedDescription ?: @"unknown"]];
+                [strongSelf appendEngineLogSync:[NSString stringWithFormat:@"Guest boot failed: %@", error.localizedDescription ?: @"unknown"]];
                 [strongSelf setState:OCEngineStateError];
                 dispatch_async(dispatch_get_main_queue(), ^{ completion(NO, error); });
                 return;
             }
-            [strongSelf appendEngineLog:@"Guest boot finished"];
+            [strongSelf appendEngineLogSync:@"Guest boot finished"];
             [strongSelf startServeWithCompletion:completion];
         }];
         return;
@@ -496,7 +541,7 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
     self.desktopReady = NO;
     [self setState:OCEngineStateStarting];
     [self setServeProgress:0.05 status:@"Starting server..."];
-    [self appendEngineLog:@"Serve launch started"];
+    [self appendEngineLogSync:@"Serve launch started"];
     BOOL desktop = [self.engineMode isEqualToString:OCEngineModeDesktop];
     NSString *bootstrap = [self consoleBootstrapForDesktop:desktop];
     // The password is typed with echo off (see the bootstrap) and is

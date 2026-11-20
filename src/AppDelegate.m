@@ -15,13 +15,9 @@
 @implementation OCAppDelegate
 
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
-    // Crash recorder first, before anything else runs: a launch
-    // crash must leave one line in the engine log, or there is
-    // nothing to diagnose it with. The log file is
-    // Documents/Engine/engine.log; the Engine tab shows it, and
-    // the Files app can open it (UIFileSharingEnabled).
-    OCCrashLogInstall([[OCEngine shared] engineLogPath]);
-    [[OCEngine shared] appendEngineLogSync:@"--- App launch ---"];
+    // Crash recording is already installed in main(), before
+    // UIApplicationMain: OCCrashLogInstallEarly() wrote the launch
+    // line and checked the previous run. Nothing to do here.
     self.window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
 
     OCSessionsViewController *sessions = [[OCSessionsViewController alloc] init];
@@ -44,20 +40,18 @@
     // behaves as before.
     [self startLocationForBackground];
 
-    // Engine state only, then auto-start when it can start: the
-    // guest core is linked and first-launch setup already saved the
-    // guest image. A first launch never blocks on a download:
-    // auto-start does nothing until setup is done, and nothing at
-    // all in a build where the core is not linked.
+    // Engine state only, then auto-start when it can start. The
+    // runtime framework is NOT loaded here: it loads on the first
+    // Start (see KernGlue ensureRuntimeLoaded), never at launch, so
+    // a framework that dies while loading cannot kill the launch.
+    // At launch the guest executor is nil, so auto-start skips
+    // cleanly and the app opens to the tabs and startup screen.
     [[OCEngine shared] refreshState];
 #ifdef OC_KERNARIUM_LINKED
-    // The core is linked: register the guest executor so
-    // OCEngine.guestCoreLinked is YES and Start boots the guest.
-    // Without the define this line does not exist and the no-core
-    // path (core pending link) is unchanged. The guest framebuffer
-    // view parks behind the tab bar; the Desktop screen moves it
-    // into its own view while visible.
-    [[OCKernGlue shared] installGuestExecutor];
+    // The guest framebuffer view parks behind the tab bar; the
+    // Desktop screen moves it into its own view while visible.
+    // Creating the Metal view here is safe: it touches no runtime
+    // code (the framework loads later, on Start).
     [[OCKernGlue shared] parkGuestView];
 #endif
     [[OCEngine shared] maybeAutoStartEngine];
@@ -75,20 +69,31 @@
 }
 
 - (void)applicationDidEnterBackground:(UIApplication *)application {
-    // iOS may suspend or kill the app; the guest dies with it. With
-    // the location background mode the app is kept alive instead, so
-    // the guest keeps running; the GPU hold keeps the guest from
-    // touching the host GPU while the app is in the background, where
-    // the GPU is revoked within seconds.
+    // Clean-shutdown marker for the unclean-exit check: a later
+    // launch can tell a clean backgrounding from a kill. iOS may
+    // suspend or kill the app after this; the guest dies with it.
+    // With the location background mode the app is kept alive
+    // instead, so the guest keeps running; the GPU hold keeps the
+    // guest from touching the host GPU while the app is in the
+    // background, where the GPU is revoked within seconds.
+    OCCrashLogMarkCleanShutdown();
 #ifdef OC_KERNARIUM_LINKED
     [[OCKernGlue shared] setGpuHold:YES];
 #endif
 }
 
 - (void)applicationWillEnterForeground:(UIApplication *)application {
+    // Foreground marker: a clean-shutdown marker from an earlier
+    // backgrounding must not mask work done after returning.
+    OCCrashLogMarkForeground();
 #ifdef OC_KERNARIUM_LINKED
     [[OCKernGlue shared] setGpuHold:NO];
 #endif
+}
+
+- (void)applicationWillTerminate:(UIApplication *)application {
+    (void)application;
+    OCCrashLogMarkCleanShutdown();
 }
 
 #pragma mark - Background location

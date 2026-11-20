@@ -379,7 +379,11 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
     // The honest reason, only when the engine cannot start on its
     // own. While it is starting or running there is nothing to say.
     NSString *reason = nil;
-    if (!engine.guestCoreLinked) {
+    if (!engine.guestCoreLinked && engine.guestCoreLoadable) {
+        // Runtime not loaded yet: it loads when Start is tapped.
+        // The engine CAN start, just not on its own at launch.
+        reason = @"The engine loads when you start it. Continue to the app and tap Start engine on the Engine tab.";
+    } else if (!engine.guestCoreLinked) {
         reason = @"The engine is not ready yet in this build. Setup downloads the guest image first, but the engine cannot start here.";
     } else if (engine.state == OCEngineStateNotInstalled) {
         reason = @"First-launch setup has not finished yet. Continue to the app to run setup from the Engine tab.";
@@ -411,6 +415,8 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
 
     if (engine.guestCoreLinked) {
         [self setRow:OCStartupRowCore state:OCStartupRowDone detail:@"Linked, ready to boot"];
+    } else if (engine.guestCoreLoadable) {
+        [self setRow:OCStartupRowCore state:OCStartupRowPending detail:@"Loads when you start the engine"];
     } else {
         [self setRow:OCStartupRowCore state:OCStartupRowBlocked detail:@"Not ready in this build"];
     }

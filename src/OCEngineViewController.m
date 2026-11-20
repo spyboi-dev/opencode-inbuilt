@@ -248,6 +248,15 @@
         } else {
             self.detailLabel.text = @"Guest core linked. Debian 13 guest with Node and OpenCode 2.3.0. Server on 127.0.0.1:4096.";
         }
+    } else if (engine.guestCoreLoadable) {
+        // Runtime not loaded yet — it loads when Start is tapped,
+        // never at launch, so a framework that dies while loading
+        // cannot kill the launch. The engine CAN start from here.
+        if (desktop) {
+            self.detailLabel.text = @"Guest runtime loads when you start the engine. Debian 13 guest with the OpenCode desktop app.";
+        } else {
+            self.detailLabel.text = @"Guest runtime loads when you start the engine. Debian 13 guest with Node and OpenCode 2.3.0. Server on 127.0.0.1:4096.";
+        }
     } else {
         self.detailLabel.text = @"Engine not ready yet. Setup downloads the guest image first. The engine cannot start in this build.";
     }
@@ -256,7 +265,10 @@
     // When the engine cannot start, the button looks unavailable
     // (dimmed and disabled) instead of looking tappable and then
     // popping an alert. The reason is already on screen, inline.
-    BOOL canStart = [OCEngine shared].guestCoreLinked;
+    // engineCanStart is YES while the runtime can still load on
+    // demand (Kernarium build, not loaded yet), not only once it
+    // is linked — otherwise Start could never trigger the load.
+    BOOL canStart = [OCEngine shared].engineCanStart;
     self.startButton.enabled = canStart;
     self.startButton.alpha = canStart ? 1.0 : 0.4;
     // Stop stays available while starting, not just once running:
@@ -288,7 +300,7 @@
     self.setupButton.enabled = NO;
     self.progressView.hidden = NO;
     self.progressView.progress = 0;
-    if (![OCEngine shared].guestCoreLinked) {
+    if (![OCEngine shared].engineCanStart) {
         // Setup only downloads the guest image in this build; the
         // guest core is not linked yet, so the engine cannot start
         // after setup. Say so up front instead of implying otherwise.
@@ -309,7 +321,7 @@
             self.setupButton.enabled = YES;
             self.progressView.hidden = YES;
             if (done) {
-                if (![OCEngine shared].guestCoreLinked) {
+                if (![OCEngine shared].engineCanStart) {
                     self.progressLabel.text = @"Setup done. Guest image saved. The engine cannot start yet.";
                 } else {
                     self.progressLabel.text = @"Setup done. Guest image downloaded and verified.";
@@ -330,7 +342,7 @@
     // The button is disabled while the engine cannot start, but
     // guard anyway: a tap must never pop an alert for this normal
     // state. The reason stays on screen, inline.
-    if (![OCEngine shared].guestCoreLinked) {
+    if (![OCEngine shared].engineCanStart) {
         self.progressLabel.text = @"Engine cannot start yet. Setup is done, but the engine is not ready in this build.";
         return;
     }
