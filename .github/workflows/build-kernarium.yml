@@ -192,7 +192,12 @@ jobs:
           echo "gmake: $(command -v gmake) $(gmake --version | head -1)"
           echo "libtoolize: $(command -v libtoolize)"
           # The kernel links ELF with ld.lld and publishes with
-          # llvm-objcopy; both come from Homebrew LLVM.
+          # llvm-objcopy; both come from Homebrew LLVM. Verify every
+          # tool build-kernel.sh and publish-artifact.py need is
+          # actually there: run 44680870911 died at
+          # "linker is unavailable: ld.lld" even though LLVM_BIN was
+          # set, so do not trust the dirname alone. Fail here, in
+          # under a minute, instead of at the kernel step.
           if command -v ld.lld >/dev/null 2>&1; then
             LLVM_BIN="$(dirname "$(command -v ld.lld)")"
           else
@@ -200,6 +205,11 @@ jobs:
             LLVM_BIN="$(brew --prefix llvm)/bin"
           fi
           echo "LLVM tools: $LLVM_BIN"
+          for t in clang clang++ ld.lld llvm-objcopy llvm-ar llvm-nm llvm-objdump llvm-readelf llvm-strip; do
+            if [ -x "$LLVM_BIN/$t" ]; then echo "have $t: $LLVM_BIN/$t"; else echo "MISSING $LLVM_BIN/$t"; fi
+          done
+          test -x "$LLVM_BIN/ld.lld" || { echo "ld.lld is not in $LLVM_BIN; searching:"; find /opt/homebrew -name 'ld.lld' -type f 2>/dev/null | head; exit 1; }
+          test -x "$LLVM_BIN/llvm-objcopy" || { echo "llvm-objcopy is not in $LLVM_BIN"; exit 1; }
           echo "LLVM_BIN=$LLVM_BIN" >> "$GITHUB_ENV"
           # Python 3.11+ and the modules the GPU build needs.
           if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
@@ -371,6 +381,10 @@ jobs:
           export PATH="$LLVM_BIN:$PATH"
           export UML_KERNEL_CC="$LLVM_BIN/clang"
           export UML_KERNEL_HOST_CC="$LLVM_BIN/clang"
+          # Absolute path: build-kernel.sh resolves the linker with
+          # `command -v` on the ambient PATH, and the bare name missed
+          # it on run 44680870911 even with LLVM_BIN on PATH.
+          export UML_KERNEL_LD="$LLVM_BIN/ld.lld"
           ./kernel/mainline-6.18/build/build-kernel.sh --slice arm64 --build /Volumes/KernCase/kernel-build --jobs 3
           python3 kernel/mainline-6.18/build/publish-artifact.py \
             --source /Volumes/KernCase/linux \
