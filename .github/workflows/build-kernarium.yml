@@ -26,16 +26,28 @@
 # build output -- exactly the slice the packaging script itself
 # consumes as its input. The Android runtime is never built.
 #
-# Runner limits (macos-26 standard: 3 vCPU, 7 GB RAM; disk is a 320 Gi
-# volume with ~96 Gi free as observed on run 44672237845, so disk is
-# not a constraint): the GPU prefix build (full Mesa) and the kernel
-# build are the long poles; every heavy step runs at --jobs 3, and the
-# built prefixes + kernel bundle are cached (actions/cache) so a retry
-# reuses them. Bump the cache key suffix (v1 -> v2 ...) when the
-# workflow or the pinned commit changes in a way that must invalidate
-# the cache. Do NOT delete Xcode installs to free disk: the versioned
-# Xcode names are symlinks to the short-named install, and deleting
-# the real directory breaks the selected Xcode (xcrun: missing
+# Runner: xcode-27 (NOT macos-26). Upstream targets the iOS 27 SDK: its
+# audio code uses iOS 27-only AVFoundation APIs
+# (AVAudioEngine connect:to:format:error:, AVAudioPlayerNode
+# playAndReturnError:, AVAudioSessionDidBecomeInactiveNotification and
+# AVAudioSessionResumptionRecommendationNotification) and its Apple.cmake
+# hardcodes deployment target 27.0. The stock macos-26 image ships Xcode
+# only up to 26.6 (iOS SDK 26.5), so the runtime build fails at
+# darwin/device/audio/apple_playback_sink.mm with 7 errors (run
+# 44712652705). The xcode-27 image (public preview) carries Xcode 27 with
+# the iOS 27 SDK. If GitHub retires the xcode-27 label, the fallback is
+# macos-27 once it is GA, or patching the audio file to the older APIs.
+#
+# Runner limits (xcode-27 standard: same class as macos-26 standard, 3
+# vCPU, 7 GB RAM; disk was a 320 Gi volume with ~96 Gi free on macos-26,
+# verify again if the build ever complains about disk): the GPU prefix
+# build (full Mesa) and the kernel build are the long poles; every heavy
+# step runs at --jobs 3, and the built prefixes + kernel bundle are cached
+# (actions/cache) so a retry reuses them. Bump the cache key suffix
+# (v1 -> v2 ...) when the workflow or the pinned commit changes in a way
+# that must invalidate the cache. Do NOT delete Xcode installs to free
+# disk: the versioned Xcode names are symlinks to the short-named install,
+# and deleting the real directory breaks the selected Xcode (xcrun: missing
 # DEVELOPER_DIR path, run 44672237845).
 #
 # Mesa endianness patch (run 44675218407): the Mesa GL config fails at
@@ -76,7 +88,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-26
+    runs-on: xcode-27
     env:
       # Prepared dependency sources live on the case-sensitive volume
       # (some upstream trees have case-colliding paths); every
@@ -97,10 +109,13 @@ jobs:
       - name: Check out app
         uses: actions/checkout@v4
 
-      - name: Select Xcode 26
+      - name: Select Xcode 27
         run: |
-          XCODE="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)"
-          if [ -z "$XCODE" ]; then echo "no Xcode 26 found:"; ls /Applications | grep -i xcode || true; exit 1; fi
+          # Prefer Xcode 27 (the iOS 27 SDK upstream targets); fall back
+          # to the newest Xcode present if 27 is not installed.
+          XCODE="$(ls -d /Applications/Xcode_27*.app 2>/dev/null | sort -V | tail -1)"
+          if [ -z "$XCODE" ]; then XCODE="$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)"; fi
+          if [ -z "$XCODE" ]; then echo "no Xcode found:"; ls /Applications | grep -i xcode || true; exit 1; fi
           # The versioned names (Xcode_26.6.0.app) can be symlinks to
           # the short-named install (Xcode_26.6.app); resolve to the
           # real directory so nothing later can break the link.
@@ -258,7 +273,7 @@ jobs:
             kernarium/.build/kernel-cache
             kernarium/.build/dependencies
             kernarium/.build/kernel/artifacts
-          key: kernarium-deps-fbe12ee-v1
+          key: kernarium-deps-fbe12ee-v2
           restore-keys: |
             kernarium-deps-fbe12ee-
 
