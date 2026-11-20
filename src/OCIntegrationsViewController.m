@@ -12,6 +12,7 @@
 @interface OCIntegrationsViewController () <UITableViewDataSource, UITableViewDelegate>
 @property (nonatomic, strong) UITableView *tableView;
 @property (nonatomic, strong) NSArray *providers;
+@property (nonatomic, strong, nullable) id engineStateToken;
 @end
 
 @implementation OCIntegrationsViewController
@@ -26,10 +27,18 @@
     self.tableView.delegate = self;
     [self.view addSubview:self.tableView];
     __weak typeof(self) weakSelf = self;
-    [OCEngine shared].stateDidChange = ^(OCEngineState state) {
+    // Multicast observer: the Engine screen observes the same
+    // engine. Assigning the single stateDidChange callback here
+    // used to steal it from the Engine screen (or the other way
+    // round), so this row could go stale while Engine was open.
+    self.engineStateToken = [[OCEngine shared] addStateChangeObserver:^(OCEngineState state) {
         (void)state;
         dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf.tableView reloadData]; });
-    };
+    }];
+}
+
+- (void)dealloc {
+    [[OCEngine shared] removeStateChangeObserver:self.engineStateToken];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -38,10 +47,15 @@
     OCSettings *s = [OCSettings shared];
     OCServerClient *client = [[OCServerClient alloc] initWithServerURL:s.serverURL password:[s serverPassword]];
     [client listProvidersWithCompletion:^(NSArray *providers, NSError *error) {
-        if (!error) {
-            self.providers = providers ?: @[];
+        if (error) {
+            // The engine is down: clear the list instead of showing
+            // providers from the last run that no longer exist.
+            self.providers = @[];
             [self.tableView reloadData];
+            return;
         }
+        self.providers = providers ?: @[];
+        [self.tableView reloadData];
     }];
 }
 
@@ -69,6 +83,10 @@
     if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:cellID];
     cell.accessoryType = UITableViewCellAccessoryNone;
     cell.detailTextLabel.text = nil;
+    // Cells are reused across rows: reset the colour, or a provider
+    // or Settings row can inherit the blue/red/grey of the Start /
+    // Stop engine row it was recycled from.
+    cell.textLabel.textColor = [UIColor labelColor];
     if (indexPath.section == 0) {
         OCEngine *engine = [OCEngine shared];
         if (indexPath.row == 0) {
@@ -124,8 +142,10 @@
             return;
         }
         if (engine.state == OCEngineStateRunning || engine.state == OCEngineStateStarting) {
+            engine.userStoppedEngineThisSession = YES;
             [engine stopEngine];
         } else {
+            engine.userStoppedEngineThisSession = NO;
             [engine startEngineWithCompletion:^(BOOL started, NSError * _Nullable error) {
                 (void)started; (void)error;
                 dispatch_async(dispatch_get_main_queue(), ^{ [self.tableView reloadData]; });

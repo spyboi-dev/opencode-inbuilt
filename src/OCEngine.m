@@ -42,6 +42,9 @@ static NSString *const kDebianCached = @"oc.debianCached";
 @property (nonatomic, copy, nullable) void (^setupProgress)(double fraction, NSString *message);
 @property (nonatomic, copy, nullable) void (^setupCompletion)(BOOL done, NSError * _Nullable error);
 @property (nonatomic, strong, nullable) NSURLSession *setupSession;
+@property (nonatomic, strong, nullable) NSMutableArray<NSDictionary *> *stateObserverEntries;
+@property (nonatomic, assign) BOOL autoStartAttempted;
+@property (nonatomic, assign) NSUInteger serveGeneration;
 - (void)startServeWithCompletion:(void (^)(BOOL, NSError * _Nullable))completion;
 #ifdef OC_CORE_LINKED
 - (NSArray<NSString *> *)cachedDebianPackagePaths;
@@ -54,6 +57,69 @@ static NSString *const kDebianCached = @"oc.debianCached";
     static OCEngine *s; static dispatch_once_t once;
     dispatch_once(&once, ^{ s = [[OCEngine alloc] init]; [s refreshState]; });
     return s;
+}
+
+- (instancetype)init {
+    if ((self = [super init])) {
+        _stateObserverEntries = [NSMutableArray array];
+    }
+    return self;
+}
+
+- (id)addStateChangeObserver:(void (^)(OCEngineState))observer {
+    if (!observer) return nil;
+    NSString *token = [[NSUUID UUID] UUIDString];
+    @synchronized (self) {
+        [self.stateObserverEntries addObject:@{@"token": token, @"block": [observer copy]}];
+    }
+    return token;
+}
+
+- (void)removeStateChangeObserver:(nullable id)token {
+    if (!token) return;
+    @synchronized (self) {
+        NSUInteger idx = [self.stateObserverEntries indexOfObjectPassingTest:^BOOL(NSDictionary *entry, NSUInteger i, BOOL *stop) {
+            (void)i; (void)stop;
+            return [entry[@"token"] isEqual:token];
+        }];
+        if (idx != NSNotFound) [self.stateObserverEntries removeObjectAtIndex:idx];
+    }
+}
+
+- (void)notifyStateObservers:(OCEngineState)state {
+    NSArray *entries = nil;
+    @synchronized (self) { entries = [self.stateObserverEntries copy]; }
+    for (NSDictionary *entry in entries) {
+        void (^block)(OCEngineState) = entry[@"block"];
+        if (block) block(state);
+    }
+}
+
+// Start the engine on app launch when it can start. Once per
+// launch; every guard is checked again here so a second call (or a
+// foreground return) cannot restart an engine the user stopped.
+- (void)maybeAutoStartEngine {
+    if (self.autoStartAttempted) return;
+    self.autoStartAttempted = YES;
+    if (self.state == OCEngineStateRunning || self.state == OCEngineStateStarting) return;
+    if (self.userStoppedEngineThisSession) return;
+    if (!self.guestCoreLinked) {
+        [self appendEngineLog:@"Auto-start skipped: engine not ready yet in this build"];
+        return;
+    }
+    if (self.state == OCEngineStateNotInstalled || self.state == OCEngineStateInstalling) {
+        [self appendEngineLog:@"Auto-start skipped: first-launch setup not done yet"];
+        return;
+    }
+    [self appendEngineLog:@"Auto-start: starting engine"];
+    __weak typeof(self) weakSelf = self;
+    [self startEngineWithCompletion:^(BOOL started, NSError * _Nullable error) {
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        if (!started) {
+            [strongSelf appendEngineLog:[NSString stringWithFormat:@"Auto-start failed: %@", error.localizedDescription ?: @"unknown"]];
+        }
+    }];
 }
 
 - (BOOL)guestCoreLinked { return self.guestExecutor != nil; }
@@ -81,6 +147,7 @@ static NSString *const kDebianCached = @"oc.debianCached";
     _state = state;
     [self appendEngineLog:[NSString stringWithFormat:@"State: %@", self.stateDescription]];
     if (self.stateDidChange) self.stateDidChange(state);
+    [self notifyStateObservers:state];
 }
 
 - (void)refreshState {
@@ -172,7 +239,17 @@ static dispatch_queue_t OCEngineLogQueue(void) {
     [out appendString:@"\n=== Guest boot.log ===\n"];
     [out appendString:[OCEngine contentsOfFileOrNote:[self guestBootLogPath] label:@"boot.log"]];
     [out appendString:@"\n=== Guest serve.log ===\n"];
-    [out appendString:[OCEngine contentsOfFileOrNote:[self guestServeLogPath] label:@"serve.log"]];
+    NSString *serve = [OCEngine contentsOfFileOrNote:[self guestServeLogPath] label:@"serve.log"];
+    // A serve.log that says "server listening" while the engine is
+    // stopped is from a previous run (the guest dies when the app
+    // is closed, the log file survives). Say so, or the screen
+    // contradicts itself: state "stopped" above a log that claims
+    // the server is up.
+    if (self.state != OCEngineStateRunning && self.state != OCEngineStateStarting &&
+        [serve containsString:@"server listening"]) {
+        [out appendString:@"(Log from a previous run: the engine is stopped now, so this is not live.)\n"];
+    }
+    [out appendString:serve];
     return out;
 }
 
@@ -498,6 +575,11 @@ static dispatch_queue_t OCEngineLogQueue(void) {
 #endif
 
 - (void)startEngineWithCompletion:(void (^)(BOOL, NSError * _Nullable))completion {
+    // A start means running is wanted again: a manual Start after a
+    // Stop, or the health timer restarting a dead guest, clears the
+    // "user stopped it" flag. Auto-start checks the flag before it
+    // ever gets here, so this cannot undo a Stop behind the user.
+    self.userStoppedEngineThisSession = NO;
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
     if (![d boolForKey:kEngineInstalled] || ![d boolForKey:kDebianCached]) {
         NSError *e = [NSError errorWithDomain:@"OCEngine" code:3
@@ -547,6 +629,14 @@ static dispatch_queue_t OCEngineLogQueue(void) {
 // The serve launch itself, factored out of startEngineWithCompletion
 // so the boot-on-demand path above can reuse it.
 - (void)startServeWithCompletion:(void (^)(BOOL, NSError * _Nullable))completion {
+    // Generation guard: if Stop is tapped while a start is in
+    // flight, the executor's late completion must not mark the
+    // engine Running again or restart the health timer. stopEngine
+    // bumps the generation; a completion from an older generation
+    // is ignored (and its completion block is not called, so no
+    // screen reports a start the user just cancelled).
+    self.serveGeneration++;
+    NSUInteger generation = self.serveGeneration;
     [self setState:OCEngineStateStarting];
     [self setServeProgress:0.05 status:@"Starting server..."];
     [self appendEngineLog:@"Serve launch started"];
@@ -613,6 +703,10 @@ static dispatch_queue_t OCEngineLogQueue(void) {
     self.guestExecutor(full, @"$HOME/Projects", ^(NSString * _Nullable output, NSInteger exitCode) {
         typeof(self) strongSelf = weakSelf;
         if (!strongSelf) return;
+        if (generation != strongSelf.serveGeneration) {
+            [strongSelf appendEngineLog:@"Serve launch result ignored: engine was stopped while starting"];
+            return;
+        }
         // Pull the latest guest lines into the in-app log first.
         [strongSelf pollServeLog];
         if (exitCode != 0) {
@@ -641,6 +735,9 @@ static dispatch_queue_t OCEngineLogQueue(void) {
     [self.healthTimer invalidate];
     self.healthTimer = nil;
     [self stopServeProgressTimer];
+    // Bump the serve generation so a start already in flight cannot
+    // mark the engine Running again after this stop.
+    self.serveGeneration++;
     [self setServeProgress:0 status:nil];
     [self appendEngineLog:@"Engine stopped"];
     [self setState:OCEngineStateStopped];

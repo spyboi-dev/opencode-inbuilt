@@ -6,6 +6,8 @@
 @interface OCBrowserViewController () <WKNavigationDelegate, UITextFieldDelegate>
 @property (nonatomic, strong) WKWebView *webView;
 @property (nonatomic, strong) UITextField *addressField;
+@property (nonatomic, strong) UIBarButtonItem *backButton;
+@property (nonatomic, strong) UIBarButtonItem *forwardButton;
 @end
 
 @implementation OCBrowserViewController
@@ -23,6 +25,7 @@
     self.addressField.autocapitalizationType = UITextAutocapitalizationTypeNone;
     self.addressField.autocorrectionType = UITextAutocorrectionTypeNo;
     self.addressField.returnKeyType = UIReturnKeyGo;
+    self.addressField.clearButtonMode = UITextFieldViewModeWhileEditing;
     self.addressField.delegate = self;
     self.addressField.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:self.addressField];
@@ -36,7 +39,10 @@
     UIBarButtonItem *back = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"chevron.left"] style:UIBarButtonItemStylePlain target:self action:@selector(goBack)];
     UIBarButtonItem *forward = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"chevron.right"] style:UIBarButtonItemStylePlain target:self action:@selector(goForward)];
     UIBarButtonItem *reload = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemRefresh target:self action:@selector(reloadPage)];
+    self.backButton = back;
+    self.forwardButton = forward;
     self.toolbarItems = @[back, forward, reload];
+    [self updateNavButtons];
     [self.navigationController setToolbarHidden:NO animated:NO];
 
     [NSLayoutConstraint activateConstraints:@[
@@ -70,10 +76,23 @@
     NSString *urlString = trimmed;
     if (![urlString containsString:@"://"]) urlString = [@"https://" stringByAppendingString:urlString];
     NSURL *url = [NSURL URLWithString:urlString];
-    if (!url) return;
+    if (!url) {
+        // A bad address used to do nothing at all. Say so in the
+        // view, the same way a failed load does.
+        [self showLoadError:[NSError errorWithDomain:@"OCBrowser" code:-1
+                                            userInfo:@{NSLocalizedDescriptionKey: @"That address does not look like a web address."}]];
+        return;
+    }
     self.addressField.text = urlString;
     [self.webView loadRequest:[NSURLRequest requestWithURL:url]];
     [self.addressField resignFirstResponder];
+}
+
+// Back and Forward used to stay tappable with nowhere to go.
+// Grey them out when the web view cannot move that way.
+- (void)updateNavButtons {
+    self.backButton.enabled = self.webView.canGoBack;
+    self.forwardButton.enabled = self.webView.canGoForward;
 }
 
 - (BOOL)textFieldShouldReturn:(UITextField *)textField {
@@ -84,6 +103,7 @@
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
     (void)navigation;
     self.addressField.text = webView.URL.absoluteString;
+    [self updateNavButtons];
 }
 
 - (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)navigation withError:(NSError *)error {

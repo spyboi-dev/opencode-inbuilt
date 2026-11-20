@@ -1,6 +1,7 @@
 // OCSessionsViewController - list of OpenCode sessions from the in-app engine.
 #import "OCSessionsViewController.h"
 #import "OCChatViewController.h"
+#import "OCEngineViewController.h"
 #import "OCServerClient.h"
 #import "OCSettings.h"
 #import "OCEngine.h"
@@ -11,6 +12,8 @@
 @property (nonatomic, strong) UILabel *greetingLabel;
 @property (nonatomic, strong) UILabel *statusLabel;
 @property (nonatomic, strong) UIRefreshControl *refreshControl;
+@property (nonatomic, strong, nullable) id engineStateToken;
+@property (nonatomic, assign) BOOL listLoadFailed;
 @end
 
 @implementation OCSessionsViewController
@@ -71,6 +74,31 @@ static NSString *OCGreetingForNow(void) {
         [self.tableView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
         [self.tableView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
     ]];
+
+    // The status line used to freeze at whatever the engine state
+    // was when the list last loaded: an auto-start (or a stop from
+    // Integrations) while Threads was open left it wrong until the
+    // next pull to refresh. Watch the engine like the other tabs.
+    __weak typeof(self) weakSelf = self;
+    self.engineStateToken = [[OCEngine shared] addStateChangeObserver:^(OCEngineState state) {
+        (void)state;
+        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf updateStatusLine]; });
+    }];
+}
+
+- (void)dealloc {
+    [[OCEngine shared] removeStateChangeObserver:self.engineStateToken];
+}
+
+// Status line for the current engine state, without clobbering a
+// load failure (which explains itself) or the empty-list hint.
+- (void)updateStatusLine {
+    if (self.listLoadFailed) return;
+    if (!self.sessions.count) {
+        self.statusLabel.text = @"No sessions yet. Tap + to start one.";
+        return;
+    }
+    self.statusLabel.text = [NSString stringWithFormat:@"Engine: %@", [OCEngine shared].stateDescription];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -79,9 +107,16 @@ static NSString *OCGreetingForNow(void) {
 }
 
 - (void)showEngine {
-    // The engine lives in Integrations (tab 1) now.
+    // The button says Engine, so it opens the Engine screen, not
+    // just the Integrations tab (which used to leave the user one
+    // more tap away from the screen the button names).
     UITabBarController *tabs = self.tabBarController;
     if (tabs.viewControllers.count > 1) tabs.selectedIndex = 1;
+    UINavigationController *nav = tabs.viewControllers[1];
+    if ([nav isKindOfClass:[UINavigationController class]]) {
+        OCEngineViewController *vc = [[OCEngineViewController alloc] init];
+        [nav pushViewController:vc animated:YES];
+    }
 }
 
 - (OCServerClient *)client {
@@ -96,10 +131,16 @@ static NSString *OCGreetingForNow(void) {
         [self.refreshControl endRefreshing];
         if (error) {
             // No modal for this normal state: the reason stays in
-            // the status line, and pull to refresh retries.
+            // the status line, and pull to refresh retries. Clear
+            // the list too, or it keeps showing chats from the last
+            // run that can no longer be opened.
+            self.listLoadFailed = YES;
+            self.sessions = @[];
+            [self.tableView reloadData];
             self.statusLabel.text = [NSString stringWithFormat:@"Engine: %@  ·  Could not load chats. Start the engine, then pull to retry.", engine.stateDescription];
             return;
         }
+        self.listLoadFailed = NO;
         self.sessions = sessions ?: @[];
         [self.tableView reloadData];
         if (!self.sessions.count) self.statusLabel.text = @"No sessions yet. Tap + to start one.";
@@ -161,7 +202,21 @@ static NSString *OCGreetingForNow(void) {
     NSDictionary *s = self.sessions[indexPath.row];
     NSString *sessionID = s[@"id"];
     if (![sessionID isKindOfClass:[NSString class]]) return;
-    [[self client] deleteSession:sessionID completion:^(NSError *error) { (void)error; [self reloadSessions]; }];
+    __weak typeof(self) weakSelf = self;
+    [[self client] deleteSession:sessionID completion:^(NSError *error) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        if (error) {
+            // A swipe delete that fails used to look like it worked
+            // (the row vanished, then came back on the next load
+            // with no explanation). Keep the row and say so in the
+            // status line instead of reloading over the message.
+            strongSelf.statusLabel.text = @"Could not delete that chat. Try again.";
+            [strongSelf.tableView reloadData];
+            return;
+        }
+        [strongSelf reloadSessions];
+    }];
 }
 
 @end

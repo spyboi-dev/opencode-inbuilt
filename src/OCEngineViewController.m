@@ -15,6 +15,7 @@
 @property (nonatomic, strong) UITextView *logTextView;
 @property (nonatomic, strong) UIButton *shareLogButton;
 @property (nonatomic, strong, nullable) NSTimer *logRefreshTimer;
+@property (nonatomic, strong, nullable) id engineStateToken;
 @end
 
 @implementation OCEngineViewController
@@ -98,10 +99,13 @@
     ]];
 
     __weak typeof(self) weakSelf = self;
-    [OCEngine shared].stateDidChange = ^(OCEngineState state) {
+    // Multicast observer: the Integrations screen observes the same
+    // engine, and a single callback here used to steal it from
+    // there (or the other way round).
+    self.engineStateToken = [[OCEngine shared] addStateChangeObserver:^(OCEngineState state) {
         (void)state;
         dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf refresh]; });
-    };
+    }];
     // Live serve progress: the guest writes PROGRESS lines to the
     // exchange dir's serve.log and OCEngine polls them while the
     // engine is starting. This drives the same progress bar the
@@ -110,6 +114,14 @@
         dispatch_async(dispatch_get_main_queue(), ^{
             __strong typeof(weakSelf) strongSelf = weakSelf;
             if (!strongSelf) return;
+            // A stop resets progress to 0 with no status: hide the
+            // bar instead of leaving an empty one on screen. (Stop
+            // calls setServeProgress:0, and this callback used to
+            // unhide the bar for it.)
+            if (progress <= 0 && !status.length) {
+                strongSelf.progressView.hidden = YES;
+                return;
+            }
             strongSelf.progressView.hidden = NO;
             strongSelf.progressView.progress = (float)progress;
             if (status.length) strongSelf.progressLabel.text = status;
@@ -123,6 +135,10 @@
             }
         });
     };
+}
+
+- (void)dealloc {
+    [[OCEngine shared] removeStateChangeObserver:self.engineStateToken];
 }
 
 - (UILabel *)labelWithFont:(UIFont *)font {
@@ -152,6 +168,15 @@
     [self refresh];
     [self refreshLog];
     [self startLogRefreshTimer];
+    // An auto-start (or a start from Integrations) can be in flight
+    // while this screen opens: show its progress instead of a bare
+    // "Starting engine" with no bar. The progress callback takes
+    // over from the next poll tick.
+    if ([OCEngine shared].state == OCEngineStateStarting) {
+        self.progressView.hidden = NO;
+        self.progressView.progress = (float)[OCEngine shared].serveProgress;
+        if ([OCEngine shared].serveStatus.length) self.progressLabel.text = [OCEngine shared].serveStatus;
+    }
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
@@ -216,7 +241,10 @@
     BOOL canStart = [OCEngine shared].guestCoreLinked;
     self.startButton.enabled = canStart;
     self.startButton.alpha = canStart ? 1.0 : 0.4;
-    self.stopButton.hidden = ([OCEngine shared].state != OCEngineStateRunning);
+    // Stop stays available while starting, not just once running:
+    // a start can hang on a big download, and stopping it has to
+    // work. The engine ignores the late start result after a stop.
+    self.stopButton.hidden = ([OCEngine shared].state != OCEngineStateRunning && [OCEngine shared].state != OCEngineStateStarting);
 }
 
 - (void)setupTapped {
@@ -279,6 +307,7 @@
     self.progressView.hidden = NO;
     self.progressView.progress = 0;
     self.progressLabel.text = @"Starting engine...";
+    [OCEngine shared].userStoppedEngineThisSession = NO;
     [[OCEngine shared] startEngineWithCompletion:^(BOOL started, NSError *error) {
         dispatch_async(dispatch_get_main_queue(), ^{
             if (!started) {
@@ -292,6 +321,9 @@
 }
 
 - (void)stopTapped {
+    // The user stopped it on purpose: auto-start must not restart
+    // it behind him on a foreground return.
+    [OCEngine shared].userStoppedEngineThisSession = YES;
     [[OCEngine shared] stopEngine];
     [self refresh];
 }

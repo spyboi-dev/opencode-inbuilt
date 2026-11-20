@@ -35,6 +35,13 @@
     self.tableView.delegate = self;
     [self.view addSubview:self.tableView];
 
+    // Inside the chat the Files screen has no nav bar, so its
+    // Refresh button never appears. Pull to refresh is the only
+    // way to reload the list there.
+    UIRefreshControl *refreshControl = [[UIRefreshControl alloc] init];
+    [refreshControl addTarget:self action:@selector(reload) forControlEvents:UIControlEventValueChanged];
+    self.tableView.refreshControl = refreshControl;
+
     UIView *pathHeader = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 30)];
     self.pathLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 6, pathHeader.bounds.size.width - 32, 18)];
     self.pathLabel.font = [UIFont systemFontOfSize:13];
@@ -119,6 +126,7 @@
     [[self client] listFilesAtPath:self.path completion:^(NSArray *entries, NSError *error) {
         __strong typeof(weakSelf) strongSelf = weakSelf;
         if (!strongSelf) return;
+        [strongSelf.tableView.refreshControl endRefreshing];
         if (error) {
             strongSelf.entries = @[];
             [strongSelf.tableView reloadData];
@@ -139,6 +147,28 @@
     }];
 }
 
+// The server returns a full path per entry ("/root/Projects/…").
+// Show just the file name in the row, and navigate with the full
+// path when it is one, so a folder never gets opened as
+// "/root/Projects" + "/root/Projects/…" by appending a path that
+// is already absolute.
++ (NSString *)displayNameForEntry:(NSDictionary *)entry {
+    NSString *name = entry[@"name"];
+    if ([name isKindOfClass:[NSString class]] && name.length) return name;
+    NSString *path = entry[@"path"];
+    if ([path isKindOfClass:[NSString class]] && path.length) return [path lastPathComponent];
+    return @"?";
+}
+
++ (NSString *)fullPathForEntry:(NSDictionary *)entry inFolder:(NSString *)folder {
+    NSString *path = entry[@"path"];
+    if ([path isKindOfClass:[NSString class]] && [path hasPrefix:@"/"]) return path;
+    NSString *name = entry[@"name"];
+    if (![name isKindOfClass:[NSString class]] || !name.length) name = [path lastPathComponent] ?: @"";
+    if ([folder isEqualToString:@"/"]) return [@"/" stringByAppendingString:name];
+    return [folder stringByAppendingPathComponent:name];
+}
+
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     return self.entries.count;
 }
@@ -148,7 +178,7 @@
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:cellID];
     if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:cellID];
     NSDictionary *entry = self.entries[indexPath.row];
-    cell.textLabel.text = entry[@"path"] ?: entry[@"name"] ?: @"?";
+    cell.textLabel.text = [OCFilesViewController displayNameForEntry:entry];
     NSString *type = entry[@"type"];
     cell.accessoryType = [type isEqualToString:@"directory"] ? UITableViewCellAccessoryDisclosureIndicator : UITableViewCellAccessoryNone;
     return cell;
@@ -157,9 +187,8 @@
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     NSDictionary *entry = self.entries[indexPath.row];
-    NSString *name = entry[@"path"];
-    if (![name isKindOfClass:[NSString class]]) return;
-    NSString *child = [self.path isEqualToString:@"/"] ? [@"/" stringByAppendingString:name] : [self.path stringByAppendingPathComponent:name];
+    NSString *child = [OCFilesViewController fullPathForEntry:entry inFolder:self.path];
+    NSString *name = [OCFilesViewController displayNameForEntry:entry];
     if ([entry[@"type"] isEqualToString:@"directory"]) {
         OCFilesViewController *vc = [[OCFilesViewController alloc] init];
         vc.path = child;
@@ -173,9 +202,10 @@
         if (error) {
             // A file that cannot be read is not a file to open: say
             // so in the list instead of pushing a view whose
-            // "content" would just be the error text.
+            // "content" would just be the error text. Plain words,
+            // not the raw system error.
             [strongSelf showEmptyStateWithTitle:[NSString stringWithFormat:@"Could not open %@", name]
-                                         detail:error.localizedDescription ?: @"The file could not be read."
+                                         detail:@"The file could not be read. Try again."
                                       showRetry:YES];
             return;
         }

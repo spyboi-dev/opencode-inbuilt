@@ -42,6 +42,25 @@ typedef void (^OCGuestExecutor)(NSString *command, NSString *workingDirectory,
 @property (nonatomic, readonly) BOOL guestCoreLinked; // NO in this build, see BUILD-NOTE.md
 @property (nonatomic, copy, nullable) OCGuestExecutor guestExecutor; // set by the linked core
 @property (nonatomic, copy, nullable) void (^stateDidChange)(OCEngineState state);
+// Multicast state observers. stateDidChange above is a single
+// callback, so whichever screen loaded last used to steal it and the
+// other screen's engine row went stale. Observers all get every
+// change; -addStateChangeObserver returns a token to pass to
+// -removeStateChangeObserver (do it in dealloc). The legacy
+// stateDidChange block, if set, is still called as well.
+- (id)addStateChangeObserver:(void (^)(OCEngineState state))observer;
+- (void)removeStateChangeObserver:(nullable id)token;
+// YES after the user tapped Stop in this launch. Auto-start never
+// restarts an engine the user stopped on purpose. A manual Start
+// (or any start) clears it.
+@property (nonatomic, assign) BOOL userStoppedEngineThisSession;
+// Start the engine automatically, once per launch, when it can
+// start: core linked and setup already done. Does nothing when the
+// engine is already running or starting, when the core is not
+// linked, when setup has not finished, or when the user stopped the
+// engine in this session. Safe to call in the unlinked build: it
+// just leaves the honest "cannot start" state alone.
+- (void)maybeAutoStartEngine;
 // In-app engine log + serve progress (for the Logs view and the Engine tab).
 // serveProgress is 0..1 while the engine is starting; serveStatus is the
 // current start stage ("Downloading Node...", "Installing OpenCode...", ...).

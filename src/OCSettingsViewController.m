@@ -22,6 +22,15 @@
     self.tableView.dataSource = self;
     self.tableView.delegate = self;
     [self.view addSubview:self.tableView];
+    // The server field is built once and reused. It used to be
+    // recreated in every cellForRow, so a providers fetch landing
+    // while the user was typing replaced the field mid-edit, lost
+    // the typed text and dismissed the keyboard.
+    self.serverField = [[UITextField alloc] initWithFrame:CGRectMake(0, 0, 220, 30)];
+    self.serverField.font = [UIFont systemFontOfSize:14];
+    self.serverField.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    self.serverField.autocorrectionType = UITextAutocorrectionTypeNo;
+    self.serverField.delegate = self;
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -69,15 +78,17 @@
     if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:cellID];
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
     cell.detailTextLabel.numberOfLines = 0;
+    // Cells are reused across rows: clear the accessory, or the
+    // Server URL field (or a disclosure chevron) can show up on a
+    // row it does not belong to.
+    cell.accessoryType = UITableViewCellAccessoryNone;
+    cell.accessoryView = nil;
+    cell.textLabel.text = nil;
+    cell.detailTextLabel.text = nil;
     OCSettings *s = [OCSettings shared];
     if (indexPath.section == 0 && indexPath.row == 0) {
         cell.textLabel.text = @"Server URL";
-        self.serverField = [[UITextField alloc] initWithFrame:CGRectMake(0, 0, 220, 30)];
         self.serverField.text = s.serverURL;
-        self.serverField.font = [UIFont systemFontOfSize:14];
-        self.serverField.autocapitalizationType = UITextAutocapitalizationTypeNone;
-        self.serverField.autocorrectionType = UITextAutocorrectionTypeNo;
-        self.serverField.delegate = self;
         cell.accessoryView = self.serverField;
     } else if (indexPath.section == 0 && indexPath.row == 1) {
         cell.textLabel.text = @"Server password";
@@ -98,7 +109,12 @@
         if (self.providers.count) {
             NSDictionary *p = self.providers[indexPath.row];
             cell.textLabel.text = p[@"name"] ?: p[@"id"];
-            cell.detailTextLabel.text = [NSString stringWithFormat:@"%@ · %@", p[@"id"] ?: @"", p[@"activation"] ?: @""];
+            // Only join the parts that exist: a missing id or
+            // activation used to leave a dangling " · ".
+            NSMutableArray *parts = [NSMutableArray array];
+            if ([p[@"id"] isKindOfClass:[NSString class]] && ((NSString *)p[@"id"]).length) [parts addObject:p[@"id"]];
+            if ([p[@"activation"] isKindOfClass:[NSString class]] && ((NSString *)p[@"activation"]).length) [parts addObject:p[@"activation"]];
+            cell.detailTextLabel.text = [parts componentsJoinedByString:@" · "];
         } else {
             cell.textLabel.text = @"No providers yet";
             cell.detailTextLabel.text = @"Start the engine, then sign in to a provider inside the guest.";
@@ -118,6 +134,9 @@
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    // Tapping a row while editing the server URL used to leave the
+    // keyboard up over the sheet that opens.
+    [self.serverField resignFirstResponder];
     if (indexPath.section == 1 && indexPath.row == 0) {
         OCSettings *s = [OCSettings shared];
         UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Agent mode" message:nil preferredStyle:UIAlertControllerStyleActionSheet];

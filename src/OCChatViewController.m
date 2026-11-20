@@ -122,7 +122,8 @@ static UIColor *OCClaudeGlass(void) {
 // normal state (the engine not running). It hides itself after
 // a few seconds; errorBannerToken keeps a stale hide from
 // dismissing a newer message.
-@property (nonatomic, strong) UILabel *errorBanner;
+@property (nonatomic, strong) UIView *errorBanner;
+@property (nonatomic, strong) UILabel *errorBannerLabel;
 @property (nonatomic, assign) NSInteger errorBannerToken;
 // YES when the last message fetch failed: the empty thread then
 // explains the server is down instead of saying "no messages".
@@ -180,6 +181,10 @@ static UIColor *OCClaudeGlass(void) {
     }
     [self.sendButton setImage:[icon imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate] forState:UIControlStateNormal];
     self.sendButton.tintColor = [UIColor whiteColor];
+    // With an empty composer the arrow used to look exactly as
+    // ready as with text in it, although tapping it only focuses
+    // the composer. Dim it while there is nothing to send.
+    self.sendButton.alpha = (self.waitingForReply || self.composer.text.length > 0) ? 1.0 : 0.5;
 }
 
 - (UIButton *)glassCircleButtonWithImage:(NSString *)imageName diameter:(CGFloat)diameter {
@@ -459,23 +464,32 @@ static UIColor *OCClaudeGlass(void) {
     [self.modelChipButton.trailingAnchor constraintLessThanOrEqualToAnchor:self.sparkleButton.leadingAnchor constant:-8].active = YES;
 
     // Inline error banner, over the top of the thread. Hidden until
-    // a send, model pick or diff fails; see showError:.
-    self.errorBanner = [[UILabel alloc] init];
+    // a send, model pick or diff fails; see showError:. The text
+    // sits in a padded label inside the container: as a bare label
+    // it ran edge to edge with no breathing room.
+    self.errorBanner = [[UIView alloc] init];
     self.errorBanner.backgroundColor = OCLayer01();
     self.errorBanner.layer.cornerRadius = 10;
     self.errorBanner.layer.masksToBounds = YES;
-    self.errorBanner.font = OCRoundedFont(13, UIFontWeightMedium);
-    self.errorBanner.textColor = OCTextBase();
-    self.errorBanner.textAlignment = NSTextAlignmentCenter;
-    self.errorBanner.numberOfLines = 2;
     self.errorBanner.hidden = YES;
     self.errorBanner.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:self.errorBanner];
+    self.errorBannerLabel = [[UILabel alloc] init];
+    self.errorBannerLabel.font = OCRoundedFont(13, UIFontWeightMedium);
+    self.errorBannerLabel.textColor = OCTextBase();
+    self.errorBannerLabel.textAlignment = NSTextAlignmentCenter;
+    self.errorBannerLabel.numberOfLines = 2;
+    self.errorBannerLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.errorBanner addSubview:self.errorBannerLabel];
     [NSLayoutConstraint activateConstraints:@[
         [self.errorBanner.topAnchor constraintEqualToAnchor:self.toolbarGlass.bottomAnchor constant:8],
         [self.errorBanner.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:12],
         [self.errorBanner.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-12],
         [self.errorBanner.heightAnchor constraintGreaterThanOrEqualToConstant:36],
+        [self.errorBannerLabel.topAnchor constraintEqualToAnchor:self.errorBanner.topAnchor constant:8],
+        [self.errorBannerLabel.leadingAnchor constraintEqualToAnchor:self.errorBanner.leadingAnchor constant:12],
+        [self.errorBannerLabel.trailingAnchor constraintEqualToAnchor:self.errorBanner.trailingAnchor constant:-12],
+        [self.errorBannerLabel.bottomAnchor constraintEqualToAnchor:self.errorBanner.bottomAnchor constant:-8],
     ]];
 
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(keyboardWillShow:) name:UIKeyboardWillShowNotification object:nil];
@@ -514,8 +528,18 @@ static UIColor *OCClaudeGlass(void) {
     CGRect frame = [note.userInfo[UIKeyboardFrameEndUserInfoKey] CGRectValue];
     CGFloat height = CGRectGetHeight([self.view convertRect:frame fromView:nil]);
     self.composerBottomConstraint.constant = -height + self.view.safeAreaInsets.bottom - 8;
-    [self.view layoutIfNeeded];
-    [self scrollToBottom];
+    // Ride the keyboard's own animation instead of jumping: the
+    // composer used to snap to its new spot while the keyboard
+    // slid in.
+    NSTimeInterval duration = [note.userInfo[UIKeyboardAnimationDurationUserInfoKey] doubleValue];
+    UIViewAnimationOptions curve = (UIViewAnimationOptions)([note.userInfo[UIKeyboardAnimationCurveUserInfoKey] integerValue] << 16);
+    __weak typeof(self) weakSelf = self;
+    [UIView animateWithDuration:duration delay:0 options:curve animations:^{
+        [self.view layoutIfNeeded];
+    } completion:^(BOOL finished) {
+        (void)finished;
+        [weakSelf scrollToBottom];
+    }];
 }
 
 - (void)keyboardWillHide:(NSNotification *)note {
@@ -822,6 +846,10 @@ static UIColor *OCClaudeGlass(void) {
 
 - (void)reloadMessages {
     __weak typeof(self) weakSelf = self;
+    // Only stick to the bottom if the user is already there: the
+    // 2-second poll used to yank the thread back down on every
+    // refresh while the user was reading an earlier message.
+    BOOL wasNearBottom = [self isNearBottom];
     [[self serverClient] fetchMessagesForSession:self.sessionID completion:^(NSArray *messages, NSError *error) {
         __strong typeof(weakSelf) strongSelf = weakSelf;
         if (!strongSelf) return;
@@ -842,9 +870,15 @@ static UIColor *OCClaudeGlass(void) {
         [strongSelf updateRoadmap];
         [strongSelf.tableView reloadData];
         [strongSelf updateEmptyState];
-        [strongSelf scrollToBottom];
+        if (wasNearBottom) [strongSelf scrollToBottom];
     }];
     [self checkPermissions];
+}
+
+- (BOOL)isNearBottom {
+    if (!self.tableView.contentSize.height) return YES;
+    CGFloat bottom = self.tableView.contentOffset.y + self.tableView.bounds.size.height;
+    return (self.tableView.contentSize.height - bottom) < 120;
 }
 
 // Empty thread: never a bare black screen. With messages the
@@ -988,12 +1022,25 @@ static UIColor *OCClaudeGlass(void) {
     // block the whole screen with an OK button for.
     NSString *message = error.localizedDescription ?: @"Something went wrong.";
     dispatch_async(dispatch_get_main_queue(), ^{
-        self.errorBanner.text = message;
+        self.errorBannerLabel.text = message;
         self.errorBanner.hidden = NO;
+        // The banner floats over the thread, so push the thread down
+        // by its height while it is up; otherwise it covers the
+        // first message for the four seconds it is visible.
+        [self.errorBanner layoutIfNeeded];
+        CGFloat bannerHeight = self.errorBanner.frame.size.height;
+        if (bannerHeight <= 0) bannerHeight = 44;
+        UIEdgeInsets inset = UIEdgeInsetsMake(bannerHeight + 8, 0, 0, 0);
+        self.tableView.contentInset = inset;
+        self.tableView.scrollIndicatorInsets = inset;
         self.errorBannerToken++;
         NSInteger token = self.errorBannerToken;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            if (token == self.errorBannerToken) self.errorBanner.hidden = YES;
+            if (token == self.errorBannerToken) {
+                self.errorBanner.hidden = YES;
+                self.tableView.contentInset = UIEdgeInsetsZero;
+                self.tableView.scrollIndicatorInsets = UIEdgeInsetsZero;
+            }
         });
     });
 }
@@ -1329,6 +1376,12 @@ static UIColor *OCClaudeGlass(void) {
     if ([text isKindOfClass:[NSString class]] && text.length) {
         [UIPasteboard generalPasteboard].string = text;
         [sender setTitle:@"Copied" forState:UIControlStateNormal];
+        // "Copied" used to stick forever until the cell was reused.
+        // Put it back, on the same button.
+        __weak UIButton *weakButton = sender;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [weakButton setTitle:@"Copy" forState:UIControlStateNormal];
+        });
     }
 }
 

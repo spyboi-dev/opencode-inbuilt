@@ -28,8 +28,11 @@
     self.window.rootViewController = tabs;
     [self.window makeKeyAndVisible];
 
-    // Engine state only; the guest is started from the Engine tab so a
-    // first launch never blocks on a download.
+    // Engine state only, then auto-start when it can start: the
+    // guest core is linked and first-launch setup already saved the
+    // Debian packages. A first launch never blocks on a download:
+    // auto-start does nothing until setup is done, and nothing at
+    // all in a build where the core is not linked.
     [[OCEngine shared] refreshState];
 #ifdef OC_CORE_LINKED
     // The core is linked: register the guest executor so
@@ -38,6 +41,7 @@
     // path (core pending link) is unchanged.
     [[OCCoreGlue shared] installGuestExecutor];
 #endif
+    [[OCEngine shared] maybeAutoStartEngine];
     return YES;
 }
 
