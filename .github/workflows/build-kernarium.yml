@@ -274,8 +274,11 @@ jobs:
             kernarium/.build/dependencies
             kernarium/.build/kernel/artifacts
           key: kernarium-deps-fbe12ee-v2
+          # Restore only v2 caches: the v1 cache holds prefixes built
+          # with Xcode 26.6, and the fallback prefix would restore them
+          # under Xcode 27. A v2 run with no v2 cache rebuilds fresh.
           restore-keys: |
-            kernarium-deps-fbe12ee-
+            kernarium-deps-fbe12ee-v2
 
       - name: Create case-sensitive volume
         run: |
