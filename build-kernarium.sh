@@ -26,8 +26,13 @@
 #
 # Produces build/OpenCode-Inbuilt.ipa, adhoc signed. -Wall -Wextra,
 # zero warnings required for the app's own ObjC (same rule as
-# build.sh). MinOS is 27.0: the embedded Kernarium frameworks
-# declare MinimumOSVersion 27.0.
+# build.sh). MinOS is 15.0 for the APP binary only — DIAGNOSTIC, see
+# MIN below. The embedded Kernarium frameworks declare
+# MinimumOSVersion 27.0, so the guest still needs iOS 27 at runtime;
+# on older iOS the dlopen simply fails gracefully ("runtime did not
+# load"). The runtime/kernel/GPU builds are untouched by this: they
+# are separate workflow steps and still build with Xcode 27 / MinOS
+# 27.0.
 #
 # This script assumes nothing about this Linux VM: no ~/workspace
 # paths, no Linux SDK, no clang-18. Everything comes from xcrun.
@@ -39,7 +44,26 @@ FRAMEWORKS_DIR="${2:-./kernarium-frameworks}"
 
 SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
 CLANG="$(xcrun --sdk iphoneos -f clang)"
-MIN=27.0
+# DIAGNOSTIC MinOS 15.0 (was 27.0) for the APP binary only, to chase
+# the LiveContainer launch crash: every Kernarium build dies ~1s
+# after main(), before didFinishLaunching, SIGKILL with no log and
+# no CRASH line, while the old LinuxRunner build (MinOS 15.0, SDK
+# 26.5) opened fine on the same phone, same iOS 27, same
+# LiveContainer. A binary diff of the two app binaries shows MinOS
+# and SDK are the ONLY launch-relevant structural differences
+# (same segments, chained fixups, __PAGEZERO, LC_MAIN entryoff;
+# the LC_RPATH is benign; zero framework load commands since
+# c032ac1). LiveContainer's own iOS 27 breakage revolves around
+# version handling (dyld SDK-gated behaviour, sVersionMap /
+# "Spoof SDK Version" crashes instantly on iOS 27), so the
+# toolchain generation is the most suspicious remaining variable.
+# The SDK itself cannot be downgraded on the xcode-27 runner
+# (no Xcode 26 there, and the runtime needs Xcode 27), so MinOS
+# is the available lever. If the app opens with MinOS 15.0,
+# bisect MinOS upward to find the threshold. If it still dies
+# before step 1, MinOS is exonerated and the killer is in
+# LiveContainer's loader / iOS, not in the app.
+MIN=15.0
 SRC=src
 OUT=build
 APP=$OUT/Payload/OpenCode.app
