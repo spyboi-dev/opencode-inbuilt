@@ -81,6 +81,12 @@ typedef void (^OCGuestExecutor)(NSString *command, NSString *workingDirectory,
 // Append a timestamped line to the in-app engine log (also persisted to
 // Documents/Engine/engine.log). Never includes the server password.
 - (void)appendEngineLog:(NSString *)line;
+// Synchronous twin: the line is on disk when this returns. Used only
+// for launch and boot milestones, where a crash a moment later must
+// not lose the line that explains it. Safe from any thread.
+- (void)appendEngineLogSync:(NSString *)line;
+// Path of the persisted engine log, Documents/Engine/engine.log.
+- (NSString *)engineLogPath;
 // Full diagnostic text: engine log + guest console log. Missing files
 // are noted instead of failing.
 - (NSString *)fullLogText;

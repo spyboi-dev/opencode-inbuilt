@@ -532,8 +532,20 @@ jobs:
             || { echo "Kernarium runtime symbol missing from the embedded framework"; exit 1; }
           strings build/Payload/OpenCode.app/OpenCode | grep -q 'kernarium_runtime_get_api_v28' \
             || { echo "dlsym string missing from the app binary"; exit 1; }
-          echo "linked framework (if the linker kept it):"
-          otool -L build/Payload/OpenCode.app/OpenCode | grep -i 'KRuntime' || echo "(no KRuntime load command; dlopen loads it by path)"
+          echo "Kernarium frameworks must be weak-linked (LC_LOAD_WEAK_DYLIB) or"
+          echo "absent as load commands, never strongly linked: dyld loads strong"
+          echo "frameworks before any app code runs, so one unloadable framework"
+          echo "under LiveContainer kills the launch with a dyld error and no log"
+          echo "at all. Weak ones fall back to KernGlue's dlopen-by-path, which"
+          echo "fails gracefully with a log line; absent ones are dlopen-only."
+          echo "Fail only on a strong load command for any of the four."
+          for fw in KRuntime_6_18_4K KosmicKrisp MesaEGL MesaGallium; do
+            otool -l build/Payload/OpenCode.app/OpenCode | grep -A2 "LC_LOAD_DYLIB" | grep -q "$fw" \
+              && { echo "$fw is strongly linked (must be weak or absent)"; exit 1; }
+          done
+          echo "weak load commands present (informational):"
+          otool -l build/Payload/OpenCode.app/OpenCode | grep -A2 "LC_LOAD_WEAK_DYLIB" | grep -E "KRuntime|KosmicKrisp|MesaEGL|MesaGallium" || echo "(none: dlopen-only)"
+          echo "no Kernarium framework is strongly linked"
           for fw in KRuntime_6_18_4K KosmicKrisp MesaEGL MesaGallium; do
             test -d "build/Payload/OpenCode.app/Frameworks/$fw.framework" \
               || { echo "missing embedded framework: $fw"; exit 1; }

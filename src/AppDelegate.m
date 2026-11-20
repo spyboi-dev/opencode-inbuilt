@@ -2,6 +2,7 @@
 // The chat opens over them; Files lives inside the chat (Chat/Files
 // switch) and the Engine and Settings screens live in Integrations.
 #import "AppDelegate.h"
+#import "OCCrashLog.h"
 #import "OCSessionsViewController.h"
 #import "OCIntegrationsViewController.h"
 #import "OCStartupViewController.h"
@@ -14,6 +15,13 @@
 @implementation OCAppDelegate
 
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
+    // Crash recorder first, before anything else runs: a launch
+    // crash must leave one line in the engine log, or there is
+    // nothing to diagnose it with. The log file is
+    // Documents/Engine/engine.log; the Engine tab shows it, and
+    // the Files app can open it (UIFileSharingEnabled).
+    OCCrashLogInstall([[OCEngine shared] engineLogPath]);
+    [[OCEngine shared] appendEngineLogSync:@"--- App launch ---"];
     self.window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
 
     OCSessionsViewController *sessions = [[OCSessionsViewController alloc] init];

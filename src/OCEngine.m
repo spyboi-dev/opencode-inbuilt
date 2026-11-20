@@ -85,20 +85,20 @@ static NSString *const kGuestImageInstalled = @"oc.guestImageInstalled";
     if (self.state == OCEngineStateRunning || self.state == OCEngineStateStarting) return;
     if (self.userStoppedEngineThisSession) return;
     if (!self.guestCoreLinked) {
-        [self appendEngineLog:@"Auto-start skipped: engine not ready yet in this build"];
+        [self appendEngineLogSync:@"Auto-start skipped: engine not ready yet in this build"];
         return;
     }
     if (self.state == OCEngineStateNotInstalled || self.state == OCEngineStateInstalling) {
-        [self appendEngineLog:@"Auto-start skipped: first-launch setup not done yet"];
+        [self appendEngineLogSync:@"Auto-start skipped: first-launch setup not done yet"];
         return;
     }
-    [self appendEngineLog:@"Auto-start: starting engine"];
+    [self appendEngineLogSync:@"Auto-start: starting engine"];
     __weak typeof(self) weakSelf = self;
     [self startEngineWithCompletion:^(BOOL started, NSError * _Nullable error) {
         typeof(self) strongSelf = weakSelf;
         if (!strongSelf) return;
         if (!started) {
-            [strongSelf appendEngineLog:[NSString stringWithFormat:@"Auto-start failed: %@", error.localizedDescription ?: @"unknown"]];
+            [strongSelf appendEngineLogSync:[NSString stringWithFormat:@"Auto-start failed: %@", error.localizedDescription ?: @"unknown"]];
         }
     }];
 }
@@ -185,10 +185,14 @@ static NSString *const kGuestImageInstalled = @"oc.guestImageInstalled";
 
 // Serial queue so log appends from any thread (main, console
 // callback, timers) cannot interleave in the file.
+static const void *kOCEngineLogQueueKey = &kOCEngineLogQueueKey;
 static dispatch_queue_t OCEngineLogQueue(void) {
     static dispatch_queue_t q;
     static dispatch_once_t once;
-    dispatch_once(&once, ^{ q = dispatch_queue_create("com.spyboy.opencode.engineLog", DISPATCH_QUEUE_SERIAL); });
+    dispatch_once(&once, ^{
+        q = dispatch_queue_create("com.spyboy.opencode.engineLog", DISPATCH_QUEUE_SERIAL);
+        dispatch_queue_set_specific(q, kOCEngineLogQueueKey, (void *)1, NULL);
+    });
     return q;
 }
 
@@ -208,35 +212,58 @@ static NSMutableString *OCEngineConsolePartial(void) {
     return [[self engineDirectory] stringByAppendingPathComponent:@"guest.log"];
 }
 
+// The file write itself: queue-confined (see OCEngineLogQueue).
+// Creates the directory, appends one timestamped line, and keeps
+// the file from growing forever by keeping only the last 256 KB
+// once it passes 512 KB. Failure-tolerant: a logging failure must
+// never break the engine.
+static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
+    if (!path.length || !line.length) return;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    [fm createDirectoryAtPath:[path stringByDeletingLastPathComponent] withIntermediateDirectories:YES attributes:nil error:nil];
+    NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
+    fmt.dateFormat = @"HH:mm:ss";
+    NSString *entry = [NSString stringWithFormat:@"[%@] %@\n", [fmt stringFromDate:[NSDate date]], line];
+    NSData *data = [entry dataUsingEncoding:NSUTF8StringEncoding];
+    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
+    if (!fh) {
+        [data writeToFile:path atomically:NO];
+        return;
+    }
+    [fh seekToEndOfFile];
+    [fh writeData:data];
+    unsigned long long size = [fh offsetInFile];
+    [fh closeFile];
+    if (size > 512 * 1024) {
+        NSString *old = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+        if (old.length > 256 * 1024) {
+            NSString *tail = [old substringFromIndex:old.length - 256 * 1024];
+            NSRange nl = [tail rangeOfString:@"\n"];
+            if (nl.location != NSNotFound) tail = [tail substringFromIndex:nl.location + 1];
+            [tail writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        }
+    }
+}
+
 - (void)appendEngineLog:(NSString *)line {
     if (!line.length) return;
     NSString *copy = [line copy];
     dispatch_async(OCEngineLogQueue(), ^{
-        NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
-        fmt.dateFormat = @"HH:mm:ss";
-        NSString *entry = [NSString stringWithFormat:@"[%@] %@\n", [fmt stringFromDate:[NSDate date]], copy];
-        NSString *path = [self engineLogPath];
-        NSFileManager *fm = [NSFileManager defaultManager];
-        [fm createDirectoryAtPath:[path stringByDeletingLastPathComponent] withIntermediateDirectories:YES attributes:nil error:nil];
-        NSData *data = [entry dataUsingEncoding:NSUTF8StringEncoding];
-        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
-        if (!fh) {
-            [data writeToFile:path atomically:NO];
-        } else {
-            [fh seekToEndOfFile];
-            [fh writeData:data];
-            unsigned long long size = [fh offsetInFile];
-            [fh closeFile];
-            if (size > 200 * 1024) {
-                NSString *old = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
-                if (old.length > 100 * 1024) {
-                    NSString *tail = [old substringFromIndex:old.length - 100 * 1024];
-                    NSRange nl = [tail rangeOfString:@"\n"];
-                    if (nl.location != NSNotFound) tail = [tail substringFromIndex:nl.location + 1];
-                    [tail writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
-                }
-            }
-        }
+        OCEngineWriteLogLineToFile([self engineLogPath], copy);
+    });
+}
+
+- (void)appendEngineLogSync:(NSString *)line {
+    if (!line.length) return;
+    NSString *copy = [line copy];
+    if (dispatch_get_specific(kOCEngineLogQueueKey)) {
+        // Already on the log queue: write directly instead of
+        // deadlocking on dispatch_sync.
+        OCEngineWriteLogLineToFile([self engineLogPath], copy);
+        return;
+    }
+    dispatch_sync(OCEngineLogQueue(), ^{
+        OCEngineWriteLogLineToFile([self engineLogPath], copy);
     });
 }
 

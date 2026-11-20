@@ -75,19 +75,33 @@ mkdir -p "$APP/Frameworks"
 OCFLAGS="-target arm64-apple-ios$MIN -isysroot $SDK -miphoneos-version-min=$MIN -fobjc-arc -O2 -Wall -Wextra -Wno-deprecated-declarations -DOC_KERNARIUM_LINKED=1 -I$SRC -F$SDK/System/Library/SubFrameworks -F$SDK/System/Library/PrivateFrameworks"
 
 # App sources (same list as build.sh) plus the Kernarium glue.
-for f in main AppDelegate OCKeychain OCUtil OCSettings OCServerClient OCEngine OCSessionsViewController OCChatViewController OCFilesViewController OCEngineViewController OCSettingsViewController OCIntegrationsViewController OCBrowserViewController OCCodeViewController OCStartupViewController OCDesktopViewController KernGlue OCVsockBridge OCGuestInstall; do
+for f in main AppDelegate OCKeychain OCUtil OCSettings OCServerClient OCEngine OCCrashLog OCSessionsViewController OCChatViewController OCFilesViewController OCEngineViewController OCSettingsViewController OCIntegrationsViewController OCBrowserViewController OCCodeViewController OCStartupViewController OCDesktopViewController KernGlue OCVsockBridge OCGuestInstall; do
   echo "== $f.m"
   $CLANG $OCFLAGS -c "$SRC/$f.m" -o "$OUT/$f.o"
 done
 
 echo "== link"
+# The four Kernarium frameworks are WEAK-linked on purpose. Strong
+# -framework makes dyld load them before any app code runs: one
+# framework that cannot load under LiveContainer (rpath resolving
+# against LiveContainer's own executable path, a signature problem
+# after LC re-signs, a static initializer in the 52 MB kernel
+# framework) kills the launch instantly with a dyld error — no app
+# code, no log, nothing, which is exactly the crash the user sees.
+# Weak-linked, a framework that cannot load just resolves to NULL
+# and the launch continues; KernGlue's dlopen-by-path (which already
+# handles the LiveContainer bundle-move case and NULL) takes over
+# and fails gracefully with a log line. The app references no
+# symbol from these frameworks directly, so weak linking changes
+# nothing in the standalone path. The frameworks are still copied
+# into Payload/Frameworks below.
 KRUNTIME_DIR="$(dirname "$KRUNTIME")"
 $CLANG -target arm64-apple-ios$MIN -isysroot "$SDK" -miphoneos-version-min=$MIN \
   -ObjC -Wl,-dead_strip \
   -F"$KRUNTIME_DIR" -F"Frameworks" \
   -rpath @executable_path/Frameworks \
-  "$OUT"/main.o "$OUT"/AppDelegate.o "$OUT"/OCKeychain.o "$OUT"/OCUtil.o "$OUT"/OCSettings.o "$OUT"/OCServerClient.o "$OUT"/OCEngine.o "$OUT"/OCSessionsViewController.o "$OUT"/OCChatViewController.o "$OUT"/OCFilesViewController.o "$OUT"/OCEngineViewController.o "$OUT"/OCSettingsViewController.o "$OUT"/OCIntegrationsViewController.o "$OUT"/OCBrowserViewController.o "$OUT"/OCCodeViewController.o "$OUT"/OCStartupViewController.o "$OUT"/OCDesktopViewController.o "$OUT"/KernGlue.o "$OUT"/OCVsockBridge.o "$OUT"/OCGuestInstall.o \
-  -framework KRuntime_6_18_4K -framework KosmicKrisp -framework MesaEGL -framework MesaGallium \
+  "$OUT"/main.o "$OUT"/AppDelegate.o "$OUT"/OCKeychain.o "$OUT"/OCUtil.o "$OUT"/OCSettings.o "$OUT"/OCServerClient.o "$OUT"/OCEngine.o "$OUT"/OCCrashLog.o "$OUT"/OCSessionsViewController.o "$OUT"/OCChatViewController.o "$OUT"/OCFilesViewController.o "$OUT"/OCEngineViewController.o "$OUT"/OCSettingsViewController.o "$OUT"/OCIntegrationsViewController.o "$OUT"/OCBrowserViewController.o "$OUT"/OCCodeViewController.o "$OUT"/OCStartupViewController.o "$OUT"/OCDesktopViewController.o "$OUT"/KernGlue.o "$OUT"/OCVsockBridge.o "$OUT"/OCGuestInstall.o \
+  -weak_framework KRuntime_6_18_4K -weak_framework KosmicKrisp -weak_framework MesaEGL -weak_framework MesaGallium \
   -framework UIKit -framework Foundation -framework Security -framework CoreGraphics -framework QuartzCore -framework WebKit -framework Metal -framework MetalKit -framework CoreLocation \
   -lobjc -lSystem -lz \
   -o "$APP/OpenCode"

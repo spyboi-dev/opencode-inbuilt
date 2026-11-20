@@ -82,10 +82,10 @@ static void ConsoleOutput(void *context, const void *buffer, size_t length) {
     if ((self = [super init])) {
         _bootWaiters = [NSMutableArray array];
         _consoleQueue = dispatch_queue_create("com.spyboy.opencode.kernConsole", DISPATCH_QUEUE_SERIAL);
+        // loadRuntime logs the result itself (loaded, or exactly
+        // why not), synchronously, so a launch crash still leaves
+        // the reason on disk.
         _api = [self loadRuntime];
-        if (!_api) {
-            [[OCEngine shared] appendEngineLog:@"Kernarium runtime did not load: KRuntime_6_18_4K.framework is not in this build"];
-        }
     }
     return self;
 }
@@ -106,14 +106,32 @@ static void ConsoleOutput(void *context, const void *buffer, size_t length) {
             stringByAppendingPathComponent:@"KRuntime_6_18_4K.framework"]
             stringByAppendingPathComponent:@"KRuntime_6_18_4K"];
     }
-    if (![[NSFileManager defaultManager] fileExistsAtPath:frameworkBinary]) return NULL;
+    if (!frameworkBinary.length) {
+        [[OCEngine shared] appendEngineLogSync:@"Kernarium runtime did not load: framework path not found in bundle"];
+        return NULL;
+    }
+    if (![[NSFileManager defaultManager] fileExistsAtPath:frameworkBinary]) {
+        [[OCEngine shared] appendEngineLogSync:@"Kernarium runtime did not load: KRuntime_6_18_4K.framework is not in this build"];
+        return NULL;
+    }
     void *handle = dlopen(frameworkBinary.UTF8String, RTLD_NOW | RTLD_LOCAL);
-    if (!handle) return NULL;
+    if (!handle) {
+        const char *err = dlerror();
+        [[OCEngine shared] appendEngineLogSync:[NSString stringWithFormat:@"Kernarium runtime did not load: dlopen failed: %s", err ? err : "unknown error"]];
+        return NULL;
+    }
     OCKernariumGetApi getApi =
         (OCKernariumGetApi)dlsym(handle, "kernarium_runtime_get_api_v28");
-    if (!getApi) return NULL;
+    if (!getApi) {
+        [[OCEngine shared] appendEngineLogSync:@"Kernarium runtime did not load: kernarium_runtime_get_api_v28 not found in framework"];
+        return NULL;
+    }
     const kernarium_runtime_api *api = getApi();
-    if (!api || api->abi_version != KERNARIUM_RUNTIME_API_VERSION) return NULL;
+    if (!api || api->abi_version != KERNARIUM_RUNTIME_API_VERSION) {
+        [[OCEngine shared] appendEngineLogSync:[NSString stringWithFormat:@"Kernarium runtime did not load: ABI version mismatch (got %u, want %u)", api ? (unsigned)api->abi_version : 0, (unsigned)KERNARIUM_RUNTIME_API_VERSION]];
+        return NULL;
+    }
+    [[OCEngine shared] appendEngineLogSync:@"Kernarium runtime loaded"];
     return api;
 }
 
@@ -141,7 +159,7 @@ static void ConsoleOutput(void *context, const void *buffer, size_t length) {
 
 - (void)installGuestExecutor {
     if (!_api) {
-        [[OCEngine shared] appendEngineLog:@"Guest executor not installed: Kernarium runtime did not load"];
+        [[OCEngine shared] appendEngineLogSync:@"Guest executor not installed: Kernarium runtime did not load"];
         return;
     }
     __weak typeof(self) weakSelf = self;
@@ -158,7 +176,7 @@ static void ConsoleOutput(void *context, const void *buffer, size_t length) {
         [strongSelf sendConsoleText:command];
         if (completion) completion(@"", 0);
     };
-    [[OCEngine shared] appendEngineLog:@"Guest executor installed (Kernarium console)"];
+    [[OCEngine shared] appendEngineLogSync:@"Guest executor installed (Kernarium console)"];
 }
 
 // Create the sparse overlay file the boot formats fresh on ubd1.
@@ -225,7 +243,7 @@ static void ConsoleOutput(void *context, const void *buffer, size_t length) {
     if (_api->plan_gpu_budget) {
         _api->plan_gpu_budget(kGuestMemoryMiB, kGuestCPUs, 0, 0, 0, &budget);
         if (budget.short_of_floor) {
-            [[OCEngine shared] appendEngineLog:@"Warning: low memory headroom for the guest — booting anyway"];
+            [[OCEngine shared] appendEngineLogSync:@"Warning: low memory headroom for the guest — booting anyway"];
         }
     }
     _api->set_console_output_callback(ConsoleOutput, (__bridge void *)self);
@@ -245,7 +263,7 @@ static void ConsoleOutput(void *context, const void *buffer, size_t length) {
     _boot.session_record_path = _sessionRecordPath.UTF8String;
     _boot.use_jit = 0; // gadget (interpreter) engine: no JIT, no debugger
     _running = YES;
-    [[OCEngine shared] appendEngineLog:@"Guest boot started (Kernarium, Debian 13)"];
+    [[OCEngine shared] appendEngineLogSync:@"Guest boot started (Kernarium, Debian 13)"];
     // run() blocks until the guest stops, so it owns its own thread.
     // The boot struct lives in an ivar (see above); the C strings
     // point into NSStrings this object holds, so every pointer stays
@@ -259,17 +277,17 @@ static void ConsoleOutput(void *context, const void *buffer, size_t length) {
         strongSelf->_booted = NO;
         [strongSelf stopBridges];
         if (result == 0) {
-            [[OCEngine shared] appendEngineLog:@"Guest powered off"];
+            [[OCEngine shared] appendEngineLogSync:@"Guest powered off"];
             [strongSelf finishBootWithSuccess:NO error:GlueError(4, @"Guest powered off")];
         } else if (result == KERNARIUM_RUNTIME_RESULT_RESTART_LOOP) {
             [strongSelf finishBootWithSuccess:NO error:GlueError(5, @"Guest kept restarting — see the console log")];
         } else if (strongSelf->_hostRequestedStop) {
             // A host stop returns an error from run(), not 0. That
             // is a clean stop, not a failure.
-            [[OCEngine shared] appendEngineLog:@"Guest stopped by the app"];
+            [[OCEngine shared] appendEngineLogSync:@"Guest stopped by the app"];
             [strongSelf finishBootWithSuccess:NO error:GlueError(6, @"Guest stopped")];
         } else {
-            [[OCEngine shared] appendEngineLog:[NSString stringWithFormat:@"Guest run failed (%d)", result]];
+            [[OCEngine shared] appendEngineLogSync:[NSString stringWithFormat:@"Guest run failed (%d)", result]];
             [strongSelf finishBootWithSuccess:NO error:GlueError(7, [NSString stringWithFormat:@"Guest run failed (%d)", result])];
         }
     });
@@ -286,11 +304,11 @@ static void ConsoleOutput(void *context, const void *buffer, size_t length) {
     _serverBridge = [[OCVsockBridge alloc] initWithConnectVsock:connect];
     NSError *error = nil;
     if (![_serverBridge startOnLocalPort:4096 vsockPort:4096 error:&error]) {
-        [[OCEngine shared] appendEngineLog:[NSString stringWithFormat:@"Server bridge failed: %@", error.localizedDescription]];
+        [[OCEngine shared] appendEngineLogSync:[NSString stringWithFormat:@"Server bridge failed: %@", error.localizedDescription]];
     }
     _appBridge = [[OCVsockBridge alloc] initWithConnectVsock:connect];
     if (![_appBridge startOnLocalPort:8000 vsockPort:8000 error:&error]) {
-        [[OCEngine shared] appendEngineLog:[NSString stringWithFormat:@"App bridge failed: %@", error.localizedDescription]];
+        [[OCEngine shared] appendEngineLogSync:[NSString stringWithFormat:@"App bridge failed: %@", error.localizedDescription]];
     }
 }
 
@@ -335,19 +353,19 @@ static void ConsoleOutput(void *context, const void *buffer, size_t length) {
         text = [text stringByReplacingOccurrencesOfString:redact withString:@"****"];
     }
     if ([text containsString:@"UML_BOOT_ERROR:"]) {
-        [[OCEngine shared] appendEngineLog:[NSString stringWithFormat:@"Guest boot error: %@", text]];
+        [[OCEngine shared] appendEngineLogSync:[NSString stringWithFormat:@"Guest boot error: %@", text]];
         [self finishBootWithSuccess:NO error:GlueError(8, @"Guest boot failed — see the console log")];
         return;
     }
     if (_booting && !_booted) {
         if ([text containsString:@"UML_BOOT_SWITCH_ROOT:/sbin/init"]) {
-            [[OCEngine shared] appendEngineLog:@"Guest init running — waiting for the login prompt"];
+            [[OCEngine shared] appendEngineLogSync:@"Guest init running — waiting for the login prompt"];
         }
         // A Linux guest has no boot_completed signal: "up" is the
         // `login: ` prompt on the console.
         if ([text containsString:@"login: "]) {
             _booted = YES;
-            [[OCEngine shared] appendEngineLog:@"Guest up (login prompt seen)"];
+            [[OCEngine shared] appendEngineLogSync:@"Guest up (login prompt seen)"];
             [self finishBootWithSuccess:YES error:nil];
         }
     }
