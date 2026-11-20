@@ -359,7 +359,10 @@ jobs:
       - name: Build Linux kernel bundle (arm64, 4K)
         run: |
           cd kernarium
-          BUNDLE=.build/kernel/artifacts/mainline-6.18-arm64-4k-20261119-6.18.60-ca1
+          # Absolute: verify-kernel-artifact.py requires an absolute
+          # artifact root, and the reuse check above silently never
+          # matched with a relative path.
+          BUNDLE="$PWD/.build/kernel/artifacts/mainline-6.18-arm64-4k-20261119-6.18.60-ca1"
           if [ -d "$BUNDLE" ] && python3 kernel/common/artifacts/verify-kernel-artifact.py \
               --artifact "$BUNDLE" --common-root kernel/common \
               --abi-metadata kernel/common/abi/identity.env --compatible \
