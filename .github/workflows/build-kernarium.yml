@@ -75,6 +75,12 @@ jobs:
           if [ -z "$XCODE" ]; then echo "no Xcode 26 found:"; ls /Applications | grep -i xcode || true; exit 1; fi
           echo "Using $XCODE"
           echo "XCODE=$XCODE" >> "$GITHUB_ENV"
+          # Pin the developer dir for every later step: xcrun honors
+          # DEVELOPER_DIR above the system xcode-select setting, so the
+          # builds use this Xcode even if that setting is reset.
+          # (Run 44670686952 failed because gawk's configure picked up
+          # the CommandLineTools clang instead of Xcode's.)
+          echo "DEVELOPER_DIR=$XCODE/Contents/Developer" >> "$GITHUB_ENV"
           sudo xcode-select -s "$XCODE/Contents/Developer"
           xcodebuild -version
 
@@ -102,6 +108,10 @@ jobs:
           # NOTE: macOS ships /usr/bin/bison (2.3, too old for Mesa),
           # /usr/bin/libtool (Apple's, not GNU's) and no gmake, so the
           # checks below look for the Homebrew names, not the system ones.
+          # bison and flex are NOT in the check loop on purpose: the
+          # system ships both, so `command -v` finds them and the
+          # Homebrew versions would never be installed. They are
+          # installed unconditionally below.
           NEED=""
           check() {
             if command -v "$1" >/dev/null 2>&1; then echo "have $1"; else echo "missing $1 -> brew $2"; NEED="$NEED $2"; fi
@@ -111,8 +121,6 @@ jobs:
           check meson meson
           check pkg-config pkg-config
           check gmake make
-          check bison bison
-          check flex flex
           check rsync rsync
           check autoconf autoconf
           check automake automake
@@ -120,6 +128,9 @@ jobs:
           check gettext gettext
           check gperf gperf
           check groff groff
+          # Mesa needs bison >= 3 and a modern flex; the system ships
+          # bison 2.3 and Apple's flex, so install Homebrew's outright.
+          NEED="$NEED bison flex"
           if [ -n "$NEED" ]; then
             HOMEBREW_NO_AUTO_UPDATE=1 brew install $(echo "$NEED" | tr ' ' '\n' | sort -u | tr '\n' ' ')
           fi
@@ -164,6 +175,24 @@ jobs:
           python3 -c 'import mako, packaging, yaml' 2>/dev/null || \
             python3 -m pip install --user mako packaging pyyaml || \
             python3 -m pip install --break-system-packages mako packaging pyyaml
+
+      - name: Verify toolchain
+        run: |
+          # Fail fast with a diagnosis if the C toolchain cannot run
+          # the programs it compiles (run 44670686952 died in gawk's
+          # configure with "cannot run C compiled programs" while using
+          # the CommandLineTools clang instead of Xcode's).
+          echo "xcode-select: $(xcode-select -p)"
+          echo "DEVELOPER_DIR: ${DEVELOPER_DIR:-unset}"
+          CC="$(xcrun --sdk macosx --find clang)"
+          SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+          echo "macOS clang: $CC"
+          echo "macOS SDK: $SDKROOT"
+          echo "iOS clang: $(xcrun --sdk iphoneos --find clang)"
+          "$CC" --version | head -1
+          printf 'int main(void){return 0;}\n' > /tmp/toolchain-test.c
+          SDKROOT="$SDKROOT" MACOSX_DEPLOYMENT_TARGET=15.4 "$CC" /tmp/toolchain-test.c -o /tmp/toolchain-test
+          /tmp/toolchain-test && echo "toolchain runs programs: OK"
 
       - name: Clone Kernarium (pinned commit)
         run: |
