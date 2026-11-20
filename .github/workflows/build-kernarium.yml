@@ -131,6 +131,19 @@ jobs:
           sudo xcode-select -s "$XCODE/Contents/Developer"
           xcodebuild -version
 
+      - name: Install Metal Toolchain
+        run: |
+          # The GPU prefix build (Mesa native tools) compiles Metal
+          # shaders with `xcrun -sdk macosx metal`; that tool lives in
+          # the separately downloadable Metal Toolchain component, which
+          # the xcode-27 image does not preinstall (run 44717979005:
+          # "cannot execute tool 'metal' due to missing Metal
+          # Toolchain"). Download it once per job; the build fails
+          # without it.
+          xcodebuild -downloadComponent MetalToolchain
+          xcrun -sdk macosx --find metal
+          echo "Metal Toolchain installed"
+
       - name: Check disk space
         # The runner has ~96 Gi free (observed on run 44672237845), so
         # no cleanup is needed. An earlier version of this step deleted
