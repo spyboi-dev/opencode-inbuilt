@@ -208,10 +208,23 @@ jobs:
       - name: Prepare dependencies
         run: |
           cd kernarium
-          ./dependencies/prepare.sh --product apple-gpu-vulkan-experiment --root "$UML_DEPENDENCY_SOURCE_ROOT"
-          ./dependencies/prepare.sh --product ios-network --root "$UML_DEPENDENCY_SOURCE_ROOT"
-          ./dependencies/prepare.sh --product kernel-host-tools --root "$UML_DEPENDENCY_SOURCE_ROOT"
-          ./dependencies/prepare.sh --archive-manifest dependencies/kernel-host-tools/archives.tsv
+          # prepare.sh fetches pinned sources from several upstreams;
+          # a transient upstream failure (Savannah returned HTTP 502
+          # for gawk on run 44669547801) must not fail the whole build,
+          # so each product is retried up to 3 times.
+          retry() {
+            local n=0
+            until "$@"; do
+              n=$((n+1))
+              if [ "$n" -ge 3 ]; then echo "giving up after 3 attempts: $*"; return 1; fi
+              echo "attempt $n failed, retrying in 30s: $*"
+              sleep 30
+            done
+          }
+          retry ./dependencies/prepare.sh --product apple-gpu-vulkan-experiment --root "$UML_DEPENDENCY_SOURCE_ROOT"
+          retry ./dependencies/prepare.sh --product ios-network --root "$UML_DEPENDENCY_SOURCE_ROOT"
+          retry ./dependencies/prepare.sh --product kernel-host-tools --root "$UML_DEPENDENCY_SOURCE_ROOT"
+          retry ./dependencies/prepare.sh --archive-manifest dependencies/kernel-host-tools/archives.tsv
 
       - name: Build kernel host tools
         run: |
