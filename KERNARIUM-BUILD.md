@@ -1223,3 +1223,56 @@ relaunch; the code attempts the restart and surfaces the error honestly.
 flavour in the Andarium IPA); it must be Mac-built by the new workflow
 (`package-ios-frameworks.sh --sdk device`). The three GPU frameworks are
 vendored in the repo (`Frameworks/`, 34 MB, from the Andarium IPA via TermX).
+
+## Desktop UI on kernarium-desktop — chunked image delivery (commit 9ccab19, run 44869304088)
+
+Branch `kernarium-desktop`, rebased onto kernarium-engine at c556d84
+(includes the af64d5b logging fix). Full desktop record lives in
+`DESKTOP-UI.md` on that branch; this is the delivery summary.
+
+- **Image upload — chunked, PUBLISHED.** The single 1.16 GB upload
+  to release `rootfs-20261120` failed five times on the VM egress
+  proxy (HTTP/2 stream CANCEL, connection resets). A sixth check
+  proved no asset had landed (release asset list empty,
+  `gh release download` said "no assets to download"), so the
+  chunked plan ran: `split -b 100M` → 12 parts
+  (`part00`–`part10` 104,857,600 bytes, `part11` 5,716,714 bytes),
+  recorded in `rootfs-build/CHUNKS-SHA256SUMS`, reassembly verified
+  locally (`cat part* | sha256sum` = `b1018c93…`). All 12 uploaded
+  first try (~1–2 min each, `gh release upload --clobber`, each
+  verified by API size check), final asset list verified name + size
+  for all 12, release published (`draft=false`, ID 453414533).
+- **OCGuestInstall rewrite (9ccab19):** downloads the 12 parts in
+  order, verifies each part's size + SHA-256, reassembles the `.gz`,
+  verifies the whole archive hash, then gunzips and verifies the
+  `.ext4` hash. Verified parts are kept, so a killed Install resumes
+  at the first missing part. **No NSURLSession resume data anywhere,
+  by design** — TermX commit 8c76d48 showed
+  `downloadTaskWithResumeData:` throws on a stale blob and crashed
+  every Install tap; task creation is `@try/@catch`'d, the install
+  runs off the main thread, a background-task assertion covers the
+  pipeline, re-entrant Installs are refused cleanly. `gunzipFile`
+  heap buffer (256 KiB): the old 1 MiB stack buffer was the TermX
+  SIGBUS class (d2b4f2e). Checked and not a problem here: the TermX
+  poll-hash loop (startup timer calling `guestInstalledAt`) and the
+  `pathForResource` framework-lookup bug (72bb2bf) do not apply to
+  this app. Workflow verify now also requires the release tag, both
+  image hashes, `part00`/`part11` and the `Launch step` markers.
+- **Build — run 44869304088, success in 23m16s.** IPA 25,310,216
+  bytes, SHA-256
+  `70233f26857c30be848e3dcc26d4e64f1565b7027236c1be06c840f872167d14`,
+  backed up as `mac-ipas/OpenCode-Inbuilt-kernarium-9ccab19.ipa`.
+  Verified independently: arm64, MinOS 15.0.0, SDK 27.0.0, LC_MAIN
+  0x4000, signature valid (124/124 page hashes), zero Kernarium
+  load commands, all four frameworks embedded, KRuntime exports
+  `_kernarium_runtime_get_api_v28`, DYLD OK, BOOT.txt, Calling
+  UIApplicationMain, all 7 launch markers, tag + hashes + chunk
+  strings in the binary, zero BUILD-NOTE strings, zero `.html`.
+  Run: https://github.com/spyboi-dev/opencode-inbuilt/actions/runs/44869304088
+- **Still unproven on device** (launch crash in LiveContainer is a
+  separate open problem; this build includes the af64d5b diagnostic
+  markers). Device test when the app opens: fresh install, tap
+  Start, watch the part-by-part download
+  ("Downloading guest image part N of 12…"), guest boot,
+  `/api/info`, chat + tool call, Desktop UI window, mode switch,
+  `docker run hello-world`, app.py on port 8000.

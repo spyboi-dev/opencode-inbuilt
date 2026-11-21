@@ -1,8 +1,6 @@
 # Desktop UI mode — real OpenCode Linux desktop app in the Kernarium guest
 
-Branch: `kernarium-desktop` (off `kernarium-engine` at bac51d4, includes the
-dyld-constructor launch-logging fix). Do NOT merge to main. The LinuxRunner
-build on main is untouched.
+Branch: `kernarium-desktop` (off `kernarium-engine` at c556d84, includes the af64d5b logging fix: buffer-over-read fix, same-file dedup, Calling UIApplicationMain marker). Do NOT merge to main. The LinuxRunner build on main is untouched.
 
 ## Direction (user, 2026-11-21)
 
@@ -88,15 +86,89 @@ calling, browser and all. Remember: real desktop app.
   used + 40% headroom, e2fsck, debugfs spot checks, chmod 444,
   gzip -9, SHA256SUMS). Extraction helper:
   `rootfs-build/extract-termx-image.sh`.
-- Publish target (already in `src/OCGuestInstall.m`, hashes TODO):
-  `https://github.com/spyboi-dev/opencode-inbuilt/releases/download/rootfs-20261120/opencode-debian-trixie-arm64.ext4.gz`
-  — needs a `gh release create rootfs-20261120` after the image is
-  built, then fill `kOCGuestImageGzSHA256` / `kOCGuestImageSHA256` /
-  `kOCGuestImageSize` in `src/OCGuestInstall.m`. Until the hashes are
-  filled, setup refuses the image by design.
+- Published: release `rootfs-20261120` (ID 453414533), public
+  (draft=false), with the image in 12 verified parts — see "Chunked
+  delivery" below. The app downloads the parts, verifies each
+  SHA-256, reassembles the `.gz` and verifies the whole archive hash
+  (`kOCGuestImageGzSHA256` / `kOCGuestImageSHA256` /
+  `kOCGuestImageSize` in `src/OCGuestInstall.m`). Until the hashes
+  are filled, setup refuses the image by design.
 - Expected image size: ~600-800 MB .gz (est.). The TermX download crash
   at 70-80% (2026-11-21) is a warning sign for the same download path
   (`OCGuestInstall` uses NSURLSessionDownloadTask with progress polling).
+
+## Chunked delivery — the image is published (2026-11-21)
+
+- The single 1.16 GB upload failed five times on the VM egress proxy
+  (HTTP/2 stream CANCEL, connection resets; the longest ran 20 min).
+  A sixth check then proved the asset had NOT landed after all
+  (release asset list empty, `gh release download` said "no assets
+  to download"), so the chunked plan ran instead of another single
+  upload.
+- Split: `split -b 100M` (100 MiB parts) in
+  `rootfs-build/` → 12 chunks,
+  `opencode-debian-trixie-arm64.ext4.gz.part00`–`.part11`
+  (part00–10: 104,857,600 bytes each; part11: 5,716,714 bytes).
+  Recorded in `rootfs-build/CHUNKS-SHA256SUMS`; reassembly verified
+  locally (`cat part* | sha256sum` = `b1018c93…`).
+- Upload: `rootfs-build/upload-chunks.sh` — one chunk at a time,
+  `gh release upload --clobber`, each verified by API size check
+  right after, up to 3 retries per chunk. All 12 landed first try,
+  ~1–2 min each. Final asset list verified name + size for all 12,
+  then the release was published
+  (`gh release edit --draft=false`).
+- Chunk SHAs (SHA-256):
+  - part00 `fcb2337ab43d5e4158295d69a355388c31bfdb06e6bfdad9e008c962ce95ba53`
+  - part01 `35a25e8b2ede174bd02ab20bf36d8e7b5cf121f7358f3b4b102d2a0737308fe3`
+  - part02 `0eabfe831216767a07b89909d42e4707a33d9789018566f3f2abb64113158ef9`
+  - part03 `a56f58349f8906932ba294c64e94faf3ea62a28a824ee886f4c1ea58316170cd`
+  - part04 `aac03682fac715e776623e9a4ca0a2a0b19b3b671bc6c3a0a9551f016110c98b`
+  - part05 `a957c690982dbd46f8ae56841e38d523af0f063b4e9b98bbaec8d7223164b14f`
+  - part06 `7fb8d922db43f2baaa3d36f511c9dbc0e31ebb3babdb2bb83e6c8a3aaa768fd8`
+  - part07 `00a262fc27ab876063b5f200d6f607482a645bcba5a3b3b0b1c84695e9d2bea7`
+  - part08 `e53e8d09f2dd0ee5410f1056aa74d05f8492fc3a16163332fe51027ddf25e601`
+  - part09 `9dad6dc9cf7df436bd1a12348bbe63da54303231862e13a316c40274c7c62360`
+  - part10 `ffba913c707fe29c94a7a2f109b479794843da7ca6ab22bfa1d46f11442d7297`
+  - part11 `77d42a1fcf088a4cd917b0cb48cb648969263fbbad5593ae77ce662569013db5`
+
+## Chunked download + TermX resume guards (commit 9ccab19)
+
+- `src/OCGuestInstall.m` rewritten for the chunked delivery: it
+  downloads the 12 parts in order from
+  `.../releases/download/rootfs-20261120/<part name>`, verifies each
+  part's size + SHA-256, reassembles the `.gz` (streaming 1 MB at a
+  time), verifies the whole archive hash `b1018c93…`, then gunzips
+  and verifies the `.ext4` hash `c7511200…` as before. A part that
+  fails verification is deleted and re-downloaded (3 attempts);
+  verified parts are kept on disk, so a killed Install resumes at
+  the first missing part instead of restarting from zero.
+- TermX resume fix (termx commit 8c76d48) applied by review:
+  **no NSURLSession resume data is used anywhere**, by design —
+  `downloadTaskWithResumeData:` throws NSInvalidArgumentException on
+  a stale blob instead of returning nil, which made every TermX
+  Install tap crash in under a second. Per-part resume gives the
+  same benefit with no blob that can go stale. Task creation is
+  still wrapped in `@try/@catch`; the install runs on a background
+  queue (the installed check SHA-256s a 4.46 GB image, never on the
+  main thread); a background-task assertion covers the whole
+  pipeline, ended in the single finish funnel; a re-entrant Install
+  is refused cleanly ("install already in progress").
+- `gunzipFile` heap buffer (256 KiB): the old 1 MiB stack buffer was
+  the TermX SIGBUS class (termx commit d2b4f2e) on a 512 KiB GCD
+  worker stack. This path had never run on device yet.
+- Checked and NOT a problem here: the TermX poll-hash loop (startup
+  screen's 0.5s timer calling `guestInstalledAt`, which SHA-256s the
+  whole image each tick) does not exist in this app — the startup
+  poll reads the cached engine state, and `guestInstalledAt` runs
+  only once per boot/setup. KernGlue's framework lookup already
+  falls back to the executable-relative `Frameworks/` directory, so
+  the TermX `pathForResource` bug (commit 72bb2bf) does not apply.
+- Workflow verify now also requires the release tag, both image
+  hashes, `part00`/`part11` and the `Launch step` markers in the
+  binary. One check artifact: the progress step strings contain the
+  `…` ellipsis, so clang stores them UTF-16LE and plain `strings`
+  does not show them — they are present in the binary, verified by
+  byte search.
 
 ## App-side wiring (this branch)
 
@@ -197,21 +269,29 @@ calling, browser and all. Remember: real desktop app.
   One non-fatal warning: `unshare: unshare failed: Invalid argument`
   during the desktop .deb postinst (chrome-sandbox setup under qemu);
   the app runs with `--no-sandbox`, so it does not matter.
-- **Release upload — `rootfs-20261120`, still in progress / flaky.**
-  Release created (ID 453414533) but the 1.16 GB asset upload keeps
-  failing through the VM egress proxy: `gh release create` killed by
-  SIGTERM at ~13 min; `gh release upload` HTTP/2 stream CANCEL by peer
-  at ~24 min; `curl --http1.1 -T` connection reset by peer at ~6.5 min;
-  a retry with `--retry 2` is running. The IPA is complete and valid
-  regardless; the app cannot download the image until the asset lands.
-  If the upload keeps failing, retry from a better network or upload
-  the `.gz` (at `rootfs-build/opencode-debian-trixie-arm64.ext4.gz`)
-  by hand — the hashes will not change.
+- **Release upload — `rootfs-20261120`, PUBLISHED 2026-11-21.**
+  The single 1.16 GB upload failed five times on the VM egress
+  proxy; a sixth check proved no asset had landed. Delivered
+  chunked instead: 12 parts, all uploaded first try and verified
+  name + size, release published (draft=false). See "Chunked
+  delivery" above for the part list and SHAs.
+- **Chunked + rebase build — commit 9ccab19, run 44869304088, success in 23m16s.** IPA 25,310,216 bytes,
+  SHA-256
+  `70233f26857c30be848e3dcc26d4e64f1565b7027236c1be06c840f872167d14`.
+  Backed up as `mac-ipas/OpenCode-Inbuilt-kernarium-9ccab19.ipa`
+  and `build/OpenCode-Inbuilt-kernarium.ipa`. Verified
+  independently of the workflow: arm64, MinOS 15.0.0, SDK 27.0.0,
+  LC_MAIN 0x4000, code signature valid (124/124 page hashes),
+  zero Kernarium load commands, all four frameworks embedded,
+  KRuntime exports `_kernarium_runtime_get_api_v28`, DYLD OK,
+  BOOT.txt, Calling UIApplicationMain, all 7 launch markers,
+  release tag + both image hashes + part00/part11 + first/last
+  chunk SHAs in the binary, zero BUILD-NOTE strings, zero `.html`.
+  This is the deliverable IPA.
+  Run: https://github.com/spyboi-dev/opencode-inbuilt/actions/runs/44869304088
 
-Note: `KERNARIUM-BUILD.md` (the per-run log) lives on
-kernarium-engine and is not on this branch; the entries above are the
-ones to merge there. kernarium-engine has since moved past bac51d4 to
-c556d84 (docs for build af64d5b: buffer-over-read fix, same-file dedup,
-Calling UIApplicationMain marker) — this branch was rebased onto the
-logging fix bac51d4 as directed and does NOT include c556d84; whether
-to rebase onto it is the parent's call.
+Note: `KERNARIUM-BUILD.md` is now on this branch too (it came in
+with the rebase onto kernarium-engine at c556d84); the desktop
+entries are appended at the end of that file. This branch now
+includes the af64d5b logging fix (buffer-over-read fix, same-file
+dedup, Calling UIApplicationMain marker).
