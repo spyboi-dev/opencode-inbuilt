@@ -218,15 +218,43 @@ static size_t OCCrashLogAppendNumber(char *buf, size_t pos, size_t cap, long lon
 
 // Write a timestamped marker line ("[HH:MM:SS] <text>\n") to the
 // engine-log fd. Normal context only (uses localtime_r/snprintf).
+// BUG FIX (bac51d4 shipped this wrong): snprintf returns the length
+// the output WOULD have had, not the length actually written when
+// the buffer truncates. The old code passed that return value to
+// OCCrashLogWriteRaw, so a message longer than the 128-byte buffer
+// made write() read past the end of the stack buffer and emit stack
+// garbage into the log (proven on device 2026-11-21 09:06:55: the
+// "Early log: constructor wrote engine.log to <path>" line was cut
+// mid-UUID and followed by binary garbage; reproduced locally under
+// ASan as a stack-buffer-overflow READ of size 192 from a 128-byte
+// buffer). Clamp len to the bytes actually in the buffer, and use a
+// 512-byte buffer so the longest real message (~200 chars, a full
+// container path) fits whole.
 static void OCCrashLogWriteMarker(const char *text) {
     if (OCCrashLogFd < 0 || !text) return;
     time_t now = time(NULL);
     struct tm tmv;
     localtime_r(&now, &tmv);
-    char line[128];
+    char line[512];
     int len = snprintf(line, sizeof(line), "[%02d:%02d:%02d] %s\n",
                        tmv.tm_hour, tmv.tm_min, tmv.tm_sec, text);
-    if (len > 0) OCCrashLogWriteRaw(line, (size_t)len);
+    if (len <= 0) return;
+    if ((size_t)len >= sizeof(line)) len = (int)sizeof(line) - 1;
+    OCCrashLogWriteRaw(line, (size_t)len);
+}
+
+// Same file? Compares device+inode, not strings: on iOS the same
+// file is reachable as /private/var/... ($HOME) and /var/... (the
+// path NSSearchPathForDirectoriesInDomains returns), so strcmp
+// wrongly says "different" and the old code appended the launch
+// line to BOOT.txt twice (device BOOT.txt 2026-11-21 09:06:55 held
+// two "--- App launch ---" lines). A stat failure means "not the
+// same file" (fall back to the old append-to-both behaviour).
+static int OCCrashLogSameFile(const char *a, const char *b) {
+    if (!a || !*a || !b || !*b) return 0;
+    struct stat sa, sb;
+    if (stat(a, &sa) != 0 || stat(b, &sb) != 0) return 0;
+    return sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino;
 }
 
 // Write Documents/CRASH.txt (overwritten on each crash): the title
@@ -407,10 +435,13 @@ static void OCCrashLogAppendMarkerToPath(const char *path, const char *text) {
     time_t now = time(NULL);
     struct tm tmv;
     localtime_r(&now, &tmv);
-    char line[128];
+    // Same snprintf-return-value fix as OCCrashLogWriteMarker: clamp
+    // to the bytes actually in the buffer (see the comment there).
+    char line[512];
     int len = snprintf(line, sizeof(line), "[%02d:%02d:%02d] %s\n",
                        tmv.tm_hour, tmv.tm_min, tmv.tm_sec, text);
     if (len > 0) {
+        if ((size_t)len >= sizeof(line)) len = (int)sizeof(line) - 1;
         const char *p = line;
         size_t left = (size_t)len;
         while (left > 0) {
@@ -442,21 +473,42 @@ void OCCrashLogInstallEarly(void) {
     }
     // Keep BOOT.txt in step: append the launch line to the BOOT.txt
     // the constructor wrote (same file it truncated) and to the
-    // canonical Documents/BOOT.txt, in case they differ.
+    // canonical Documents/BOOT.txt, in case they differ. Compared by
+    // device+inode, not by string: /private/var/... and /var/... are
+    // the same file on iOS, and strcmp wrongly called them different,
+    // which wrote "--- App launch ---" into BOOT.txt twice.
     NSString *bootPath = [docDir stringByAppendingPathComponent:@"BOOT.txt"];
     OCCrashLogAppendMarkerToPath(bootPath.UTF8String, "--- App launch ---");
     if (OCCrashLogEarlyBootPath[0] != '\0' &&
-        strcmp(OCCrashLogEarlyBootPath, bootPath.UTF8String ?: "") != 0) {
+        !OCCrashLogSameFile(OCCrashLogEarlyBootPath, bootPath.UTF8String ?: "")) {
         OCCrashLogAppendMarkerToPath(OCCrashLogEarlyBootPath, "--- App launch ---");
     }
     // If the constructor wrote engine.log somewhere other than the
-    // canonical path (a different container root), say so plainly:
-    // the user must look at THAT file, not this one, for the DYLD line.
+    // canonical path (a genuinely different file, not just a
+    // different spelling of the same one), say so plainly: the user
+    // must look at THAT file, not this one, for the DYLD line.
     if (OCCrashLogEarlyEnginePath[0] != '\0' &&
-        strcmp(OCCrashLogEarlyEnginePath, logPath.UTF8String ?: "") != 0) {
+        !OCCrashLogSameFile(OCCrashLogEarlyEnginePath, logPath.UTF8String ?: "")) {
         char buf[1100];
         snprintf(buf, sizeof(buf), "Early log: constructor wrote engine.log to %s (not the canonical path)", OCCrashLogEarlyEnginePath);
         OCCrashLogWriteMarker(buf);
+    }
+}
+
+// Last marker before UIApplicationMain: the next device log then
+// separates "died in main() tail" (no such line) from "died inside
+// UIApplicationMain" (line present, no Launch step 1/7). Called
+// from main() immediately before the UIApplicationMain call.
+void OCCrashLogMarkCallingUIApplicationMain(void) {
+    OCCrashLogWriteMarker("Calling UIApplicationMain");
+    NSArray *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *docDir = docs.firstObject;
+    if (!docDir.length) return;
+    NSString *bootPath = [docDir stringByAppendingPathComponent:@"BOOT.txt"];
+    OCCrashLogAppendMarkerToPath(bootPath.UTF8String, "Calling UIApplicationMain");
+    if (OCCrashLogEarlyBootPath[0] != '\0' &&
+        !OCCrashLogSameFile(OCCrashLogEarlyBootPath, bootPath.UTF8String ?: "")) {
+        OCCrashLogAppendMarkerToPath(OCCrashLogEarlyBootPath, "Calling UIApplicationMain");
     }
 }
 

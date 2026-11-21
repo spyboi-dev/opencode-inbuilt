@@ -65,6 +65,13 @@ void OCCrashLogInstallEarly(void);
 // terminate). A no-op when the handlers were never installed.
 void OCCrashLogMarkCleanShutdown(void);
 
+// Last marker before UIApplicationMain (call from main() immediately
+// before the UIApplicationMain call): separates "died in main()'s
+// tail" from "died inside UIApplicationMain". Writes to the engine
+// log and to Documents/BOOT.txt. A no-op when the handlers were
+// never installed.
+void OCCrashLogMarkCallingUIApplicationMain(void);
+
 // Mark a return to the foreground, so a clean-shutdown marker from
 // an earlier backgrounding cannot mask later foreground work.
 void OCCrashLogMarkForeground(void);

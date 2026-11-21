@@ -567,6 +567,13 @@ jobs:
           strings build/Payload/OpenCode.app/OpenCode | grep -q 'BOOT.txt' \
             || { echo "BOOT.txt string missing from the app binary"; exit 1; }
           echo "early-log constructor strings present (DYLD OK, BOOT.txt)"
+          # The "Calling UIApplicationMain" marker (main.m, just before
+          # the UIApplicationMain call) must be in the binary: it is
+          # what separates a death in main()'s tail from a death inside
+          # UIApplicationMain on the next device log.
+          strings build/Payload/OpenCode.app/OpenCode | grep -q 'Calling UIApplicationMain' \
+            || { echo "Calling UIApplicationMain marker missing from the app binary"; exit 1; }
+          echo "Calling UIApplicationMain marker present"
           echo "No Kernarium framework may appear as a load command at"
           echo "all (strong or weak): the app must be dlopen-only. The"
           echo "old working build had no dyld-loaded frameworks (core"
