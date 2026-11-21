@@ -156,7 +156,62 @@ calling, browser and all. Remember: real desktop app.
   search provider needs its own key).
 - GPL-2.0-or-later copyleft applies to the shipped app.
 
-## Build log
+## Build log (kernarium-desktop)
 
-See `KERNARIUM-BUILD.md` for the per-run Mac build log (run URLs,
-SHAs, verification).
+- **Validation build — commit a669084, run 44858037412, success in
+  35m18s.** IPA 25,306,558 bytes, SHA-256
+  `c74b918acdeff10f5dc234a2b5b687b0e16023977153e22634db021717834dda`.
+  Backed up as `mac-ipas/OpenCode-Inbuilt-kernarium-a669084.ipa`.
+  Verified: arm64, MinOS 15.0.0, SDK 27.0.0, zero Kernarium load
+  commands, all four frameworks embedded, zero BUILD-NOTE strings,
+  7 launch markers, KRuntime exports `_kernarium_runtime_get_api_v28`.
+  This build has the desktop code but the image hashes were still TODO
+  placeholders, so setup would refuse the image.
+- **Final build — commit ea38dd1, run 44862885782, success in 24m48s.**
+  IPA 25,306,937 bytes, SHA-256
+  `630abbfb14e1ce21b7256f58aeb980444957af3c4c0d15191f7e0a15c7008d14`.
+  Backed up as `mac-ipas/OpenCode-Inbuilt-kernarium-ea38dd1.ipa` and
+  `build/OpenCode-Inbuilt-kernarium.ipa`. Verified the same as above,
+  plus the image hashes ARE baked into the binary (`.gz` SHA
+  `b1018c93…`, `.ext4` SHA `c7511200…`, release tag `rootfs-20261120`
+  all found in the app binary). This is the deliverable IPA.
+  Run: https://github.com/spyboi-dev/opencode-inbuilt/actions/runs/44862885782
+- **Guest image — built 2026-11-21 03:34:15Z** by
+  `rootfs-build/build-opencode-image.sh` (extraction via debugfs rdump
+  + mode/uid fixup, chroot additions under qemu-aarch64-static,
+  mke2fs -d repack, e2fsck clean, gzip -9). Rootfs 3.0 GiB used;
+  image 4,462,739,456 bytes (4,256 MiB ext4); `.gz` 1,159,150,314
+  bytes. SHA-256 (`.ext4`)
+  `c7511200d3e23e21bcd68e63904e489b4724e24c263464e92c8dd72963a83e1f`;
+  SHA-256 (`.gz`)
+  `b1018c9357236ea2355bff488eda32171cc25c450997cccd7052b15992d3a8fa`.
+  Inside the image, verified: Node v22.23.5, opencode v2.3.0, bun
+  1.4.5, git 2.47.3, Python 3.13.5, jq 1.7, ripgrep 14.1.1, socat
+  (VSOCK-LISTEN), Openbox 3.6.1, `/opt/OpenCode/ai.opencode`
+  (220,925,320 bytes) + bundled CLI, vsock-proxy and
+  opencode-desktop systemd units. Two build failures on the way, both
+  fixed: npm `SELF_SIGNED_CERT_IN_CHAIN` (the egress CA bundle was not
+  visible in the chroot — first the bind-mount silently failed because
+  the target file did not exist; fixed by touching the target file
+  first and verifying inside the chroot, plus `SSL_CERT_FILE`).
+  One non-fatal warning: `unshare: unshare failed: Invalid argument`
+  during the desktop .deb postinst (chrome-sandbox setup under qemu);
+  the app runs with `--no-sandbox`, so it does not matter.
+- **Release upload — `rootfs-20261120`, still in progress / flaky.**
+  Release created (ID 453414533) but the 1.16 GB asset upload keeps
+  failing through the VM egress proxy: `gh release create` killed by
+  SIGTERM at ~13 min; `gh release upload` HTTP/2 stream CANCEL by peer
+  at ~24 min; `curl --http1.1 -T` connection reset by peer at ~6.5 min;
+  a retry with `--retry 2` is running. The IPA is complete and valid
+  regardless; the app cannot download the image until the asset lands.
+  If the upload keeps failing, retry from a better network or upload
+  the `.gz` (at `rootfs-build/opencode-debian-trixie-arm64.ext4.gz`)
+  by hand — the hashes will not change.
+
+Note: `KERNARIUM-BUILD.md` (the per-run log) lives on
+kernarium-engine and is not on this branch; the entries above are the
+ones to merge there. kernarium-engine has since moved past bac51d4 to
+c556d84 (docs for build af64d5b: buffer-over-read fix, same-file dedup,
+Calling UIApplicationMain marker) — this branch was rebased onto the
+logging fix bac51d4 as directed and does NOT include c556d84; whether
+to rebase onto it is the parent's call.
