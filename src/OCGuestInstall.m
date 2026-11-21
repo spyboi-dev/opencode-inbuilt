@@ -4,16 +4,16 @@
 #import <CommonCrypto/CommonDigest.h>
 #import <zlib.h>
 
-// TODO(ROOTFS-HASH): fill these in from rootfs-build/SHA256SUMS once the
-// image build finishes, and publish the .gz at kOCGuestImageURL (see
-// KERNARIUM-ENGINE.md). The app refuses an image whose hash does not
-// match, so setup cannot succeed until these are real.
+// Guest image published 2026-11-21 as release rootfs-20261120
+// (opencode-debian-trixie-arm64.ext4.gz, 1,159,150,314 bytes).
+// Hashes from rootfs-build/SHA256SUMS. The app refuses an image whose
+// hash does not match.
 NSString *const kOCGuestImageURL =
     @"https://github.com/spyboi-dev/opencode-inbuilt/releases/download/rootfs-20261120/opencode-debian-trixie-arm64.ext4.gz";
 NSString *const kOCGuestImageName = @"opencode-debian-trixie-arm64.ext4";
-NSString *const kOCGuestImageGzSHA256 = @"TODO-FILL-FROM-rootfs-build/SHA256SUMS";
-NSString *const kOCGuestImageSHA256 = @"TODO-FILL-FROM-rootfs-build/SHA256SUMS";
-const long long kOCGuestImageSize = 0; // TODO: extracted image size in bytes
+NSString *const kOCGuestImageGzSHA256 = @"b1018c9357236ea2355bff488eda32171cc25c450997cccd7052b15992d3a8fa";
+NSString *const kOCGuestImageSHA256 = @"c7511200d3e23e21bcd68e63904e489b4724e24c263464e92c8dd72963a83e1f";
+const long long kOCGuestImageSize = 4462739456; // extracted .ext4 size in bytes
 
 static NSString *SHA256OfFile(NSString *path, NSError **outError) {
     NSFileHandle *handle = [NSFileHandle fileHandleForReadingAtPath:path];

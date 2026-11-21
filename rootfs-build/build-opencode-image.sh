@@ -56,7 +56,24 @@ mount -t proc proc "$ROOTFS/proc" 2>/dev/null || true
 mount -t sysfs sys "$ROOTFS/sys" 2>/dev/null || true
 mount --bind /dev "$ROOTFS/dev" 2>/dev/null || true
 mount -t devpts devpts "$ROOTFS/dev/pts" 2>/dev/null || true
+# The VM egress proxy TLS-intercepts; Node/npm (NODE_EXTRA_CA_CERTS)
+# and curl (SSL_CERT_FILE) need the host CA bundle at the same path
+# inside the chroot. Bind-mount it (build-time only; mounts never
+# ship in the packed image). Without this, npm fails with
+# SELF_SIGNED_CERT_IN_CHAIN (seen 2026-11-21).
+if [ -f /run/hatch/egress-tls/ca-bundle.pem ]; then
+  mkdir -p "$ROOTFS/run/hatch/egress-tls"
+  # A file bind-mount needs the target file to exist first; without
+  # this touch the mount fails silently and npm dies with
+  # SELF_SIGNED_CERT_IN_CHAIN (seen twice 2026-11-21).
+  touch "$ROOTFS/run/hatch/egress-tls/ca-bundle.pem"
+  mount --bind /run/hatch/egress-tls/ca-bundle.pem "$ROOTFS/run/hatch/egress-tls/ca-bundle.pem"
+  chroot "$ROOTFS" /bin/test -s /run/hatch/egress-tls/ca-bundle.pem || {
+    echo "FATAL: egress CA bundle not visible inside chroot" >&2; exit 1; }
+  echo "bind-mounted egress CA bundle into chroot (verified)"
+fi
 cleanup_mounts() {
+  umount "$ROOTFS/run/hatch/egress-tls/ca-bundle.pem" 2>/dev/null || true
   umount "$ROOTFS/dev/pts" 2>/dev/null || true
   umount "$ROOTFS/dev" 2>/dev/null || true
   umount "$ROOTFS/sys" 2>/dev/null || true
@@ -100,6 +117,9 @@ if [ -n "$PROXY6" ] && [ -n "$http_proxy" ]; then
 fi
 
 # ---- run the additions inside the chroot
+# SSL_CERT_FILE covers curl/git/system-store users of the egress CA
+# (Node/npm use NODE_EXTRA_CA_CERTS, already in the environment).
+export SSL_CERT_FILE=/run/hatch/egress-tls/ca-bundle.pem
 echo "== running opencode-guest-additions.sh in chroot"
 chroot "$ROOTFS" /bin/bash /root/opencode-guest-additions.sh
 echo "== additions done, cleaning up the chroot"
