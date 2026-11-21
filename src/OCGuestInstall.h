@@ -9,15 +9,16 @@
 // image are checked against their SHA-256. If the image is already in
 // place with the right hash, no download happens at all.
 //
-// The image is NOT published yet and the hashes below are still TODO
-// placeholders: until rootfs-build finishes and the release is
-// published, first-launch setup refuses the image with a hash
-// mismatch instead of booting something unverified. See
-// KERNARIUM-ENGINE.md, "Build status".
+// The image is published as release rootfs-20261120, delivered in 12
+// verified ~100 MiB parts (rootfs-build/CHUNKS-SHA256SUMS): the app
+// downloads each part, verifies its SHA-256, reassembles the .gz and
+// verifies the whole archive hash before extracting. A part that
+// fails verification is re-downloaded, never a corrupt image. See
+// DESKTOP-UI.md.
 // SPDX-License-Identifier: GPL-2.0-or-later
 #import <Foundation/Foundation.h>
 
-extern NSString *const kOCGuestImageURL;      // .ext4.gz download URL
+extern NSString *const kOCGuestImageChunkBaseURL; // release download base URL; chunk name appended
 extern NSString *const kOCGuestImageName;     // opencode-debian-trixie-arm64.ext4
 extern NSString *const kOCGuestImageGzSHA256; // SHA-256 of the .ext4.gz
 extern NSString *const kOCGuestImageSHA256;   // SHA-256 of the extracted .ext4

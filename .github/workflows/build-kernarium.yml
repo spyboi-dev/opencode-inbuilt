@@ -574,6 +574,15 @@ jobs:
           strings build/Payload/OpenCode.app/OpenCode | grep -q 'Calling UIApplicationMain' \
             || { echo "Calling UIApplicationMain marker missing from the app binary"; exit 1; }
           echo "Calling UIApplicationMain marker present"
+          # Chunked guest image (OCGuestInstall.m): the release tag, both
+          # image hashes, the first/last chunk names and the launch
+          # markers must be in the binary, or Setup cannot download the
+          # image and a pre-main death leaves nothing to diagnose.
+          for s in 'rootfs-20261120' 'b1018c93' 'c7511200' 'part00' 'part11' 'Launch step'; do
+            strings build/Payload/OpenCode.app/OpenCode | grep -q "$s" \
+              || { echo "guest image / launch string missing from the app binary: $s"; exit 1; }
+          done
+          echo "guest image chunk strings and launch markers present"
           echo "No Kernarium framework may appear as a load command at"
           echo "all (strong or weak): the app must be dlopen-only. The"
           echo "old working build had no dyld-loaded frameworks (core"
