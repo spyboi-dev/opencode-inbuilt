@@ -1,3 +1,210 @@
+# Kernarium Engine Build — status 2026-11-21 (updated 05:55 UTC)
+
+## Status: GREEN — delegate-stage markers inside UIApplicationMain, run 44870795028, verified
+
+Run
+[44870795028](https://github.com/spyboi-dev/opencode-inbuilt/actions/runs/44870795028)
+("Build Kernarium engine + IPA", branch `kernarium-engine`, head `6240a51`)
+completed 2026-11-21 ~05:50 UTC with conclusion **success** in
+24m44s, first try. No retries were needed: the patch is pure
+logging (two markers, no behaviour change), and the new function
+was proven locally first (byte-identical to the proven
+`OCCrashLogMarkCallingUIApplicationMain` body after
+normalisation; the two AppDelegate methods compile clean
+standalone).
+
+### Definitive device evidence (2026-11-21 10:50:17 IST, pid 940, af64d5b CONFIRMED)
+
+The user installed the af64d5b IPA fresh and sent
+`engine-7088a02a.log`:
+
+```
+[10:50:17] DYLD OK pid=940 binary loaded (constructor ran before main)
+[10:50:17] Previous run ended without shutdown (likely killed by iOS, e.g. jetsam; no signal handler runs for SIGKILL)
+[10:50:17] --- App launch ---
+[10:50:17] Early log: constructor wrote DYLD OK marker to engine.log and BOOT.txt
+[10:50:17] Calling UIApplicationMain
+```
+
+Clean path (no corrupted line), `Calling UIApplicationMain`
+present, NO `Launch step 1/7`, no CRASH line. This is the
+narrowest the diagnosis has ever been: dyld loads the binary,
+main() runs, main() reaches the UIApplicationMain call, and the
+process dies INSIDE UIApplicationMain, before didFinishLaunching's
+first line. The earlier confusion is resolved: the 10:45 and
+10:47 logs were the old bac51d4-based build (corrupted path, no
+marker) — the user most likely installed the desktop ea38dd1 IPA
+by mistake; this 10:50 log is af64d5b.
+
+### What runs between the marker and step 1 (audit)
+
+Read `src/main.m`, `src/AppDelegate.m`, and the LiveContainer
+source (`~/workspace/livecontainer`) again for this window:
+
+- **The app itself runs nothing there.** `OCAppDelegate` had NO
+  `-init`, NO `+initialize`, NO `+load` — and no class in `src/`
+  has `+load` (the only constructor in the whole app is the
+  OCCrashLog one). The delegate alloc/init is pure NSObject.
+  `OCEngine`, location, and the guest view are first touched in
+  `didFinishLaunching` (steps 1–5), never before.
+- **Info.plist confirmed clean** (af64d5b IPA): no
+  `UISceneConfigurations`, no `UIMainStoryboardFile`,
+  `UILaunchStoryboardName` is `""`. No scene setup and no
+  storyboard load happen in the window.
+- **Correction to the earlier research: `hook_setDelegate` runs
+  BEFORE step 1.** The 86522d0 write-up said "TweakLoader's
+  `hook_setDelegate` only adds more swizzles; those run AFTER step
+  1, so they cannot be the killer." That conflated two things.
+  The *swizzled methods* (`hook_makeKeyAndVisible` etc.) do run
+  after step 1 — but the *hook body itself*,
+  `TweakLoader/UIKit+GuestHooks.m:638`, runs when
+  UIApplicationMain calls `setDelegate:`, i.e. after delegate
+  instantiation and BEFORE `didFinishLaunching`. Its body:
+  `[delegate respondsToSelector:@selector(application:
+  configurationForConnectingSceneSession:options:)]` — our
+  delegate does NOT implement it, so the condition is true — then
+  four `method_exchangeImplementations` swizzles (UIWindow
+  `makeKeyAndVisible` / `makeKeyWindow` / `setHidden:`,
+  UIApplication `statusBarFrame`), then the original
+  `setDelegate:`. The swizzle is installed by TweakLoader's
+  constructor at dylib load, before guest `main()`. So
+  `hook_setDelegate` is back on the suspect list: it is the only
+  non-UIKit code in the window, and our app is in the minority
+  that takes the swizzle path (a delegate WITH scene methods
+  would skip it). The swizzle calls themselves are routine
+  runtime work — this is a suspect, not a conviction.
+- **Scene connection also runs before step 1:**
+  `hook__connectUISceneFromFBSScene:transitionContext:`
+  (`UIKit+GuestHooks.m:539`) runs when UIKit connects the FBSScene.
+  On a plain launch it reads `NSUserDefaults.lcLaunchURL` (nil)
+  and the transition payload (nil) and skips both blocks, then
+  calls the original — light work, but it is in the window.
+- **`+ (BOOL)_wantsApplicationBehaviorAsExtension`** (same file,
+  line 650) is a category override on UIApplication returning YES
+  ("so delegate code runs in the run loop") — LC code that changes
+  UIKit behaviour during launch. Secondary suspect, same caveat.
+- **LCBootstrap's `exit(1)` is not it**: it only runs on the error
+  path after `invokeAppMain` returns an error string (guest failed
+  to load, or `main()` returned) — neither happened; `main()` ran
+  and UIApplicationMain never returned. The watchdog comment at
+  `LCBootstrap.m:485` is about bookmark resolution, not launch.
+- **What is left:** LC's hook bodies, UIApplication creation /
+  frontboard connection, or a SIGKILL the app cannot see (jetsam
+  under memory pressure — LC + TweakLoader + UIKit + our 25 MB
+  binary are resident at launch). A catchable signal would have
+  written a CRASH line; none exists. Only the iOS Analytics
+  `.ips` can name a SIGKILL — see "The .ips is now the critical
+  evidence" below.
+
+### What changed in this build (commit 6240a51)
+
+Two markers bracket the delegate, so the next device log
+separates five cases instead of one:
+
+1. `OCCrashLogMarkDelegateStage(const char *text)` (new, in
+   `OCCrashLog.h` / `.m`): the `MarkCallingUIApplicationMain`
+   body, parameterized — writes to `engine.log` and `BOOT.txt`
+   (both paths). Proven locally: byte-identical to the proven
+   function after normalisation.
+2. `OCAppDelegate +initialize` logs `AppDelegate +initialize`
+   (fires on the first message to the class — the
+   `NSStringFromClass` argument in `main()`, evaluated just after
+   the marker, before UIApplicationMain's body).
+3. `OCAppDelegate -init` logs `AppDelegate -init done` after
+   `[super init]` (fires when UIKit instantiates the delegate
+   inside UIApplicationMain).
+4. Workflow verify now requires both new marker strings in the
+   binary.
+
+Reading the next device log (BOOT.txt / engine.log):
+- **`Calling UIApplicationMain`, no `AppDelegate +initialize`** →
+  died in UIApplication creation, before the delegate class was
+  even messaged.
+- **`+initialize`, no `-init done`** → died during delegate
+  alloc/init.
+- **Both markers, no `Launch step 1/7`** → died in `setDelegate:`
+  (LC `hook_setDelegate` body), scene connection (LC
+  `hook__connectUISceneFromFBSScene`), or the runloop turn into
+  `didFinishLaunching`.
+- **`Launch step N/7` present** → the delegate ran; the step
+  names where it died (1 = before `didFinishLaunching`, 7 =
+  launch finished).
+- **No `BOOT.txt` / `engine.log` at all** → died in dyld / the
+  loader before any app code (only the `.ips` can say why).
+
+### The .ips is now the critical evidence
+
+The log has proven the death is inside the system launch; no
+further in-app marker can name the killer, because a SIGKILL
+runs no handler. Exact steps for the user, on the phone:
+
+1. Open **Settings**.
+2. Tap **Privacy & Security**.
+3. Tap **Analytics & Improvements**.
+4. Tap **Analytics Data**.
+5. In the list, find an entry starting with **JetsamEvent** or
+   **OpenCode** whose date/time matches the crash (the list is
+   alphabetical, newest entries are mixed in — check the time
+   shown under the name).
+6. Tap it, scroll to the top, and take a screenshot of the
+   first screen (it shows the termination reason, e.g.
+   `per-process-limit`, `high-water-mark`, `cpu`, or a
+   `0x8badf00d` watchdog), plus a screenshot of any line
+   mentioning `OpenCode`, `KRuntime`, or `LiveContainer`.
+7. Send both screenshots here.
+
+### The IPA (commit 6240a51)
+
+- `build/OpenCode-Inbuilt-kernarium.ipa` — 25,307,319 bytes,
+  SHA-256 `348350e2431146c2162207eb5f3d57cdc9cb072524dd2cece090e4d9225b8a6a`
+- Backed up in `mac-ipas/OpenCode-Inbuilt-kernarium.ipa` (same
+  SHA) and `mac-ipas/OpenCode-Inbuilt-kernarium-6240a51.ipa`.
+  The af64d5b build is preserved as
+  `mac-ipas/OpenCode-Inbuilt-kernarium-af64d5b.ipa`
+  (SHA-256 `ba46f1065b710a45633b76167333e1377bace136045636656cedcaedae6ed805`).
+- Verified on the downloaded IPA (independent of the workflow's
+  own checks, with a from-scratch Python Mach-O parser — the
+  earlier `/tmp/verify-kern-ipa.py` was gone with /tmp): Mach-O
+  64-bit arm64, MH_EXECUTE, 5 segments, **MinOS 15.0.0, SDK
+  27.0.0**, LC_MAIN entryoff 0x4000, adhoc-signed with all **124
+  SHA-256 code slots valid** (ident `com.spyboy.opencode`,
+  flags 0x2); **zero Kernarium load commands** (dlopen-only); all
+  four frameworks embedded; KRuntime exports
+  `_kernarium_runtime_get_api_v28`; **`DYLD OK` (4 hits),
+  `BOOT.txt` (6 hits), `Calling UIApplicationMain` (1 hit),
+  `AppDelegate +initialize` (1 hit), `AppDelegate -init done`
+  (1 hit)**; all seven `Launch step N/7` marker strings present
+  (1 hit each); zero `BUILD-NOTE` strings, zero `.html` in
+  Payload; `UIBackgroundModes = ['location']`,
+  `UIFileSharingEnabled` and `LSSupportsOpeningDocumentsInPlace`
+  true.
+- Main untouched; local `./build.sh` never run. Commit landed on
+  `kernarium-engine` (branch verified before committing); only
+  the four intended files were staged — the desktop
+  coordinator's uncommitted work in the shared checkout
+  (`src/OCEngine.m`, `rootfs-build/*`, `.gitignore`) was left
+  untouched.
+
+### Device test (exact steps)
+
+Fresh install in LiveContainer — delete the old app first so its
+data goes with it. Launch once, then open the app's data folder
+in LiveContainer's file browser and check, in this order:
+
+1. `Documents/BOOT.txt` (top of Documents, no folder to open).
+   Read its lines and report them exactly.
+2. `Documents/Engine/engine.log` — report the last lines.
+3. `Documents/CRASH.txt` — report whether it exists and what it says.
+
+Read it with the five cases above. If the app opens, tap Start
+on the Engine tab and report what the Engine log shows (guest
+boot, `/api/info`, chat, `docker run hello-world`, app.py on port
+8000, mode switch CLI↔Desktop UI, Stop→Start, background
+keep-alive). Still untested on a real iPhone and in
+LiveContainer — host verification only.
+
+---
+
 # Kernarium Engine Build — status 2026-11-21 (updated 04:10 UTC)
 
 ## Status: GREEN — buffer-over-read fix + Calling UIApplicationMain marker, run 44862514832, verified
