@@ -574,6 +574,16 @@ jobs:
           strings build/Payload/OpenCode.app/OpenCode | grep -q 'Calling UIApplicationMain' \
             || { echo "Calling UIApplicationMain marker missing from the app binary"; exit 1; }
           echo "Calling UIApplicationMain marker present"
+          # Delegate-stage markers (AppDelegate +initialize / -init):
+          # they bracket the delegate inside UIApplicationMain, so
+          # the next device log separates "died before delegate
+          # instantiation" from "died in setDelegate: / scene
+          # connection" from "died in didFinishLaunching".
+          strings build/Payload/OpenCode.app/OpenCode | grep -q 'AppDelegate +initialize' \
+            || { echo "AppDelegate +initialize marker missing from the app binary"; exit 1; }
+          strings build/Payload/OpenCode.app/OpenCode | grep -q 'AppDelegate -init done' \
+            || { echo "AppDelegate -init marker missing from the app binary"; exit 1; }
+          echo "delegate-stage markers present"
           echo "No Kernarium framework may appear as a load command at"
           echo "all (strong or weak): the app must be dlopen-only. The"
           echo "old working build had no dyld-loaded frameworks (core"

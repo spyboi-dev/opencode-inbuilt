@@ -14,6 +14,40 @@
 
 @implementation OCAppDelegate
 
+// Diagnostic markers (2026-11-21): the 10:50:17 af64d5b device log
+// proves the death is INSIDE UIApplicationMain, before
+// didFinishLaunching step 1 — clean path, "Calling
+// UIApplicationMain" present, no step 1, no CRASH line. This class
+// previously had no +initialize and no -init, so NOTHING in the app
+// ran between the marker and step 1 except UIKit itself and
+// LiveContainer's hooks. These two markers bracket the delegate:
+//   +initialize missing          -> died in UIApplication creation,
+//                                   before the delegate class was
+//                                   even messaged;
+//   +initialize, no -init        -> died during delegate alloc/init;
+//   both present, no step 1      -> died in setDelegate: (LC's
+//                                   hook_setDelegate body, which runs
+//                                   BEFORE didFinishLaunching and does
+//                                   4 swizzles for a delegate without
+//                                   scene methods), scene connection
+//                                   (LC's hook__connectUISceneFromFB-
+//                                   SScene), or the runloop turn into
+//                                   didFinishLaunching.
+// Pure logging, no behaviour change. +initialize fires on the first
+// message to this class (the NSStringFromClass argument in main());
+// -init fires when UIKit instantiates the delegate.
++ (void)initialize {
+    OCCrashLogMarkDelegateStage("AppDelegate +initialize");
+}
+
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        OCCrashLogMarkDelegateStage("AppDelegate -init done");
+    }
+    return self;
+}
+
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
     // Crash recording is already installed in main(), before
     // UIApplicationMain: OCCrashLogInstallEarly() wrote the launch

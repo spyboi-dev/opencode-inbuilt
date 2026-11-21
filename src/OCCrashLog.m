@@ -512,6 +512,25 @@ void OCCrashLogMarkCallingUIApplicationMain(void) {
     }
 }
 
+// Delegate-stage marker: same body as above, parameterized. Called
+// from AppDelegate +initialize (fires on the first message to the
+// class, i.e. the NSStringFromClass argument in main()) and -init
+// (fires when UIKit instantiates the delegate inside
+// UIApplicationMain). Pure logging, no behaviour change.
+void OCCrashLogMarkDelegateStage(const char *text) {
+    if (!text) return;
+    OCCrashLogWriteMarker(text);
+    NSArray *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *docDir = docs.firstObject;
+    if (!docDir.length) return;
+    NSString *bootPath = [docDir stringByAppendingPathComponent:@"BOOT.txt"];
+    OCCrashLogAppendMarkerToPath(bootPath.UTF8String, text);
+    if (OCCrashLogEarlyBootPath[0] != '\0' &&
+        !OCCrashLogSameFile(OCCrashLogEarlyBootPath, bootPath.UTF8String ?: "")) {
+        OCCrashLogAppendMarkerToPath(OCCrashLogEarlyBootPath, text);
+    }
+}
+
 void OCCrashLogMarkCleanShutdown(void) {
     OCCrashLogWriteMarker("CLEAN SHUTDOWN");
 }

@@ -72,6 +72,18 @@ void OCCrashLogMarkCleanShutdown(void);
 // never installed.
 void OCCrashLogMarkCallingUIApplicationMain(void);
 
+// Delegate-stage marker (call from AppDelegate +initialize / -init):
+// separates "died before delegate instantiation" (+initialize
+// missing) from "died during delegate alloc/init" (-init missing)
+// from "died in setDelegate: / scene connection / the runloop turn
+// into didFinishLaunching" (both present, no Launch step 1/7).
+// Same body as MarkCallingUIApplicationMain, parameterized.
+// The 10:50:17 af64d5b device log proves the death is inside
+// UIApplicationMain before step 1, so the delegate is the next
+// thing that has to be bracketed. A no-op when the handlers were
+// never installed.
+void OCCrashLogMarkDelegateStage(const char *text);
+
 // Mark a return to the foreground, so a clean-shutdown marker from
 // an earlier backgrounding cannot mask later foreground work.
 void OCCrashLogMarkForeground(void);
