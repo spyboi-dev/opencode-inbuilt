@@ -82,7 +82,7 @@ name: Build Kernarium engine + IPA
 on:
   workflow_dispatch:
   push:
-    branches: [kernarium-engine]
+    branches: [kernarium-engine, kernarium-desktop]
     paths:
       - 'src/**'
       - 'build-kernarium.sh'

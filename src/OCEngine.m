@@ -583,7 +583,10 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
 // ERROR line, never a download: the overlay is wiped every boot, so
 // a first-Start download would repeat on every launch). The same
 // block starts the vsock proxies, the user's app.py (guarded on the
-// file existing), and then either the CLI server or the desktop app.
+// file existing), and then either the CLI server (foreground) or, in
+// Desktop UI mode, the CLI server first (backgrounded, so the
+// bootstrap can continue) and then the desktop app, which joins
+// that same server on 127.0.0.1:4096 as its client.
 //
 // Password: typed with echo off (`stty -echo` first), so the tty
 // never echoes it back into the console transcript the app logs.
@@ -624,16 +627,25 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
     // it went.
     [b appendString:@"if [ -f /root/Projects/app.py ]; then (cd /root/Projects && nohup python3 app.py > server.log 2>&1 &); echo \"app.py started\"; else echo \"no app.py in guest\"; fi\n"];
     if (desktop) {
-        // Desktop UI mode: stop any CLI server left over from a mode
-        // switch, then start the desktop session. The session script
-        // brings up X and the OpenCode desktop app; the bootstrap
-        // waits until the window is up and then prints the marker
-        // the app watches for.
+        // Desktop UI mode: the CLI server is the engine and the
+        // desktop app is its client, so the server starts FIRST
+        // (backgrounded, so the bootstrap can continue), and the
+        // desktop session starts only once the server answers on
+        // 4096. The desktop app's bundled CLI then joins that same
+        // server instead of starting a second one, so its sessions
+        // are the native UI's sessions. The serve log goes to a
+        // file (its stdout is not the console here); the explicit
+        // "server listening" echo keeps the marker in guest.log.
+        // The real app binary is /opt/OpenCode/ai.opencode; the
+        // old pgrep pattern (opencode-desktop) matched nothing.
         [b appendString:@"sudo systemctl stop opencode-desktop 2>/dev/null; true\n"];
-        [b appendString:@"echo \"PROGRESS 90 Starting desktop...\"\n"];
+        [b appendString:@"echo \"PROGRESS 90 Starting server...\"\n"];
+        [b appendString:@"nohup opencode serve --port 4096 --hostname 0.0.0.0 >/tmp/opencode-serve.log 2>&1 &\n"];
+        [b appendString:@"for i in $(seq 1 60); do if curl -fsS -u \"opencode:$OPENCODE_SERVER_PASSWORD\" http://127.0.0.1:4096/api/info >/dev/null 2>&1; then echo \"server listening\"; break; fi; sleep 2; done\n"];
+        [b appendString:@"echo \"PROGRESS 95 Starting desktop...\"\n"];
         [b appendString:@"sudo systemctl start opencode-desktop\n"];
-        [b appendString:@"for i in $(seq 1 60); do if pgrep -f opencode-desktop >/dev/null 2>&1 && [ -S /tmp/.X11-unix/X0 ]; then echo \"DESKTOP READY\"; break; fi; sleep 2; done\n"];
-        [b appendString:@"pgrep -f opencode-desktop >/dev/null 2>&1 || echo \"ERROR Desktop did not start (see above)\"\n"];
+        [b appendString:@"for i in $(seq 1 60); do if pgrep -f ai.opencode >/dev/null 2>&1 && [ -S /tmp/.X11-unix/X0 ]; then echo \"DESKTOP READY\"; break; fi; sleep 2; done\n"];
+        [b appendString:@"pgrep -f ai.opencode >/dev/null 2>&1 || echo \"ERROR Desktop did not start (see above)\"\n"];
     } else {
         // CLI mode: a desktop session left over from a mode switch
         // would hold the display and the server port; stop it.
