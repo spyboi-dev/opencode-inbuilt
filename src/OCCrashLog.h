@@ -41,8 +41,25 @@ void OCCrashLogInstall(NSString *logPath);
 // Install first thing in main(): computes the default log path
 // (Documents/Engine/engine.log), installs the handlers, checks the
 // previous run for an unclean end, and writes the launch line.
+// Also records what the constructor (below) achieved, and appends
+// the launch line to Documents/BOOT.txt.
 // Safe to call twice; the second call is a no-op.
 void OCCrashLogInstallEarly(void);
+
+// EARLY LOG: a __attribute__((constructor)) in OCCrashLog.m writes
+// a "DYLD OK" marker the instant dyld loads the binary, before
+// main() runs, to Documents/Engine/engine.log AND to
+// Documents/BOOT.txt at the top of Documents (fallbacks:
+// Documents/engine.log, tmp/BOOT.txt; two container roots tried:
+// $HOME and the parent of the .app bundle). It exists because
+// logging that starts in main() cannot record a death before
+// main(). Device reading:
+//   no BOOT.txt and no engine.log  = died in dyld / the loader,
+//     before any app code ran (only the iOS .ips report can say why);
+//   DYLD OK line only              = dyld loaded the binary, died
+//     between the constructor and main();
+//   DYLD OK + "--- App launch ---" = main() ran; the Launch step
+//     markers in engine.log say how far didFinishLaunching got.
 
 // Mark a clean shutdown (call on entering background and on
 // terminate). A no-op when the handlers were never installed.

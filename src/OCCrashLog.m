@@ -3,6 +3,22 @@
 // time(). The uncaught-exception handler is not signal context, so
 // snprintf and ObjC are fine there; the runtime aborts right after
 // it returns, which the SIGABRT handler also records.
+//
+// EARLY LOG (constructor, before main()): logging used to start in
+// main(), so a death before main() left NO file at all and nothing
+// to diagnose it with. A __attribute__((constructor)) in this file
+// now writes a "DYLD OK" marker the instant dyld loads the binary,
+// to Documents/Engine/engine.log AND to Documents/BOOT.txt at the
+// top of Documents (visible in the file browser without opening
+// folders), with fallbacks to Documents/engine.log and tmp/BOOT.txt.
+// main() then appends "--- App launch ---" to BOOT.txt and records
+// what the constructor achieved in engine.log. Device reading:
+//   no BOOT.txt and no engine.log  = died in dyld / the loader,
+//     before any app code ran (only the iOS .ips report can say why);
+//   DYLD OK line only              = dyld loaded the binary, died
+//     between the constructor and main();
+//   DYLD OK + "--- App launch ---" = main() ran; the Launch step
+//     markers in engine.log say how far didFinishLaunching got.
 #import "OCCrashLog.h"
 #import <signal.h>
 #import <unistd.h>
@@ -11,6 +27,10 @@
 #import <time.h>
 #import <stdio.h>
 #import <limits.h>
+#import <stdlib.h>
+#import <sys/stat.h>
+#import <sys/types.h>
+#import <mach-o/dyld.h>
 
 static int OCCrashLogFd = -1;
 static volatile sig_atomic_t OCCrashLogInHandler = 0;
@@ -19,6 +39,151 @@ static volatile sig_atomic_t OCCrashLogInHandler = 0;
 // top of Documents; engine.log is Documents/Engine/engine.log.
 static char OCCrashLogCrashPath[1024];
 static char OCCrashLogEnginePath[1024];
+
+// === BEGIN EARLY LOG (pure C; runs in a constructor before main) ===
+// State the constructor leaves for main(): whether it ran, what it
+// managed to write, and the first BOOT.txt / engine.log paths it
+// wrote, so main() can append to the same files. Everything here is
+// best-effort and allocation-free: a logging failure must never
+// crash the launch it is trying to record.
+static volatile sig_atomic_t OCCrashLogConstructorRan = 0;
+static char OCCrashLogEarlyStatus[256];
+static char OCCrashLogEarlyBootPath[1024];
+static char OCCrashLogEarlyEnginePath[1024];
+
+// mkdir -p for a directory path. Failures are ignored: the open()
+// that follows is the real test.
+static void OCCrashLogEarlyMkdirP(const char *dir) {
+    if (!dir || !*dir) return;
+    char buf[1024];
+    size_t len = strlen(dir);
+    if (len == 0 || len >= sizeof(buf)) return;
+    memcpy(buf, dir, len + 1);
+    for (char *p = buf + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            mkdir(buf, 0755);
+            *p = '/';
+        }
+    }
+    mkdir(buf, 0755);
+}
+
+// Write one line to path (flags: O_APPEND to append, O_TRUNC to
+// replace). fsync before close, so a SIGKILL a millisecond later
+// cannot lose it. Returns 1 on success.
+static int OCCrashLogEarlyWriteFile(const char *path, const char *line, int flags) {
+    if (!path || !*path || !line) return 0;
+    int fd = open(path, flags, 0644);
+    if (fd < 0) return 0;
+    size_t left = strlen(line);
+    const char *p = line;
+    int ok = 1;
+    while (left > 0) {
+        ssize_t w = write(fd, p, left);
+        if (w <= 0) { ok = 0; break; }
+        p += w;
+        left -= (size_t)w;
+    }
+    if (ok) fsync(fd);
+    close(fd);
+    return ok;
+}
+
+// Try one container root: write the DYLD line to engine.log and
+// BOOT.txt under it. Bitmask of what succeeded: 1 = Engine/engine.log,
+// 2 = BOOT.txt, 4 = Documents/engine.log fallback, 8 = tmp/BOOT.txt.
+// Records the first successful BOOT.txt / engine.log paths.
+static int OCCrashLogEarlyTryRoot(const char *root, const char *line) {
+    if (!root || !*root) return 0;
+    char path[1024];
+    int got = 0;
+    // Documents/Engine/engine.log (create the dir first).
+    if (snprintf(path, sizeof(path), "%s/Documents/Engine", root) < (int)sizeof(path)) {
+        OCCrashLogEarlyMkdirP(path);
+        if (snprintf(path, sizeof(path), "%s/Documents/Engine/engine.log", root) < (int)sizeof(path)) {
+            if (OCCrashLogEarlyWriteFile(path, line, O_WRONLY | O_CREAT | O_APPEND)) {
+                got |= 1;
+                if (OCCrashLogEarlyEnginePath[0] == '\0')
+                    snprintf(OCCrashLogEarlyEnginePath, sizeof(OCCrashLogEarlyEnginePath), "%s", path);
+            } else if (snprintf(path, sizeof(path), "%s/Documents/engine.log", root) < (int)sizeof(path)) {
+                // Fallback: the Engine dir could not be created/used.
+                if (OCCrashLogEarlyWriteFile(path, line, O_WRONLY | O_CREAT | O_APPEND)) got |= 4;
+            }
+        }
+    }
+    // Documents/BOOT.txt, truncated: it reflects the latest launch.
+    if (snprintf(path, sizeof(path), "%s/Documents/BOOT.txt", root) < (int)sizeof(path)) {
+        if (OCCrashLogEarlyWriteFile(path, line, O_WRONLY | O_CREAT | O_TRUNC)) {
+            got |= 2;
+            if (OCCrashLogEarlyBootPath[0] == '\0')
+                snprintf(OCCrashLogEarlyBootPath, sizeof(OCCrashLogEarlyBootPath), "%s", path);
+        }
+    }
+    // tmp/BOOT.txt, last fallback inside the same container.
+    if (snprintf(path, sizeof(path), "%s/tmp", root) < (int)sizeof(path)) {
+        OCCrashLogEarlyMkdirP(path);
+    }
+    if (snprintf(path, sizeof(path), "%s/tmp/BOOT.txt", root) < (int)sizeof(path)) {
+        if (OCCrashLogEarlyWriteFile(path, line, O_WRONLY | O_CREAT | O_TRUNC)) got |= 8;
+    }
+    return got;
+}
+
+// Runs the instant dyld loads the binary, before main(). Pure C:
+// no ObjC, no allocation, only getenv / _NSGetExecutablePath /
+// mkdir / open / write / fsync / close. Two candidate container
+// roots are tried (they are the same directory on a normal install;
+// trying both covers a LiveContainer layout where they differ):
+// $HOME, and the parent of the .app bundle from the executable path.
+__attribute__((constructor))
+static void OCCrashLogEarlyConstructor(void) {
+    OCCrashLogConstructorRan = 1;
+    time_t now = time(NULL);
+    struct tm tmv;
+    localtime_r(&now, &tmv);
+    char line[256];
+    int len = snprintf(line, sizeof(line),
+        "[%02d:%02d:%02d] DYLD OK pid=%d binary loaded (constructor ran before main)\n",
+        tmv.tm_hour, tmv.tm_min, tmv.tm_sec, (int)getpid());
+    if (len <= 0) return;
+    // stderr too: a host (e.g. LiveContainer) may capture it.
+    fprintf(stderr, "%s", line);
+    const char *home = getenv("HOME");
+    int gotHome = 0, gotExe = 0;
+    if (home && *home) gotHome = OCCrashLogEarlyTryRoot(home, line);
+    // Second root: parent of the .app bundle, from the exe path.
+    char exe[1024];
+    uint32_t exeSize = sizeof(exe);
+    if (_NSGetExecutablePath(exe, &exeSize) == 0) {
+        char *slash = strrchr(exe, '/');
+        if (slash) {
+            *slash = '\0'; // strip the binary name
+            slash = strrchr(exe, '/');
+            if (slash) {
+                *slash = '\0'; // strip the .app bundle name
+                if (!home || strcmp(exe, home) != 0) gotExe = OCCrashLogEarlyTryRoot(exe, line);
+            }
+        }
+    }
+    int wroteEngine = ((gotHome | gotExe) & 5) != 0;   // 1 = Engine/engine.log, 4 = Documents/engine.log
+    int wroteBoot = ((gotHome | gotExe) & 10) != 0;     // 2 = Documents/BOOT.txt, 8 = tmp/BOOT.txt
+    if (wroteEngine && wroteBoot) {
+        snprintf(OCCrashLogEarlyStatus, sizeof(OCCrashLogEarlyStatus),
+            "Early log: constructor wrote DYLD OK marker to engine.log and BOOT.txt");
+    } else if (wroteEngine) {
+        snprintf(OCCrashLogEarlyStatus, sizeof(OCCrashLogEarlyStatus),
+            "Early log: constructor wrote DYLD OK marker to engine.log only (BOOT.txt write failed)");
+    } else if (wroteBoot) {
+        snprintf(OCCrashLogEarlyStatus, sizeof(OCCrashLogEarlyStatus),
+            "Early log: constructor wrote DYLD OK marker to BOOT.txt only (engine.log write failed)");
+    } else {
+        snprintf(OCCrashLogEarlyStatus, sizeof(OCCrashLogEarlyStatus),
+            "Early log: constructor ran but could NOT write any log file (HOME=%s)",
+            (home && *home) ? home : "(unset)");
+    }
+}
+// === END EARLY LOG ===
 
 static void OCCrashLogWriteRaw(const char *bytes, size_t len) {
     if (OCCrashLogFd < 0 || !bytes || len == 0) return;
@@ -232,6 +397,33 @@ void OCCrashLogInstall(NSString *logPath) {
     sigaction(SIGILL, &sa, NULL);
 }
 
+// Append one timestamped marker line to an arbitrary path (best
+// effort, own fd, fsync before close). Used for BOOT.txt; the
+// engine log itself goes through the shared fd above.
+static void OCCrashLogAppendMarkerToPath(const char *path, const char *text) {
+    if (!path || !*path || !text) return;
+    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) return;
+    time_t now = time(NULL);
+    struct tm tmv;
+    localtime_r(&now, &tmv);
+    char line[128];
+    int len = snprintf(line, sizeof(line), "[%02d:%02d:%02d] %s\n",
+                       tmv.tm_hour, tmv.tm_min, tmv.tm_sec, text);
+    if (len > 0) {
+        const char *p = line;
+        size_t left = (size_t)len;
+        while (left > 0) {
+            ssize_t w = write(fd, p, left);
+            if (w <= 0) break;
+            p += w;
+            left -= (size_t)w;
+        }
+        fsync(fd);
+    }
+    close(fd);
+}
+
 void OCCrashLogInstallEarly(void) {
     NSArray *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
     NSString *docDir = docs.firstObject;
@@ -240,6 +432,32 @@ void OCCrashLogInstallEarly(void) {
     OCCrashLogInstall(logPath);
     OCCrashLogCheckPreviousRun(logPath);
     OCCrashLogWriteMarker("--- App launch ---");
+    // What the constructor achieved (or that it never ran): without
+    // this line, a missing DYLD OK marker is ambiguous between "the
+    // constructor never ran" and "it ran but could not write".
+    if (OCCrashLogConstructorRan) {
+        OCCrashLogWriteMarker(OCCrashLogEarlyStatus);
+    } else {
+        OCCrashLogWriteMarker("Early log: WARNING constructor did not run before main()");
+    }
+    // Keep BOOT.txt in step: append the launch line to the BOOT.txt
+    // the constructor wrote (same file it truncated) and to the
+    // canonical Documents/BOOT.txt, in case they differ.
+    NSString *bootPath = [docDir stringByAppendingPathComponent:@"BOOT.txt"];
+    OCCrashLogAppendMarkerToPath(bootPath.UTF8String, "--- App launch ---");
+    if (OCCrashLogEarlyBootPath[0] != '\0' &&
+        strcmp(OCCrashLogEarlyBootPath, bootPath.UTF8String ?: "") != 0) {
+        OCCrashLogAppendMarkerToPath(OCCrashLogEarlyBootPath, "--- App launch ---");
+    }
+    // If the constructor wrote engine.log somewhere other than the
+    // canonical path (a different container root), say so plainly:
+    // the user must look at THAT file, not this one, for the DYLD line.
+    if (OCCrashLogEarlyEnginePath[0] != '\0' &&
+        strcmp(OCCrashLogEarlyEnginePath, logPath.UTF8String ?: "") != 0) {
+        char buf[1100];
+        snprintf(buf, sizeof(buf), "Early log: constructor wrote engine.log to %s (not the canonical path)", OCCrashLogEarlyEnginePath);
+        OCCrashLogWriteMarker(buf);
+    }
 }
 
 void OCCrashLogMarkCleanShutdown(void) {

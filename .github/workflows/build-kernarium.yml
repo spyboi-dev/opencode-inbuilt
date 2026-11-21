@@ -559,6 +559,14 @@ jobs:
             || { echo "Kernarium runtime symbol missing from the embedded framework"; exit 1; }
           strings build/Payload/OpenCode.app/OpenCode | grep -q 'kernarium_runtime_get_api_v28' \
             || { echo "dlsym string missing from the app binary"; exit 1; }
+          # Early-log constructor (OCCrashLog.m): the DYLD OK marker
+          # and BOOT.txt must be in the binary, or a pre-main death
+          # leaves no file at all and there is nothing to diagnose.
+          strings build/Payload/OpenCode.app/OpenCode | grep -q 'DYLD OK' \
+            || { echo "early-log DYLD OK marker missing from the app binary"; exit 1; }
+          strings build/Payload/OpenCode.app/OpenCode | grep -q 'BOOT.txt' \
+            || { echo "BOOT.txt string missing from the app binary"; exit 1; }
+          echo "early-log constructor strings present (DYLD OK, BOOT.txt)"
           echo "No Kernarium framework may appear as a load command at"
           echo "all (strong or weak): the app must be dlopen-only. The"
           echo "old working build had no dyld-loaded frameworks (core"
