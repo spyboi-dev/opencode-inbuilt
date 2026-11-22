@@ -28,6 +28,19 @@ static NSString *const kGuestImageInstalled = @"oc.guestImageInstalled";
 @property (nonatomic, assign) BOOL desktopReady;
 @property (nonatomic, strong, nullable) NSMutableArray<NSDictionary *> *stateObserverEntries;
 @property (nonatomic, assign) BOOL autoStartAttempted;
+// First-launch setup in flight (2026-11-22 09:54 race): the guard
+// is a flag, not the state variable — refreshState used to clobber
+// Installing back to NotInstalled mid-download, so a state check
+// let a second Install through to installGuestTo, which failed
+// with "install already in progress" and flipped the state to
+// Error, killing the first download's state.
+@property (nonatomic, assign) BOOL setupInFlight;
+// One automatic retry after a failed auto-start, 60 s later, once
+// per launch (reset when the server is next confirmed healthy).
+// A foreground return retries too; the timer is only so a failure
+// while the app sits open heals itself.
+@property (nonatomic, strong, nullable) NSTimer *autoStartRetryTimer;
+@property (nonatomic, assign) BOOL autoStartRetryUsed;
 @property (nonatomic, assign) NSUInteger serveGeneration;
 - (void)startServeWithCompletion:(void (^)(BOOL, NSError * _Nullable))completion;
 @end
@@ -78,22 +91,47 @@ static NSString *const kGuestImageInstalled = @"oc.guestImageInstalled";
 
 // Start the engine on app launch when it can start. Once per
 // launch; every guard is checked again here so a second call (or a
-// foreground return) cannot restart an engine the user stopped.
+// foreground return) cannot start a second engine behind this one.
 //
 // Two skips deliberately do NOT consume the one attempt: setup not
 // done yet (the startup screen's Install finishes it, and the
 // state observer calls this again when it does), and a failed
-// setup/start (the user retries from the startup screen, and a
-// later state change must be able to start). A skip that consumed
-// the attempt would leave a fresh install unable to auto-start
-// after its own Install.
+// setup (the startup screen's Install retries that one — a
+// 1.16 GB download does not restart on its own). A skip that
+// consumed the attempt would leave a fresh install unable to
+// auto-start after its own Install.
+//
+// A failed START is different (2026-11-22: there is no manual
+// Start any more, so a dead end in Error would strand the engine):
+// when the image is installed, Error falls through and the start
+// is tried again, and a failure releases the one attempt (see
+// noteAutoStartFailed) so the next foreground return retries.
+
+// A failed automatic start must not strand the engine in Error
+// with no way back. The next foreground return retries (the one
+// attempt is released here), and one retry timer fires 60 s
+// later, once per launch, so a failure while the app sits open
+// heals itself without churning a broken boot forever. The log
+// says plainly what happens next.
+- (void)noteAutoStartFailed:(NSString *)reason {
+    [self appendEngineLogSync:[NSString stringWithFormat:@"Auto-start failed: %@. Retrying in 60s; bringing the app to the foreground tries again.", reason ?: @"unknown"]];
+    self.autoStartAttempted = NO;
+    if (self.autoStartRetryUsed) return;
+    self.autoStartRetryUsed = YES;
+    [self.autoStartRetryTimer invalidate];
+    __weak typeof(self) weakSelf = self;
+    self.autoStartRetryTimer = [NSTimer scheduledTimerWithTimeInterval:60.0 repeats:NO block:^(NSTimer * _Nonnull timer) {
+        (void)timer;
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        [strongSelf appendEngineLogSync:@"Automatic retry: starting engine"];
+        [strongSelf maybeAutoStartEngine];
+    }];
+}
+
 - (void)maybeAutoStartEngine {
     if (self.autoStartAttempted) return;
     if (self.state == OCEngineStateRunning || self.state == OCEngineStateStarting) {
-        self.autoStartAttempted = YES;
-        return;
-    }
-    if (self.userStoppedEngineThisSession) {
         self.autoStartAttempted = YES;
         return;
     }
@@ -102,8 +140,15 @@ static NSString *const kGuestImageInstalled = @"oc.guestImageInstalled";
         return;
     }
     if (self.state == OCEngineStateError) {
-        [self appendEngineLogSync:@"Auto-start skipped: setup or start failed — Install or Start from the startup screen"];
-        return;
+        // The setup itself failed (image not on disk): the retry
+        // is the startup screen's Install, not this. A start
+        // failure (image installed) falls through and is tried
+        // again below — there is no manual Start to fall back on.
+        if (!self.guestImageInstalled) {
+            [self appendEngineLogSync:@"Auto-start skipped: setup failed — Install on the startup screen tries again"];
+            return;
+        }
+        [self appendEngineLogSync:@"Auto-start: retrying after a failed start"];
     }
     // This is a real attempt now: consume the flag before any async
     // work, so a second call (observer, foreground return) cannot
@@ -135,15 +180,15 @@ static NSString *const kGuestImageInstalled = @"oc.guestImageInstalled";
                 typeof(self) strongSelf = weakSelf;
                 if (!strongSelf) return;
                 if (!loaded) {
-                    [strongSelf appendEngineLogSync:@"Auto-start failed: the Kernarium runtime did not load"];
                     [strongSelf setState:OCEngineStateCorePending];
+                    [strongSelf noteAutoStartFailed:@"the Kernarium runtime did not load"];
                     return;
                 }
                 [strongSelf startEngineWithCompletion:^(BOOL started, NSError * _Nullable error) {
                     typeof(self) strongSelf2 = weakSelf;
                     if (!strongSelf2) return;
                     if (!started) {
-                        [strongSelf2 appendEngineLogSync:[NSString stringWithFormat:@"Auto-start failed: %@", error.localizedDescription ?: @"unknown"]];
+                        [strongSelf2 noteAutoStartFailed:error.localizedDescription ?: @"unknown"];
                     }
                 }];
             });
@@ -155,7 +200,7 @@ static NSString *const kGuestImageInstalled = @"oc.guestImageInstalled";
         typeof(self) strongSelf = weakSelf;
         if (!strongSelf) return;
         if (!started) {
-            [strongSelf appendEngineLogSync:[NSString stringWithFormat:@"Auto-start failed: %@", error.localizedDescription ?: @"unknown"]];
+            [strongSelf noteAutoStartFailed:error.localizedDescription ?: @"unknown"];
         }
     }];
 }
@@ -198,12 +243,12 @@ static NSString *const kGuestImageInstalled = @"oc.guestImageInstalled";
         [self appendEngineLog:@"New mode takes effect on the next start"];
         return;
     }
-    // Switching modes restarts the engine in the new mode. This is a
-    // mode switch, not a user Stop: clear the stop flag first so the
-    // restart is not blocked, then start again.
+    // Switching modes restarts the engine in the new mode: stop,
+    // then start again. (The mode is only set at install time now
+    // — the Engine tab picker is gone — so the engine is not
+    // running here in practice; this stays as the honest path.)
     [self appendEngineLog:@"Restarting engine in the new mode"];
     [self stopEngine];
-    self.userStoppedEngineThisSession = NO;
     __weak typeof(self) weakSelf = self;
     [self startEngineWithCompletion:^(BOOL started, NSError * _Nullable error) {
         typeof(self) strongSelf = weakSelf;
@@ -243,7 +288,16 @@ static NSString *const kGuestImageInstalled = @"oc.guestImageInstalled";
     // time the Engine tab is shown, and it was resetting a Running
     // engine back to "Installed, guest stopped" while the server
     // was up. The flag on disk only describes install state.
-    if (self.state == OCEngineStateRunning || self.state == OCEngineStateStarting) return;
+    // Do not clobber an install in flight either: while a download
+    // is running the flag still says "not installed", and resetting
+    // to NotInstalled mid-download re-enabled Install — the next
+    // tap then failed with "install already in progress" and
+    // flipped the state to Error (2026-11-22 09:54). Error is NOT
+    // skipped: a failed setup re-derives to NotInstalled so
+    // Install can be retried, and a failed start re-derives to
+    // Installed so auto-start can retry it.
+    if (self.state == OCEngineStateRunning || self.state == OCEngineStateStarting ||
+        self.state == OCEngineStateInstalling) return;
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
     if (![d boolForKey:kGuestImageInstalled]) { [self setState:OCEngineStateNotInstalled]; return; }
     [self setState:OCEngineStateInstalled];
@@ -476,12 +530,22 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
                          userInfo:@{NSLocalizedDescriptionKey: message ?: @"Setup failed"}];
 }
 
+- (BOOL)guestImageInstalled {
+    return [[NSUserDefaults standardUserDefaults] boolForKey:kGuestImageInstalled];
+}
+
 - (void)runFirstLaunchSetupWithProgress:(void (^)(double, NSString *))progress
                              completion:(void (^)(BOOL, NSError * _Nullable))completion {
-    if (self.state == OCEngineStateInstalling) {
-        NSError *e = [OCEngine setupErrorWithCode:7 message:@"Setup is already running"];
-        dispatch_async(dispatch_get_main_queue(), ^{ completion(NO, e); });
-        return;
+    // Coalesce concurrent setups: a second call while one is in
+    // flight is a silent no-op — no error, no log failure, no
+    // state change. The in-flight attempt owns the outcome, and
+    // its own completion updates the state. (Before this, the
+    // second call reached installGuestTo and its "install already
+    // in progress" error flipped the state to Error, killing the
+    // first download's state.)
+    @synchronized (self) {
+        if (self.setupInFlight) return;
+        self.setupInFlight = YES;
     }
     // Setup is only the prebuilt guest image. It never touches the
     // guest core: guestExecutor is nil in a build without the runtime
@@ -499,12 +563,23 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
     [OCGuestInstall installGuestTo:imagePath progress:progress completion:^(BOOL ok, NSString *error) {
         typeof(self) strongSelf = weakSelf;
         if (!strongSelf) return;
+        @synchronized (strongSelf) { strongSelf.setupInFlight = NO; }
         if (ok) {
             [[NSUserDefaults standardUserDefaults] setBool:YES forKey:kGuestImageInstalled];
             [strongSelf appendEngineLogSync:@"First-launch setup done: guest image downloaded and verified"];
             [strongSelf setState:OCEngineStateInstalled];
             dispatch_async(dispatch_get_main_queue(), ^{ completion(YES, nil); });
         } else {
+            // Backstop: the installer's own in-flight guard can
+            // still answer "install already in progress" if a
+            // second install was started out of band. That is not
+            // a failure of this attempt — the in-flight install
+            // owns the state — so ignore it instead of flipping
+            // to Error.
+            if ([error isEqualToString:@"install already in progress"]) {
+                [strongSelf appendEngineLogSync:@"First-launch setup: duplicate install ignored, the in-flight install continues"];
+                return;
+            }
             [strongSelf appendEngineLogSync:[NSString stringWithFormat:@"First-launch setup failed: %@", error ?: @"unknown"]];
             [strongSelf setState:OCEngineStateError];
             NSError *e = [OCEngine setupErrorWithCode:6 message:error ?: @"Setup failed"];
@@ -516,11 +591,9 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
 #pragma mark - Start / stop / health
 
 - (void)startEngineWithCompletion:(void (^)(BOOL, NSError * _Nullable))completion {
-    // A start means running is wanted again: a manual Start after a
-    // Stop, or the health timer restarting a dead guest, clears the
-    // "user stopped it" flag. Auto-start checks the flag before it
-    // ever gets here, so this cannot undo a Stop behind the user.
-    self.userStoppedEngineThisSession = NO;
+    // A start is always automatic now (auto-start, the health
+    // timer restarting a dead guest, or a mode switch): there is
+    // no manual Start and no stop flag to clear any more.
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
     if (![d boolForKey:kGuestImageInstalled]) {
         NSError *e = [NSError errorWithDomain:@"OCEngine" code:3
@@ -587,11 +660,12 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
 // so the boot-on-demand path above can reuse it.
 - (void)startServeWithCompletion:(void (^)(BOOL, NSError * _Nullable))completion {
 #ifdef OC_KERNARIUM_LINKED
-    // Generation guard: if Stop is tapped while a start is in
-    // flight, a late console line must not mark the engine Running
-    // again or restart the health timer. stopEngine bumps the
-    // generation; the console feed checks state, and a start from an
-    // older generation is ignored.
+    // Generation guard: if stopEngine runs while a start is in
+    // flight (health-timer restart, mode-switch restart), a late
+    // console line must not mark the engine Running again or
+    // restart the health timer. stopEngine bumps the generation;
+    // the console feed checks state, and a start from an older
+    // generation is ignored.
     self.serveGeneration++;
     NSUInteger generation = self.serveGeneration;
     self.serveProgressDone = NO;
@@ -706,6 +780,10 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
 - (void)stopEngine {
     [self.healthTimer invalidate];
     self.healthTimer = nil;
+    // A stop means a start is being driven explicitly (health
+    // restart, mode switch): cancel any pending automatic retry.
+    [self.autoStartRetryTimer invalidate];
+    self.autoStartRetryTimer = nil;
     // Bump the serve generation so a start already in flight cannot
     // mark the engine Running again after this stop.
     self.serveGeneration++;
@@ -730,6 +808,9 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
             (void)info;
             if (healthy) {
                 strongSelf.healthFailures = 0;
+                // The server is up: a later failure gets a fresh
+                // automatic retry (the once-per-launch timer).
+                strongSelf.autoStartRetryUsed = NO;
                 if (!strongSelf.serveProgressDone) {
                     strongSelf.serveProgressDone = YES;
                     [strongSelf setServeProgress:1.0 status:@"Engine running"];

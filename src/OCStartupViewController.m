@@ -324,7 +324,7 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
     // A new Running state may auto-present the tabs once; coming
     // back from the tabs must not re-trigger it (TermX's
     // terminalPresented). The flag only resets when the engine is
-    // not running — after a Stop, a later start presents again.
+    // not running — after the engine stops, a later start presents again.
     if ([OCEngine shared].state != OCEngineStateRunning) {
         self.tabsPresented = NO;
     }
@@ -497,11 +497,12 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
 
 // The one action button follows the engine state, and only the
 // state (TermX's refreshButtons): Install when nothing is
-// installed (or the last step failed), Start when the guest is
-// installed but powered off, disabled with the live phase while
-// something is in flight. The boot itself is automatic —
-// maybeAutoStartEngine runs on install completion and on launch —
-// so there is no Boot button to tap.
+// installed (or the last step failed), disabled with the live
+// phase while something is in flight. There is no Start button
+// any more (2026-11-22): the engine starts by itself on launch,
+// after install, and again on a foreground return or a retry
+// timer, so an installed-but-off engine just shows Starting…
+// while the automatic attempt runs.
 - (void)refreshButtons {
     OCEngine *engine = [OCEngine shared];
     switch (engine.state) {
@@ -513,8 +514,8 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
         case OCEngineStateInstalled:
         case OCEngineStateStopped:
         case OCEngineStateCorePending:
-            [self.actionButton setTitle:@"Start" forState:UIControlStateNormal];
-            self.actionButton.enabled = YES;
+            [self.actionButton setTitle:@"Starting…" forState:UIControlStateNormal];
+            self.actionButton.enabled = NO;
             break;
         case OCEngineStateInstalling:
             [self.actionButton setTitle:@"Downloading…" forState:UIControlStateNormal];
@@ -533,44 +534,67 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
 
 - (void)actionTapped {
     OCEngine *engine = [OCEngine shared];
-    if (engine.state == OCEngineStateInstalled || engine.state == OCEngineStateStopped ||
-        engine.state == OCEngineStateCorePending) {
-        // The guest is installed but powered off (or the runtime
-        // failed to load): a manual start. This is a start the user
-        // asked for, so it clears the stopped flag inside
-        // startEngineWithCompletion.
-        [[OCEngine shared] startEngineWithCompletion:^(BOOL started, NSError * _Nullable error) {
-            (void)started; (void)error;
-        }];
-        return;
-    }
+    // The button is disabled in every state but NotInstalled /
+    // Error, so this only ever runs for an install. Starting is
+    // fully automatic now (2026-11-22): there is no manual Start.
     if (engine.state == OCEngineStateNotInstalled || engine.state == OCEngineStateError) {
-        // One tap installs; the engine boots itself when the state
-        // flips to Installed (the observer calls
-        // maybeAutoStartEngine), and the tabs open on their own
-        // once the server is listening.
-        self.installFraction = 0;
-        self.installMessage = nil;
-        __weak typeof(self) weakSelf = self;
-        [[OCEngine shared] runFirstLaunchSetupWithProgress:^(double fraction, NSString * _Nullable message) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                __strong typeof(weakSelf) strongSelf = weakSelf;
-                if (!strongSelf) return;
-                strongSelf.installFraction = fraction;
-                strongSelf.installMessage = message;
-                [strongSelf refresh];
-            });
-        } completion:^(BOOL done, NSError * _Nullable error) {
-            (void)done; (void)error;
-            // The state observer already refreshed and (on success)
-            // auto-started; refresh once more so the button and the
-            // reason line settle on the final state.
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [weakSelf refresh];
-            });
-        }];
+        [self presentInstallModeChoice];
         return;
     }
+}
+
+// Install-time mode choice (2026-11-22): the Engine tab no
+// longer has a CLI / Desktop UI picker. Tapping Install asks
+// here first, and the choice is saved as oc.engineMode. Both
+// modes download the SAME guest image (it already contains the
+// OpenCode CLI and the desktop app); the mode only decides what
+// the guest boots into, so nothing is ever downloaded twice.
+- (void)presentInstallModeChoice {
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Install OpenCode"
+                                                                   message:@"Choose how OpenCode runs. Both use the same guest image."
+                                                            preferredStyle:UIAlertControllerStyleActionSheet];
+    __weak typeof(self) weakSelf = self;
+    [sheet addAction:[UIAlertAction actionWithTitle:@"CLI" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+        (void)action;
+        [weakSelf beginInstallWithMode:OCEngineModeCLI];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Desktop UI" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+        (void)action;
+        [weakSelf beginInstallWithMode:OCEngineModeDesktop];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    // An action sheet needs a popover anchor on iPad; harmless on iPhone.
+    sheet.popoverPresentationController.sourceView = self.actionButton;
+    sheet.popoverPresentationController.sourceRect = self.actionButton.bounds;
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+
+- (void)beginInstallWithMode:(NSString *)mode {
+    [[OCEngine shared] setEngineMode:mode];
+    // One tap installs; the engine boots itself when the state
+    // flips to Installed (the observer calls
+    // maybeAutoStartEngine), and the tabs open on their own
+    // once the server is listening.
+    self.installFraction = 0;
+    self.installMessage = nil;
+    __weak typeof(self) weakSelf = self;
+    [[OCEngine shared] runFirstLaunchSetupWithProgress:^(double fraction, NSString * _Nullable message) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf) return;
+            strongSelf.installFraction = fraction;
+            strongSelf.installMessage = message;
+            [strongSelf refresh];
+        });
+    } completion:^(BOOL done, NSError * _Nullable error) {
+        (void)done; (void)error;
+        // The state observer already refreshed and (on success)
+        // auto-started; refresh once more so the button and the
+        // reason line settle on the final state.
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [weakSelf refresh];
+        });
+    }];
 }
 
 - (void)refreshHeader {
@@ -608,8 +632,8 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
 
     // The honest reason, only when the engine cannot start on its
     // own. While it is starting or running there is nothing to say.
-    // Install and Start both live on this screen now — no reason
-    // here ever points at the Engine tab.
+    // Install lives on this screen; starting is automatic — no
+    // reason here ever points at the Engine tab.
     NSString *reason = nil;
     if (!engine.guestCoreLinked && !engine.guestCoreLoadable) {
         reason = @"The engine is not ready yet in this build. Setup downloads the guest image first, but the engine cannot start here.";
@@ -621,11 +645,17 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
         // progress callback arrives.
         reason = self.installMessage.length ? self.installMessage : @"First-launch setup is still running.";
     } else if (engine.state == OCEngineStateError) {
-        reason = @"Setup or start failed. Check the log for the exact reason — Install below tries again.";
+        // A setup failure (image not on disk) is retried from the
+        // Install button below; a start failure retries by itself.
+        if (engine.guestImageInstalled) {
+            reason = @"Start failed. It tries again by itself — check the log for the reason.";
+        } else {
+            reason = @"Setup failed. Check the log for the exact reason — Install below tries again.";
+        }
     } else if (engine.state == OCEngineStateStopped) {
-        reason = @"The engine stopped. Tap Start below to start it again.";
+        reason = @"The engine stopped. It starts again by itself.";
     } else if (engine.state == OCEngineStateCorePending) {
-        reason = @"The engine runtime did not load. Tap Start below to try again.";
+        reason = @"The engine runtime did not load. It tries again by itself.";
     }
     self.reasonLabel.hidden = (reason == nil);
     self.reasonLabel.text = reason ?: @"";

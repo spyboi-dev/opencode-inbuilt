@@ -1,19 +1,22 @@
-// OCEngineViewController - engine status, first-launch setup, start/stop,
-// live log (PancakeStore-style dark card, on this screen) and progress.
+// OCEngineViewController - engine status and the live log
+// (PancakeStore-style dark card, on this screen). No controls:
+// the engine is fully automatic (2026-11-22) — it starts by
+// itself on launch, after install, and again on a foreground
+// return or a retry timer. The mode picker and the Start/Stop
+// buttons are gone; the mode is chosen at Install time on the
+// startup screen. "Show desktop" stays: it is the only way to
+// see the desktop in Desktop UI mode, and it only appears while
+// the desktop is running or starting.
 #import "OCEngineViewController.h"
 #import "OCEngine.h"
-#import "OCSettings.h"
 #import "OCDesktopViewController.h"
 
 @interface OCEngineViewController ()
 @property (nonatomic, strong) UILabel *stateLabel;
 @property (nonatomic, strong) UILabel *detailLabel;
-@property (nonatomic, strong) UISegmentedControl *modeSegment;
 @property (nonatomic, strong) UIButton *showDesktopButton;
 @property (nonatomic, strong) UIProgressView *progressView;
 @property (nonatomic, strong) UILabel *progressLabel;
-@property (nonatomic, strong) UIButton *startButton;
-@property (nonatomic, strong) UIButton *stopButton;
 @property (nonatomic, strong) UITextView *logTextView;
 @property (nonatomic, strong) UIButton *shareLogButton;
 @property (nonatomic, strong, nullable) NSTimer *logRefreshTimer;
@@ -38,17 +41,8 @@
 
     // Install lives on the startup screen now (TermX-style,
     // 2026-11-22), not here: there is no setup button on this tab
-    // any more. Start/Stop and the mode switch stay here.
-    self.startButton = [self buttonWithTitle:@"Start engine" action:@selector(startTapped)];
-    self.stopButton = [self buttonWithTitle:@"Stop engine" action:@selector(stopTapped)];
-
-    // Engine mode: CLI (native iOS UI talks to `opencode serve`) or
-    // Desktop UI (the real OpenCode desktop app in the guest, shown
-    // on its own screen). The choice is saved, and switching while
-    // the engine runs restarts it in the new mode.
-    self.modeSegment = [[UISegmentedControl alloc] initWithItems:@[@"CLI", @"Desktop UI"]];
-    self.modeSegment.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.modeSegment addTarget:self action:@selector(modeChanged) forControlEvents:UIControlEventValueChanged];
+    // any more, and no Start/Stop or mode switch either — the
+    // engine is fully automatic.
     self.showDesktopButton = [self buttonWithTitle:@"Show desktop" action:@selector(showDesktopTapped)];
 
     // Live log, PancakeStore style: a "Logs" header with a terminal icon
@@ -86,8 +80,8 @@
     self.shareLogButton = [self buttonWithTitle:@"Copy log" action:@selector(shareLogTapped)];
 
     UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[
-        self.stateLabel, self.detailLabel, self.modeSegment, self.progressView, self.progressLabel,
-        self.startButton, self.stopButton, self.showDesktopButton,
+        self.stateLabel, self.detailLabel, self.progressView, self.progressLabel,
+        self.showDesktopButton,
         logHeader, self.logTextView, self.shareLogButton]];
     stack.axis = UILayoutConstraintAxisVertical;
     stack.spacing = 16;
@@ -241,90 +235,45 @@
 - (void)refresh {
     OCEngine *engine = [OCEngine shared];
     self.stateLabel.text = [NSString stringWithFormat:@"Engine: %@", engine.stateDescription];
+    // No controls here any more: the engine starts by itself, so
+    // the detail line only says plainly what the state means and
+    // what happens next. A failure says so here and in the log,
+    // and the recovery is automatic (foreground return / retry
+    // timer) — never a button.
     BOOL desktop = [[engine engineMode] isEqualToString:OCEngineModeDesktop];
-    self.modeSegment.selectedSegmentIndex = desktop ? 1 : 0;
-    if (engine.guestCoreLinked) {
+    if (engine.state == OCEngineStateNotInstalled) {
+        self.detailLabel.text = @"Guest image not installed yet. Install it from the startup screen — the engine starts by itself after that.";
+    } else if (engine.state == OCEngineStateInstalling) {
+        self.detailLabel.text = @"Downloading the guest image… the engine starts by itself when it finishes.";
+    } else if (engine.state == OCEngineStateError) {
+        self.detailLabel.text = @"The engine stopped with an error. See the log below — it tries again by itself.";
+    } else if (engine.guestCoreLinked) {
         if (desktop) {
             self.detailLabel.text = @"Guest core linked. Debian 13 guest with the OpenCode desktop app. Open the desktop from below once it is running.";
         } else {
-            self.detailLabel.text = @"Guest core linked. Debian 13 guest with Node and OpenCode 2.3.0. Server on 127.0.0.1:4096.";
+            self.detailLabel.text = @"Guest core linked. Debian 13 guest with Node and OpenCode 2.3.0. Server on 127.0.0.1:4096. The engine starts by itself.";
         }
     } else if (engine.guestCoreLoadable) {
-        // Runtime not loaded yet — it loads when Start is tapped,
-        // never at launch, so a framework that dies while loading
-        // cannot kill the launch. The engine CAN start from here.
+        // Runtime not loaded yet — it loads as part of the
+        // automatic start, never at launch, so a framework that
+        // dies while loading cannot kill the launch.
         if (desktop) {
-            self.detailLabel.text = @"Guest runtime loads when you start the engine. Debian 13 guest with the OpenCode desktop app.";
+            self.detailLabel.text = @"Guest runtime loads automatically when the engine starts. Debian 13 guest with the OpenCode desktop app.";
         } else {
-            self.detailLabel.text = @"Guest runtime loads when you start the engine. Debian 13 guest with Node and OpenCode 2.3.0. Server on 127.0.0.1:4096.";
+            self.detailLabel.text = @"Guest runtime loads automatically when the engine starts. Debian 13 guest with Node and OpenCode 2.3.0. Server on 127.0.0.1:4096.";
         }
     } else {
         self.detailLabel.text = @"Engine not ready yet. Setup downloads the guest image first. The engine cannot start in this build.";
     }
-    self.startButton.hidden = ([OCEngine shared].state == OCEngineStateRunning || [OCEngine shared].state == OCEngineStateStarting);
-    // When the engine cannot start, the button looks unavailable
-    // (dimmed and disabled) instead of looking tappable and then
-    // popping an alert. The reason is already on screen, inline.
-    // engineCanStart is YES while the runtime can still load on
-    // demand (Kernarium build, not loaded yet), not only once it
-    // is linked — otherwise Start could never trigger the load.
-    BOOL canStart = [OCEngine shared].engineCanStart;
-    self.startButton.enabled = canStart;
-    self.startButton.alpha = canStart ? 1.0 : 0.4;
-    // Stop stays available while starting, not just once running:
-    // a start can hang on a big download, and stopping it has to
-    // work. The engine ignores the late start result after a stop.
-    self.stopButton.hidden = ([OCEngine shared].state != OCEngineStateRunning && [OCEngine shared].state != OCEngineStateStarting);
     // The desktop screen only makes sense once the desktop app is
     // up (or starting) in Desktop UI mode.
     BOOL showDesktop = desktop && ([OCEngine shared].state == OCEngineStateRunning || [OCEngine shared].state == OCEngineStateStarting);
     self.showDesktopButton.hidden = !showDesktop;
 }
 
-- (void)modeChanged {
-    NSString *mode = self.modeSegment.selectedSegmentIndex == 1 ? OCEngineModeDesktop : OCEngineModeCLI;
-    [[OCEngine shared] setEngineMode:mode];
-    [self refresh];
-}
-
 - (void)showDesktopTapped {
     OCDesktopViewController *desktop = [[OCDesktopViewController alloc] init];
     [self.navigationController pushViewController:desktop animated:YES];
-}
-
-- (void)startTapped {
-    // The button is disabled while the engine cannot start, but
-    // guard anyway: a tap must never pop an alert for this normal
-    // state. The reason stays on screen, inline.
-    if (![OCEngine shared].engineCanStart) {
-        self.progressLabel.text = @"Engine cannot start yet. Setup is done, but the engine is not ready in this build.";
-        return;
-    }
-    // Show the progress bar right away; the serve progress callback
-    // takes over from here (boot, Node download, OpenCode install,
-    // server start) and hides it once the engine is running.
-    self.progressView.hidden = NO;
-    self.progressView.progress = 0;
-    self.progressLabel.text = @"Starting engine...";
-    [OCEngine shared].userStoppedEngineThisSession = NO;
-    [[OCEngine shared] startEngineWithCompletion:^(BOOL started, NSError *error) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (!started) {
-                NSString *msg = error.localizedDescription ?: @"Unknown error";
-                self.progressView.hidden = YES;
-                self.progressLabel.text = [NSString stringWithFormat:@"Engine did not start: %@", msg];
-            }
-            [self refresh];
-        });
-    }];
-}
-
-- (void)stopTapped {
-    // The user stopped it on purpose: auto-start must not restart
-    // it behind him on a foreground return.
-    [OCEngine shared].userStoppedEngineThisSession = YES;
-    [[OCEngine shared] stopEngine];
-    [self refresh];
 }
 
 @end

@@ -1,5 +1,14 @@
 # Auto-start the engine — OpenCode iOS app (2026-11-20)
 
+> 2026-11-22: fully automatic. The manual Start/Stop buttons (Engine
+> tab and Integrations row) and the Engine-tab mode picker are
+> removed; the mode is chosen at Install time on the startup screen.
+> The `userStoppedEngineThisSession` flag is gone. A failed
+> automatic start retries by itself (foreground return + one 60 s
+> timer); a failed setup does not — the startup screen's Install
+> retries that. The guards and test steps below are updated to
+> match; the app.py section is unchanged.
+
 When the app launches, the engine now starts itself when it can
 start. No tap on Start needed. Same start path as a manual tap
 (`OCEngine` start, guest boot, `serve.log` progress); only the
@@ -30,18 +39,18 @@ the in-flight start when it opens (`OCEngineViewController`
 Checked in order; any guard that fails just returns, and the
 reason is written to the engine log:
 
-1. **Once per launch.** `autoStartAttempted` is set on the first
-   call and never cleared, so a foreground return cannot start
-   the engine a second time.
+1. **Once per launch — except a failed attempt.** `autoStartAttempted`
+   is set when a real attempt starts, so a foreground return cannot
+   start a second engine. A failed attempt releases it, so the next
+   foreground return retries; one retry timer also fires 60 s after
+   a failure, once per launch (`noteAutoStartFailed`).
 2. **Already running / starting.** State Running or Starting
    does nothing.
-3. **User stopped it.** `userStoppedEngineThisSession` is set by
-   the Stop button in the Engine screen and the Stop row in
-   Integrations, and cleared by any start. Auto-start never
-   restarts an engine the user stopped on purpose, including on
-   a foreground return. (The health timer's own restart is
-   unaffected: Stop invalidates the health timer, and a start
-   clears the flag.)
+3. **User stopped it — gone (2026-11-22).** There is no manual Stop
+   any more, so the stop flag is removed. The health timer's own
+   restart is unaffected: `stopEngine` (health restart, mode-switch
+   restart) bumps the serve generation, and a completion from an
+   older generation is ignored.
 4. **Core not linked.** `guestCoreLinked == NO` does nothing:
    the honest "cannot start in this build" state stays exactly
    as it was. This is the unlinked local build: auto-start
@@ -49,23 +58,26 @@ reason is written to the engine log:
    yet in this build", and never touches the start path.
 5. **Setup not done.** State NotInstalled or Installing does
    nothing. The user still taps through first-launch setup
-   first; the engine auto-starts from the next launch after
-   setup finishes. Setup completion deliberately does not
-   trigger a start.
+   first; when setup finishes, the startup screen's state
+   observer calls `maybeAutoStartEngine` on the Installed
+   transition, so the engine starts with no further tap. A
+   failed setup (Error + image not installed) is not retried
+   automatically — the startup screen's Install retries that.
 
-A failed auto-start is logged ("Auto-start failed: …") and the
+A failed auto-start is logged ("Auto-start failed: … Retrying in
+60s; bringing the app to the foreground tries again.") and the
 state change (Error / CorePending) reaches every screen through
 the state observers. No alert is shown for it.
 
-## Stop while starting
+## Stop while starting (serve generation)
 
-Stop is now available while the engine is Starting, not just once
-it is Running (`OCEngineViewController.refresh`). A stop during a
-start used to lose: the guest executor's late completion marked
-the engine Running again and restarted the health timer. A serve
-generation counter in `OCEngine` fixes that: `stopEngine` bumps
-the generation, and a completion from an older generation is
-ignored (logged, no state change, no completion call).
+The Stop button is gone (2026-11-22), but the generation guard
+stays: `stopEngine` (health-timer restart, mode-switch restart)
+bumps the generation, and a completion from an older generation
+is ignored (logged, no state change, no completion call). A stop
+during a start used to lose: the guest executor's late completion
+marked the engine Running again and restarted the health timer;
+the generation counter fixes that.
 
 ## How to test on device (Mac / core-linked build)
 
@@ -74,16 +86,14 @@ ignored (logged, no state change, no completion call).
    progress bar moving through boot / Node / OpenCode / server
    start, with no tap. Threads should show "Engine: Starting
    engine", then "Engine running".
-2. Tap Stop, background the app, foreground it again: the engine
-   must stay stopped.
-3. Tap Start by hand after a Stop: it starts (a manual start
-   clears the stop flag).
-4. Kill the app while the engine runs and relaunch: the engine
+2. No Stop button any more: background the app while the engine
+   runs and foreground it again — the engine keeps running, and
+   a failed engine retries on the foreground return.
+3. Kill the app while the engine runs and relaunch: the engine
    starts again on its own (once per launch).
-5. Unlinked build: launch shows "Installed, guest stopped" and
-   the dimmed Start button, exactly as before; the log has the
-   "Auto-start skipped: engine not ready yet" line and nothing
-   else changed.
+4. Unlinked build: launch shows the Engine screen with state +
+   logs only and no Start button; the log has the "Auto-start
+   skipped: engine not ready yet" line and nothing else changed.
 
 ## App auto-start — /root/Projects/app.py (2026-11-20)
 

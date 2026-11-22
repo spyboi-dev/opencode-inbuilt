@@ -1,7 +1,9 @@
 // OCIntegrationsViewController - FreeMilk's Integrations tab: the
-// services the agent can use. Engine status with Start/Stop, the LLM
-// providers the server reports, and a row into Settings. This is
-// where the old Engine and Settings tabs now live.
+// services the agent can use. Engine status, the LLM providers
+// the server reports, and a row into Settings. This is where the
+// old Engine and Settings tabs now live. No start/stop here any
+// more (2026-11-22): the engine is fully automatic, and the
+// Engine row only opens the Engine screen (state + logs).
 #import "OCIntegrationsViewController.h"
 #import "OCEngine.h"
 #import "OCServerClient.h"
@@ -72,7 +74,7 @@
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    if (section == 0) return 2;
+    if (section == 0) return 1;
     if (section == 1) return MAX(1, (NSInteger)self.providers.count);
     return 1;
 }
@@ -84,35 +86,20 @@
     cell.accessoryType = UITableViewCellAccessoryNone;
     cell.detailTextLabel.text = nil;
     // Cells are reused across rows: reset the colour, or a provider
-    // or Settings row can inherit the blue/red/grey of the Start /
-    // Stop engine row it was recycled from.
+    // or Settings row can inherit the colour of another row it was
+    // recycled from.
     cell.textLabel.textColor = [UIColor labelColor];
     if (indexPath.section == 0) {
         OCEngine *engine = [OCEngine shared];
-        if (indexPath.row == 0) {
-            cell.textLabel.text = @"OpenCode engine";
-            cell.detailTextLabel.text = engine.stateDescription ?: @"";
-            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-        } else {
-            BOOL running = engine.state == OCEngineStateRunning || engine.state == OCEngineStateStarting;
-            if (!engine.engineCanStart) {
-                // The engine cannot start in this build: the row
-                // looks unavailable and says why, instead of
-                // looking tappable and doing nothing on tap.
-                cell.textLabel.text = @"Start engine";
-                cell.textLabel.textColor = [UIColor secondaryLabelColor];
-                cell.detailTextLabel.text = @"Not ready yet";
-            } else {
-                cell.textLabel.text = running ? @"Stop engine" : @"Start engine";
-                cell.textLabel.textColor = running ? [UIColor systemRedColor] : [UIColor systemBlueColor];
-            }
-        }
+        cell.textLabel.text = @"OpenCode engine";
+        cell.detailTextLabel.text = engine.stateDescription ?: @"";
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         return cell;
     }
     if (indexPath.section == 1) {
         if (!self.providers.count) {
             cell.textLabel.text = @"No providers reported";
-            cell.detailTextLabel.text = @"Start the engine to list providers";
+            cell.detailTextLabel.text = @"Providers appear once the engine is running";
             return cell;
         }
         NSDictionary *p = self.providers[indexPath.row];
@@ -130,28 +117,8 @@
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     if (indexPath.section == 0) {
-        if (indexPath.row == 0) {
-            OCEngineViewController *vc = [[OCEngineViewController alloc] init];
-            [self.navigationController pushViewController:vc animated:YES];
-            return;
-        }
-        OCEngine *engine = [OCEngine shared];
-        if (!engine.engineCanStart) {
-            // Nothing to do: the row already says "Not ready yet".
-            // No alert for this normal state.
-            return;
-        }
-        if (engine.state == OCEngineStateRunning || engine.state == OCEngineStateStarting) {
-            engine.userStoppedEngineThisSession = YES;
-            [engine stopEngine];
-        } else {
-            engine.userStoppedEngineThisSession = NO;
-            [engine startEngineWithCompletion:^(BOOL started, NSError * _Nullable error) {
-                (void)started; (void)error;
-                dispatch_async(dispatch_get_main_queue(), ^{ [self.tableView reloadData]; });
-            }];
-        }
-        [self.tableView reloadData];
+        OCEngineViewController *vc = [[OCEngineViewController alloc] init];
+        [self.navigationController pushViewController:vc animated:YES];
         return;
     }
     if (indexPath.section == 2) {

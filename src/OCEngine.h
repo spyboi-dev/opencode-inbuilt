@@ -71,16 +71,14 @@ typedef void (^OCGuestExecutor)(NSString *command, NSString *workingDirectory,
 // stateDidChange block, if set, is still called as well.
 - (id)addStateChangeObserver:(void (^)(OCEngineState state))observer;
 - (void)removeStateChangeObserver:(nullable id)token;
-// YES after the user tapped Stop in this launch. Auto-start never
-// restarts an engine the user stopped on purpose. A manual Start
-// (or any start) clears it.
-@property (nonatomic, assign) BOOL userStoppedEngineThisSession;
 // Start the engine automatically, once per launch, when it can
 // start: core linked and setup already done. Does nothing when the
 // engine is already running or starting, when the core is not
-// linked, when setup has not finished, or when the user stopped the
-// engine in this session. Safe to call in the unlinked build: it
-// just leaves the honest "cannot start" state alone.
+// linked, or when setup has not finished. A failed automatic
+// start retries by itself (2026-11-22: there is no manual Start
+// any more): the next foreground return tries again, and one
+// retry timer fires 60 s later. Safe to call in the unlinked
+// build: it just leaves the honest "cannot start" state alone.
 - (void)maybeAutoStartEngine;
 // In-app engine log + serve progress (for the Logs view and the Engine tab).
 // serveProgress is 0..1 while the engine is starting; serveStatus is the
@@ -113,6 +111,7 @@ typedef void (^OCGuestExecutor)(NSString *command, NSString *workingDirectory,
 // (ext4, Node + OpenCode baked in) and verifies the SHA-256 of the
 // archive and of the extracted image. Safe to call again; a verified
 // image on disk skips the download.
+- (BOOL)guestImageInstalled;
 - (void)runFirstLaunchSetupWithProgress:(void (^)(double fraction, NSString *message))progress
                              completion:(void (^)(BOOL done, NSError * _Nullable error))completion;
 // Engine mode: OCEngineModeCLI (default) or OCEngineModeDesktop.
