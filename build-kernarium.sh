@@ -96,7 +96,14 @@ done
 rm -rf "$OUT"
 mkdir -p "$APP/Frameworks"
 
-OCFLAGS="-target arm64-apple-ios$MIN -isysroot $SDK -miphoneos-version-min=$MIN -fobjc-arc -O2 -Wall -Wextra -Wno-deprecated-declarations -DOC_KERNARIUM_LINKED=1 -I$SRC -F$SDK/System/Library/SubFrameworks -F$SDK/System/Library/PrivateFrameworks"
+# Build identity: the short commit hash, baked into the binary as
+# OC_BUILD_ID so the device log proves which IPA ran (the 2026-11-22
+# 07:57 log could not name its build, and wrong-build confusion has
+# bitten before). Falls back to "dev" when git is unavailable;
+# OCCrashLog.m defaults the macro the same way for local builds.
+BUILD_ID="$(git rev-parse --short HEAD 2>/dev/null || echo dev)"
+
+OCFLAGS="-target arm64-apple-ios$MIN -isysroot $SDK -miphoneos-version-min=$MIN -fobjc-arc -O2 -Wall -Wextra -Wno-deprecated-declarations -DOC_KERNARIUM_LINKED=1 -DOC_BUILD_ID=\"${BUILD_ID}\" -I$SRC -F$SDK/System/Library/SubFrameworks -F$SDK/System/Library/PrivateFrameworks"
 
 # App sources (same list as build.sh) plus the Kernarium glue.
 for f in main AppDelegate OCSceneDelegate OCKeychain OCUtil OCSettings OCServerClient OCEngine OCCrashLog OCSessionsViewController OCChatViewController OCFilesViewController OCEngineViewController OCSettingsViewController OCIntegrationsViewController OCBrowserViewController OCCodeViewController OCStartupViewController OCDesktopViewController KernGlue OCVsockBridge OCGuestInstall; do

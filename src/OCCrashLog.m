@@ -32,6 +32,15 @@
 #import <sys/types.h>
 #import <mach-o/dyld.h>
 
+// Build identity: the Mac build script passes
+// -DOC_BUILD_ID='"<short-commit-hash>"' so the log proves which IPA
+// actually ran (wrong-build confusion has bitten before, and the
+// 2026-11-22 07:57 log could not name its build at all). Local
+// builds without the flag get "dev".
+#ifndef OC_BUILD_ID
+#define OC_BUILD_ID "dev"
+#endif
+
 static int OCCrashLogFd = -1;
 static volatile sig_atomic_t OCCrashLogInHandler = 0;
 // Paths fixed at install time as plain C strings, so the signal
@@ -136,6 +145,9 @@ static int OCCrashLogEarlyTryRoot(const char *root, const char *line) {
 // roots are tried (they are the same directory on a normal install;
 // trying both covers a LiveContainer layout where they differ):
 // $HOME, and the parent of the .app bundle from the executable path.
+// The DYLD line also carries the build id (OC_BUILD_ID, the short
+// commit hash baked in by the build script), so the log proves which
+// IPA actually ran.
 __attribute__((constructor))
 static void OCCrashLogEarlyConstructor(void) {
     OCCrashLogConstructorRan = 1;
@@ -144,8 +156,8 @@ static void OCCrashLogEarlyConstructor(void) {
     localtime_r(&now, &tmv);
     char line[256];
     int len = snprintf(line, sizeof(line),
-        "[%02d:%02d:%02d] DYLD OK pid=%d binary loaded (constructor ran before main)\n",
-        tmv.tm_hour, tmv.tm_min, tmv.tm_sec, (int)getpid());
+        "[%02d:%02d:%02d] DYLD OK pid=%d binary loaded (constructor ran before main) Build %s\n",
+        tmv.tm_hour, tmv.tm_min, tmv.tm_sec, (int)getpid(), OC_BUILD_ID);
     if (len <= 0) return;
     // stderr too: a host (e.g. LiveContainer) may capture it.
     fprintf(stderr, "%s", line);

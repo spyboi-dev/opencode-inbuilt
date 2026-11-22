@@ -599,6 +599,20 @@ jobs:
           strings build/Payload/OpenCode.app/OpenCode | grep -q 'Window attached to scene' \
             || { echo "Scene attach marker missing from the app binary"; exit 1; }
           echo "scene-attach marker present"
+          # Scene-attach poll + lifecycle markers (AppDelegate):
+          # the poll attaches the window whenever a scene appears
+          # (the 2026-11-22 07:57 run never connected one, so the
+          # willConnect path alone is not enough), and
+          # didBecomeActive / willEnterForeground say whether the
+          # app ever reached the foreground. The Build identity
+          # string proves which commit the binary was built from.
+          strings build/Payload/OpenCode.app/OpenCode | grep -q 'Window attached to scene (poll)' \
+            || { echo "Scene poll attach marker missing from the app binary"; exit 1; }
+          strings build/Payload/OpenCode.app/OpenCode | grep -q 'App became active' \
+            || { echo "App became active marker missing from the app binary"; exit 1; }
+          strings build/Payload/OpenCode.app/OpenCode | grep -q 'Build ' \
+            || { echo "Build identity string missing from the app binary"; exit 1; }
+          echo "scene-poll, lifecycle and build-identity markers present"
           # App icon + startup logo: the official OpenCode avatar
           # (square dark 1024px from dev.opencode.ai/brand) must be
           # in the bundle as the icon and as OpenCodeLogo.png.

@@ -13,7 +13,98 @@
 #import "KernGlue.h"
 #endif
 
-@implementation OCAppDelegate
+@interface OCAppDelegate ()
+- (void)attachWindowToSceneIfNeeded;
+- (void)startSceneAttachPoll;
+- (void)stopSceneAttachPoll;
+- (void)sceneAttachTimerFired:(NSTimer *)timer;
+@end
+
+@implementation OCAppDelegate {
+    NSTimer *_sceneAttachTimer;
+    int _sceneAttachAttempts;
+}
+
+// Attach the window to a connected scene, whenever one exists.
+//
+// Why this exists (2026-11-22 07:57 run, build 225ebc5): all 7
+// launch steps ran, then CLEAN SHUTDOWN 19 s later — but UIKit
+// NEVER called configurationForConnectingSceneSession, so no scene
+// was ever connected and OCSceneDelegate's willConnect never ran.
+// The d15b844 run the same morning DID connect a scene 1 s after
+// step 7, same app family, same phone, same LiveContainer. So the
+// system's scene delivery to an in-process LiveContainer guest is
+// NOT guaranteed: it happens on some launches and never on others,
+// and LiveContainer's hook__connectUISceneFromFBSScene does not
+// gate it (read in full: it always calls the original at the end).
+// The scene delegate alone therefore cannot be the only attach
+// path. This routine mirrors LiveContainer's own updateWindowScene
+// (TweakLoader/UIKit+GuestHooks.m:755) in our own code, with no
+// swizzles: if a UIWindowScene is connected on the main screen,
+// attach the window to it and make it key and visible again.
+// Called at the end of didFinishLaunching, on becoming active, on
+// entering the foreground, and once a second for the first 30 s by
+// the poll, so a scene that connects late still gets attached
+// within a second. If no scene ever connects, there is nothing to
+// attach to — the lifecycle markers (didBecomeActive /
+// willEnterForeground) then say whether the app even reached the
+// foreground, which is the next fact the diagnosis needs.
+// Callers must be on the main thread (all of them are).
+- (void)attachWindowToSceneIfNeeded {
+    if (!self.window || self.window.windowScene) {
+        [self stopSceneAttachPoll];
+        return;
+    }
+    UIWindowScene *target = nil;
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if ([scene isKindOfClass:[UIWindowScene class]] &&
+            ((UIWindowScene *)scene).screen == [UIScreen mainScreen]) {
+            target = (UIWindowScene *)scene;
+            break;
+        }
+    }
+    if (!target) {
+        // Fall back to any window scene if the main-screen match
+        // fails (e.g. an external display is the main screen).
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if ([scene isKindOfClass:[UIWindowScene class]]) {
+                target = (UIWindowScene *)scene;
+                break;
+            }
+        }
+    }
+    if (target) {
+        self.window.windowScene = target;
+        [self.window makeKeyAndVisible];
+        OCCrashLogMarkDelegateStage("Window attached to scene (poll)");
+        [self stopSceneAttachPoll];
+    }
+}
+
+- (void)startSceneAttachPoll {
+    [self stopSceneAttachPoll];
+    _sceneAttachAttempts = 0;
+    _sceneAttachTimer = [NSTimer scheduledTimerWithTimeInterval:1.0
+                                                         target:self
+                                                       selector:@selector(sceneAttachTimerFired:)
+                                                       userInfo:nil
+                                                        repeats:YES];
+}
+
+- (void)stopSceneAttachPoll {
+    [_sceneAttachTimer invalidate];
+    _sceneAttachTimer = nil;
+}
+
+- (void)sceneAttachTimerFired:(NSTimer *)timer {
+    (void)timer;
+    _sceneAttachAttempts++;
+    if (_sceneAttachAttempts > 30) {
+        [self stopSceneAttachPoll];
+        return;
+    }
+    [self attachWindowToSceneIfNeeded];
+}
 
 // Diagnostic markers (2026-11-21): the 10:50:17 af64d5b device log
 // proves the death is INSIDE UIApplicationMain, before
@@ -146,7 +237,22 @@
         [tabs presentViewController:startup animated:NO completion:nil];
     });
     [[OCEngine shared] appendEngineLogSync:@"Launch step 7/7: didFinishLaunching done"];
+    // Scene attach, first attempt now, then the poll: the scene may
+    // already be connected, or it may connect seconds later, or
+    // never (2026-11-22 07:57 run). See attachWindowToSceneIfNeeded.
+    [self attachWindowToSceneIfNeeded];
+    [self startSceneAttachPoll];
     return YES;
+}
+
+- (void)applicationDidBecomeActive:(UIApplication *)application {
+    (void)application;
+    // Lifecycle marker: the 2026-11-22 07:57 log has steps 1-7 and a
+    // clean shutdown but no scene and no attach, and nothing in it
+    // says whether the app ever reached the foreground. This line
+    // answers that on the next log.
+    OCCrashLogMarkDelegateStage("App became active");
+    [self attachWindowToSceneIfNeeded];
 }
 
 - (void)applicationDidEnterBackground:(UIApplication *)application {
@@ -167,6 +273,8 @@
     // Foreground marker: a clean-shutdown marker from an earlier
     // backgrounding must not mask work done after returning.
     OCCrashLogMarkForeground();
+    OCCrashLogMarkDelegateStage("App will enter foreground");
+    [self attachWindowToSceneIfNeeded];
 #ifdef OC_KERNARIUM_LINKED
     [[OCKernGlue shared] setGpuHold:NO];
 #endif

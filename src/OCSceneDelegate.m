@@ -24,7 +24,7 @@
     if (window && [scene isKindOfClass:[UIWindowScene class]]) {
         window.windowScene = (UIWindowScene *)scene;
         [window makeKeyAndVisible];
-        OCCrashLogMarkDelegateStage("Window attached to scene");
+        OCCrashLogMarkDelegateStage("Window attached to scene (willConnect)");
     } else {
         // Defensive only: the standard lifecycle runs
         // didFinishLaunching before scene connection, so the window
