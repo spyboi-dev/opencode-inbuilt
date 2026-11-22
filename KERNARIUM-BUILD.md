@@ -1,3 +1,237 @@
+# Kernarium Engine Build — status 2026-11-22 (updated 00:45 UTC)
+
+## Status: GREEN — skip LiveContainer hook_setDelegate swizzles, run 44966004569, verified
+
+Run
+[44966004569](https://github.com/spyboi-dev/opencode-inbuilt/actions/runs/44966004569)
+("Build Kernarium engine + IPA", branch `kernarium-engine`, head
+`d15b844`) completed 2026-11-22 ~00:44 UTC with conclusion
+**success** in ~25m, first try. No retries were needed: the patch
+is one ObjC method plus a marker, compiled clean locally first
+(clang-18 + iPhoneOS 26.5 SDK, zero warnings, both with and
+without `OC_KERNARIUM_LINKED`), and the workflow's own verify
+step passed (it now also requires the `Scene config requested`
+string).
+
+### Device evidence that drove this build (2026-11-22 05:43 IST, 6240a51)
+
+Two runs, identical result. engine.log (05:43:45 run, pid 3083;
+13:40:33 run, pid 1794, same lines):
+
+```
+[05:43:45] DYLD OK pid=3083 binary loaded (constructor ran before main)
+[05:43:45] Previous run ended without shutdown (likely killed by iOS, e.g. jetsam; no signal handler runs for SIGKILL)
+[05:43:45] --- App launch ---
+[05:43:45] Early log: constructor wrote DYLD OK marker to engine.log and BOOT.txt
+[05:43:45] Calling UIApplicationMain
+[05:43:45] AppDelegate +initialize
+[05:43:45] AppDelegate -init done
+```
+
+BOOT.txt confirms the 05:43:45 run with the same lines. Both
+delegate markers present, NO `Launch step 1/7`, no CRASH line.
+The delegate is created fine; the process dies after `-init
+done` and before `didFinishLaunching` step 1: in `setDelegate:`
+(LiveContainer `hook_setDelegate` body), in scene connection
+(LC `hook__connectUISceneFromFBSScene`), or in the runloop turn
+into `didFinishLaunching`. This is the narrowest the diagnosis
+has ever been.
+
+### The hook, verified from source (not from memory)
+
+`~/workspace/livecontainer/TweakLoader/UIKit+GuestHooks.m:638`:
+
+```objc
+- (void)hook_setDelegate:(id<UIApplicationDelegate>)delegate {
+    if(![delegate respondsToSelector:@selector(application:configurationForConnectingSceneSession:options:)]) {
+        // Fix old apps black screen when UIApplicationSupportsMultipleScenes is YES
+        swizzle(UIWindow.class, @selector(makeKeyAndVisible), @selector(hook_makeKeyAndVisible));
+        swizzle(UIWindow.class, @selector(makeKeyWindow), @selector(hook_makeKeyWindow));
+        swizzle(UIWindow.class, @selector(setHidden:), @selector(hook_setHidden:));
+        // Fix apps that do not support UISceneDelegate getting 0 status bar frame
+        swizzle(UIApplication.class, @selector(statusBarFrame), @selector(hook_statusBarFrame));
+    }
+    [self hook_setDelegate:delegate];
+}
+```
+
+Our delegate did NOT implement the method, so the condition was
+true and all four swizzles ran — inside `setDelegate:`, before
+`didFinishLaunching`, in the exact window the device log proves.
+The swizzle calls themselves are routine runtime work, so this
+is a suspect, not a conviction — but it is the only non-UIKit
+code in the window, and our app is in the minority that takes
+the swizzle path (a delegate WITH scene methods skips it).
+
+### The fix (commit d15b844) — and why returning nil is safe
+
+`OCAppDelegate` now implements
+`application:configurationForConnectingSceneSession:options:` and
+returns `nil`, with a marker (`Scene config requested`) logging
+the call:
+
+1. **The hook only checks existence.** `hook_setDelegate:` calls
+   `respondsToSelector:` and never calls the method itself.
+   Implementing it flips the check to YES, so the four swizzles
+   never run and the original `setDelegate:` is called directly.
+2. **Returning nil is the documented fallback.** Per Apple's
+   documentation, if the method returns nil UIKit uses the
+   configuration from the app's Info.plist. Our Info.plist has
+   no `UISceneConfigurations` (verified: no scene keys at all,
+   no `UIApplicationSupportsMultipleScenes`), so UIKit uses its
+   synthesized default — exactly the configuration it uses today
+   without the method. Behaviour is preserved.
+3. **The classic window path is untouched.** `didFinishLaunching`
+   still creates `self.window` and calls `makeKeyAndVisible`;
+   the window setup does not depend on the scene configuration.
+   There is no scene delegate class in the app, and nil means
+   "use the default", which for a manifest-less app is the
+   compatibility path that attaches the app delegate's window
+   to the implicit scene.
+4. **The marker is diagnostic bonus, not the fix.** In the
+   standard lifecycle the scene connects after
+   `didFinishLaunching`, so a still-crashing run may never show
+   `Scene config requested` — the fix works by flipping the
+   `respondsToSelector:` check at `setDelegate:` time, not by
+   the method being called. If the next log shows the marker,
+   it proves UIKit entered the scene path (and the crash is
+   after scene connection, not in the hook).
+
+Alternatives considered and rejected: returning an explicit
+`UISceneConfiguration` with a delegate class (riskier — UIKit
+would create a UIScene and expect a scene delegate to provide
+the window, changing the launch path); overriding
+`respondsToSelector:` to lie (UIKit would then call a method
+that does not exist → `doesNotRecognizeSelector` crash — worse
+than the disease).
+
+What this does NOT fix: the other suspects in the window remain
+— `hook__connectUISceneFromFBSScene` (reads nil values, skips
+its blocks), `+_wantsApplicationBehaviorAsExtension` returning
+YES, UIApplication creation / frontboard connection, or a
+SIGKILL (jetsam). If the next device log still dies after
+`-init done` with no step 1, the swizzles are exonerated by
+elimination and the window narrows to scene connection /
+runloop / jetsam. Only the iOS Analytics `.ips` can name a
+SIGKILL — see "The .ips is now the critical evidence" below.
+
+### Local verification before the build
+
+`clang-18 -target arm64-apple-ios15.0` with the iPhoneOS 26.5
+SDK (`~/workspace/spytube-ios/sdks/iPhoneOS26.5.sdk`), `-Wall
+-Wextra`, compiled `src/AppDelegate.m` clean with **zero
+warnings**, both without and with `-DOC_KERNARIUM_LINKED=1`
+(the Mac build defines it). The object file holds the selector
+`application:configurationForConnectingSceneSession:options:`,
+the method `-[OCAppDelegate
+application:configurationForConnectingSceneSession:options:]`,
+and the string `Scene config requested`. The workflow YAML was
+validated (`yaml.safe_load`) and its verify step now requires
+the new marker string. The local `./build.sh` was never run
+(it would `rm -rf build` and delete the Mac IPAs); only the
+single compile step ran, output to `/tmp`.
+
+### The IPA (commit d15b844)
+
+- `build/OpenCode-Inbuilt-kernarium.ipa` — 25,307,322 bytes,
+  SHA-256 `1cc729252f6cb4ac0a8bfe6ab37fbb02ae238147d5adcf9a54f484c85624207d`
+- Backed up in `mac-ipas/OpenCode-Inbuilt-kernarium.ipa` (same
+  SHA) and `mac-ipas/OpenCode-Inbuilt-kernarium-d15b844.ipa`.
+  The 6240a51 build is preserved as
+  `mac-ipas/OpenCode-Inbuilt-kernarium-6240a51.ipa`
+  (SHA-256 `348350e2431146c2162207eb5f3d57cdc9cb072524dd2cece090e4d9225b8a6a`)
+  and the desktop 9ccab19 build as
+  `mac-ipas/OpenCode-Inbuilt-kernarium-9ccab19.ipa`
+  (SHA-256 `70233f26857c30be848e3dcc26d4e64f1565b7027236c1be06c840f872167d14`).
+- Verified on the downloaded IPA (independent of the workflow's
+  own checks, with a from-scratch Python Mach-O parser — the
+  earlier `/tmp/verify-kern-ipa.py` was gone with /tmp, so it
+  was rewritten): Mach-O 64-bit arm64, MH_EXECUTE, 5 segments,
+  **MinOS 15.0.0, SDK 27.0.0**, LC_MAIN entryoff 0x4000, chained
+  fixups `seg_count` = 5 = segment count, adhoc-signed with all
+  **124 SHA-256 code slots valid** (ident `com.spyboy.opencode`);
+  **zero Kernarium load commands** (dlopen-only); all four
+  frameworks embedded; KRuntime exports
+  `_kernarium_runtime_get_api_v28`; **`DYLD OK` (4 hits),
+  `BOOT.txt` (6 hits), `Calling UIApplicationMain` (1 hit),
+  `AppDelegate +initialize` (1 hit), `AppDelegate -init done`
+  (1 hit), `Scene config requested` (1 hit)**; all seven
+  `Launch step N/7` marker strings present (1 hit each); zero
+  `BUILD-NOTE` strings, zero `.html` in Payload;
+  `UIBackgroundModes = ['location']`, `UIFileSharingEnabled`
+  and `LSSupportsOpeningDocumentsInPlace` true; no
+  `UISceneConfigurations` in Info.plist,
+  `UILaunchStoryboardName` empty.
+  - Parser notes (same class of mistake as before, fixed in
+    the verifier, not the binary): `LC_MAIN` is `0x80000028`,
+    not `0x28`; `LC_DYLD_CHAINED_FIXUPS` is `0x34` with the
+    `LC_REQ_DYLD` bit set (`0x80000034`), not `0x26`
+    (`LC_FUNCTION_STARTS`); the `seg_count` lives at
+    `dataoff + starts_offset`, not at `dataoff + 4`.
+- Main untouched; local `./build.sh` never run. Commit landed
+  on `kernarium-engine` (branch verified before committing);
+  only the two intended files were staged
+  (`src/AppDelegate.m`,
+  `.github/workflows/build-kernarium.yml`) — the desktop
+  coordinator's uncommitted work in the shared checkout
+  (`.gitignore`, `rootfs-build/opencode-guest-additions.sh`,
+  `src/OCEngine.m`) was left untouched.
+
+### The .ips is now the critical evidence
+
+The log has proven the death is inside the system launch, after
+delegate creation; no further in-app marker can name the killer
+if it is a SIGKILL, because a SIGKILL runs no handler. Exact
+steps for the user, on the phone:
+
+1. Open **Settings**.
+2. Tap **Privacy & Security**.
+3. Tap **Analytics & Improvements**.
+4. Tap **Analytics Data**.
+5. In the list, find an entry starting with **JetsamEvent** or
+   **OpenCode** whose date/time matches the crash (the list is
+   alphabetical, newest entries are mixed in — check the time
+   shown under the name).
+6. Tap it, scroll to the top, and take a screenshot of the
+   first screen (it shows the termination reason, e.g.
+   `per-process-limit`, `high-water-mark`, `cpu`, or a
+   `0x8badf00d` watchdog), plus a screenshot of any line
+   mentioning `OpenCode`, `KRuntime`, or `LiveContainer`.
+7. Send both screenshots here.
+
+### Device test (exact steps)
+
+Fresh install in LiveContainer — delete the old app first so its
+data goes with it. Launch once, then open the app's data folder
+in LiveContainer's file browser and check, in this order:
+
+1. `Documents/BOOT.txt` (top of Documents, no folder to open).
+   Read its lines and report them exactly.
+2. `Documents/Engine/engine.log` — report the last lines.
+3. `Documents/CRASH.txt` — report whether it exists and what it says.
+
+Reading it:
+- **`Launch step 1/7` present** → the app opened past the
+  hook; the swizzles were the killer (or the crash moved
+  later — the step names where it died). If it opens, tap Start
+  on the Engine tab and report guest boot, `/api/info`, chat,
+  `docker run hello-world`, app.py on port 8000, mode switch
+  CLI↔Desktop UI, Stop→Start, background keep-alive.
+- **Both delegate markers, no step 1, no `Scene config
+  requested`** → still dying in scene connection or the
+  runloop turn (the swizzles are exonerated by elimination);
+  the `.ips` is the only thing that can name it.
+- **`Scene config requested` present, no step 1** → UIKit
+  entered the scene path and died there; the scene-connection
+  hook is the prime suspect next.
+- **No `AppDelegate +initialize`** → regressed to dying in
+  UIApplication creation (unexpected — report it as-is).
+
+Still untested on a real iPhone and in LiveContainer — host
+verification only.
+
+---
+
 # Kernarium Engine Build — status 2026-11-21 (updated 05:55 UTC)
 
 ## Status: GREEN — delegate-stage markers inside UIApplicationMain, run 44870795028, verified
