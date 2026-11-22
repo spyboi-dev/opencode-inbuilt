@@ -621,6 +621,13 @@ jobs:
           [ -f build/Payload/OpenCode.app/OpenCodeLogo.png ] \
             || { echo "OpenCodeLogo.png missing from the bundle"; exit 1; }
           echo "app icon and startup logo present"
+          # Continue to app: the secondary button that enters the
+          # tabs without installing must be in the binary (user
+          # direction 2026-11-22: the startup screen must fit on
+          # one page with Install AND Continue to app on screen).
+          strings build/Payload/OpenCode.app/OpenCode | grep -q 'Continue to app' \
+            || { echo "Continue to app string missing from the app binary"; exit 1; }
+          echo "Continue to app present"
           # Guest image hashes (OCGuestInstall.m): the real SHA-256
           # values from rootfs-build/SHA256SUMS must be in the
           # binary, and no TODO placeholder may remain. On

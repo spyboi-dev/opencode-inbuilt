@@ -19,6 +19,13 @@
 // is listening. It never traps the user: a Continue button is always
 // on screen, and a failed, unlinked, or not-yet-set-up engine shows
 // the honest reason in plain words.
+//
+// One page, no scroll (user direction 2026-11-22): the whole
+// stack measures ~735pt with the reason line showing, against
+// ~839pt of safe area on iPhone 15 Plus, so Install and Continue
+// to app are both on screen. The entrance is staggered (Install
+// first, then the rows one by one, then Continue and Log), under
+// one second — see prepareEntrance / runEntranceAnimation.
 #import "OCStartupViewController.h"
 #import "OCEngine.h"
 #import "OCEngineViewController.h"
@@ -78,6 +85,9 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
 @property (nonatomic, strong) UIProgressView *progressView;
 @property (nonatomic, strong) UILabel *reasonLabel;
 @property (nonatomic, strong) UIButton *actionButton; // Install (or Start), by state — TermX-style, only action button
+@property (nonatomic, strong) UIButton *continueButton; // secondary: enter the tabs without installing
+@property (nonatomic, strong) UIButton *logButton; // secondary: open the live log view
+@property (nonatomic, strong) NSMutableArray<UIView *> *rowViews; // the five checklist rows, for the entrance animation
 @property (nonatomic, assign) double installFraction; // live install progress 0..1, while Installing
 @property (nonatomic, strong, nullable) NSString *installMessage; // live install step, while Installing
 @property (nonatomic, strong) NSMutableArray<UIView *> *rowIcons;
@@ -106,6 +116,7 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
     self.rowSpinners = [NSMutableArray array];
     self.rowTitles = [NSMutableArray array];
     self.rowDetails = [NSMutableArray array];
+    self.rowViews = [NSMutableArray array];
 
     // Top row: green dot + "Starting" left, elapsed timer right.
     self.statusDot = [[UIView alloc] init];
@@ -159,7 +170,7 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
         [NSLayoutConstraint activateConstraints:@[
             [row.leadingAnchor constraintEqualToAnchor:card.leadingAnchor],
             [row.trailingAnchor constraintEqualToAnchor:card.trailingAnchor],
-            [row.heightAnchor constraintEqualToConstant:68],
+            [row.heightAnchor constraintEqualToConstant:56],
             previousRow ? [row.topAnchor constraintEqualToAnchor:previousRow.bottomAnchor] : [row.topAnchor constraintEqualToAnchor:card.topAnchor],
         ]];
         if (previousRow) {
@@ -195,18 +206,23 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
     // Continue gets the user into the tabs at any time; a swipe
     // down from the top edge of the tabs returns here.
     self.actionButton = [self buttonWithTitle:@"Install" action:@selector(actionTapped)];
-    UIButton *logButton = [self buttonWithTitle:@"View log" action:@selector(logTapped)];
-    UIButton *continueButton = [self buttonWithTitle:@"Continue to app" action:@selector(continueTapped)];
-    UIStackView *buttons = [[UIStackView alloc] initWithArrangedSubviews:@[self.actionButton, logButton, continueButton]];
+    self.continueButton = [self buttonWithTitle:@"Continue to app" action:@selector(continueTapped)];
+    self.logButton = [self buttonWithTitle:@"View log" action:@selector(logTapped)];
+    UIStackView *buttons = [[UIStackView alloc] initWithArrangedSubviews:@[self.actionButton, self.continueButton, self.logButton]];
     buttons.axis = UILayoutConstraintAxisVertical;
     buttons.spacing = 12;
     buttons.translatesAutoresizingMaskIntoConstraints = NO;
 
-    // A spacer holds the title and card low on the screen, the way
-    // the Andarium screen does, instead of crowding the top row.
+    // A small spacer keeps the title and card from crowding the
+    // top row. It was 120pt (TermX's value) and that, plus the
+    // 64pt logo and 68pt rows, pushed Install below the fold on
+    // iPhone 15 Plus — the 2026-11-22 09:46 device screenshot.
+    // TermX has four rows and no logo; we have five rows and a
+    // logo, so our spacer has to be far smaller for the same
+    // one-page fit.
     UIView *spacer = [[UIView alloc] init];
     spacer.translatesAutoresizingMaskIntoConstraints = NO;
-    [spacer.heightAnchor constraintEqualToConstant:120].active = YES;
+    [spacer.heightAnchor constraintEqualToConstant:16].active = YES;
 
     // The official OpenCode logo (resources/OpenCodeLogo.png, the
     // square dark 1024px avatar from dev.opencode.ai/brand), small
@@ -215,15 +231,15 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
     // stretch a bare image view to full width.
     UIImageView *logoView = [[UIImageView alloc] initWithImage:[UIImage imageNamed:@"OpenCodeLogo"]];
     logoView.contentMode = UIViewContentModeScaleAspectFit;
-    logoView.layer.cornerRadius = 14;
+    logoView.layer.cornerRadius = 12;
     logoView.layer.masksToBounds = YES;
     logoView.translatesAutoresizingMaskIntoConstraints = NO;
-    [logoView.widthAnchor constraintEqualToConstant:64].active = YES;
-    [logoView.heightAnchor constraintEqualToConstant:64].active = YES;
+    [logoView.widthAnchor constraintEqualToConstant:48].active = YES;
+    [logoView.heightAnchor constraintEqualToConstant:48].active = YES;
 
     UIView *logoWrap = [[UIView alloc] init];
     logoWrap.translatesAutoresizingMaskIntoConstraints = NO;
-    [logoWrap.heightAnchor constraintEqualToConstant:64].active = YES;
+    [logoWrap.heightAnchor constraintEqualToConstant:48].active = YES;
     [logoWrap addSubview:logoView];
     [NSLayoutConstraint activateConstraints:@[
         [logoView.centerXAnchor constraintEqualToAnchor:logoWrap.centerXAnchor],
@@ -241,11 +257,17 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
 
     UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[logoWrap, topRow, spacer, titleLabel, self.progressView, card, self.reasonLabel, buttons]];
     stack.axis = UILayoutConstraintAxisVertical;
-    stack.spacing = 28;
+    // One page, no scroll (user direction 2026-11-22): the whole
+    // stack measures ~735pt with the reason line showing, against
+    // ~839pt of safe area on iPhone 15 Plus, so Install and
+    // Continue to app are both on screen. The default gap is 16,
+    // not 28 — the old 28pt gaps plus the 120pt spacer are what
+    // pushed Install below the fold.
+    stack.spacing = 16;
     // The progress bar sits tight under the title, not a full
-    // 28-point gap away.
+    // gap away.
     [stack setCustomSpacing:12 afterView:titleLabel];
-    [stack setCustomSpacing:28 afterView:self.progressView];
+    [stack setCustomSpacing:16 afterView:self.progressView];
     stack.translatesAutoresizingMaskIntoConstraints = NO;
 
     UIScrollView *scroll = [[UIScrollView alloc] init];
@@ -257,10 +279,10 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
         [scroll.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [scroll.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
         [scroll.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor],
-        [stack.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor constant:16],
+        [stack.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor constant:12],
         [stack.leadingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.leadingAnchor constant:24],
         [stack.trailingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.trailingAnchor constant:-24],
-        [stack.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor constant:-24],
+        [stack.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor constant:-16],
         [stack.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor constant:-48],
     ]];
 
@@ -286,8 +308,17 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
     [[OCEngine shared] removeStateChangeObserver:self.engineStateToken];
 }
 
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    // Entrance animation (see runEntranceAnimation): reset the
+    // animated views to their start state before the view is
+    // visible, so the first frame never flashes them in place.
+    [self prepareEntrance];
+}
+
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
+    [self runEntranceAnimation];
     [self startPollTimer];
     [self refresh];
     // A new Running state may auto-present the tabs once; coming
@@ -310,6 +341,50 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
     [super viewWillDisappear:animated];
     [self.pollTimer invalidate];
     self.pollTimer = nil;
+}
+
+// Staggered entrance (user direction 2026-11-22 09:49 IST,
+// TermX feel): the Install button shows first, then the five
+// checklist rows light up one by one, then the secondary buttons
+// (Continue to app, Log). Each row fades and slides up a little
+// as it arrives, showing its live state (spinner if active, check
+// if done) — the checklist lighting up step by step, not
+// everything popping in at once. Total under one second,
+// ease-out only, no spring. The Install button stays tappable
+// the whole time: alpha does not block touches, and nothing here
+// sets hidden or userInteractionEnabled, so it can be tapped the
+// moment it appears. Runs once per appearance (viewWillAppear
+// resets, viewDidAppear plays); the poll timer and state refresh
+// never touch alpha or transform, so they cannot restart it or
+// fight it.
+- (void)prepareEntrance {
+    self.actionButton.alpha = 0;
+    for (UIView *row in self.rowViews) {
+        row.alpha = 0;
+        row.transform = CGAffineTransformMakeTranslation(0, 8);
+    }
+    self.continueButton.alpha = 0;
+    self.logButton.alpha = 0;
+}
+
+- (void)runEntranceAnimation {
+    // Install first, immediately tappable.
+    [UIView animateWithDuration:0.18 delay:0 options:UIViewAnimationOptionCurveEaseOut animations:^{
+        self.actionButton.alpha = 1;
+    } completion:nil];
+    // Rows one by one, ~110 ms apart, fading and sliding up.
+    for (NSInteger i = 0; i < (NSInteger)self.rowViews.count; i++) {
+        UIView *row = self.rowViews[(NSUInteger)i];
+        [UIView animateWithDuration:0.20 delay:0.12 + (double)i * 0.11 options:UIViewAnimationOptionCurveEaseOut animations:^{
+            row.alpha = 1;
+            row.transform = CGAffineTransformIdentity;
+        } completion:nil];
+    }
+    // Secondary buttons last, together. Ends at 0.84 s.
+    [UIView animateWithDuration:0.16 delay:0.68 options:UIViewAnimationOptionCurveEaseOut animations:^{
+        self.continueButton.alpha = 1;
+        self.logButton.alpha = 1;
+    } completion:nil];
 }
 
 - (UIView *)makeRowWithTitle:(NSString *)title {
@@ -378,6 +453,7 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
     [self.rowSpinners addObject:spinner];
     [self.rowTitles addObject:titleLabel];
     [self.rowDetails addObject:detailLabel];
+    [self.rowViews addObject:row];
     return row;
 }
 
@@ -538,7 +614,7 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
     if (!engine.guestCoreLinked && !engine.guestCoreLoadable) {
         reason = @"The engine is not ready yet in this build. Setup downloads the guest image first, but the engine cannot start here.";
     } else if (engine.state == OCEngineStateNotInstalled) {
-        reason = @"Tap Install below to download the guest image (1.16 GB, in 12 parts).";
+        reason = @"Guest image 1.16 GB · 12 parts";
     } else if (engine.state == OCEngineStateInstalling) {
         // The live install step (e.g. "Downloading guest image
         // part 3 of 12…"), or the static line until the first
