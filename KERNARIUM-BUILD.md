@@ -8,9 +8,159 @@ launch-path hypothesis is closed. The scene investigation (why UIKit
 never called the scene method in the 07:57 run) continues on that
 settled basis.
 
-# Kernarium Engine Build — status 2026-11-22 (updated ~03:00 UTC)
+# Kernarium Engine Build — status 2026-11-22 (updated ~03:50 UTC)
 
-## Status: GREEN — scene-attach poll + build identity + lifecycle markers, run 44976797609, verified
+## Status: GREEN — guest install hash fix + TermX-style startup root + engine auto-start, run 44980528771, verified
+
+Run
+[44980528771](https://github.com/spyboi-dev/opencode-inbuilt/actions/runs/44980528771)
+("Build Kernarium engine + IPA", branch `kernarium-engine`, head
+`d86406f`) completed 2026-11-22 ~03:46 UTC with conclusion
+**success** in 21m37s, first try. No retries were needed: the
+patch compiled clean locally first (clang-18 + iPhoneOS 26.5 SDK,
+zero warnings, all touched files, both with and without
+`OC_KERNARIUM_LINKED`), and the workflow's own verify step passed
+(it now also requires the real guest-hash strings and chunk part
+names in the binary and fails on any `TODO-FILL` string).
+
+IPA: `mac-ipas/OpenCode-Inbuilt-kernarium-d86406f.ipa`
+(also `mac-ipas/OpenCode-Inbuilt-kernarium.ipa`), 25,148,134 bytes,
+SHA-256
+`e747c1b531ce982506ad860aea1d20fa396fc929de694dd6ab60883f99f13d26`.
+
+### Device evidence that drove this build (2026-11-22 08:39 IST, bf05c6c)
+
+The black screen is FIXED: `[08:39:10] Window attached to scene
+(poll)` fired one second after step 7, the user got into the app,
+switched to Desktop UI mode at 08:40:26, and tapped Install three
+times (08:40:38, 08:40:54, 08:41:10). All three failed identically:
+"First-launch setup failed: download hash mismatch — the file may
+be corrupt, try again", State: Engine error, State: Not installed.
+
+### Root cause (verified in source, not guessed)
+
+`src/OCGuestInstall.m` lines 14-15 still read
+`kOCGuestImageGzSHA256 = @"TODO-FILL-FROM-rootfs-build/SHA256SUMS"`
+and the same for `.ext4`. The expected hashes were NEVER filled
+in, so no download could ever pass the check — the downloads
+themselves completed (the hash check runs after download), but the
+comparison was against a literal placeholder string. The user
+downloaded 1.16 GB three times for nothing.
+
+### What changed (commit d86406f, 9 files, +646/-194)
+
+1. **Hash fix + chunked downloader.** `OCGuestInstall.h/.m`
+ported from the kernarium-desktop branch (commit 9ccab19) and
+verified programmatically against `rootfs-build/SHA256SUMS` and
+`CHUNKS-SHA256SUMS`: 12 part names match, 14 64-hex hashes match
+(.gz `b1018c93…`, .ext4 `c7511200…`, then 12 part hashes), chunk
+sizes match (11 x 104,857,600 + 5,716,714 = 1,159,150,314), no
+TODO remains. Install now downloads 12 x 100 MiB parts from
+release `rootfs-20261120` with per-part SHA verification, per-part
+resume, a whole-archive hash gate, and no NSURLSession resume
+data (the TermX stale-blob crash class). One warning fixed in the
+port: `-Wsign-compare` in `FileHasSize` (cast to unsigned long
+long). The old single-download `kOCGuestImageURL` is gone; it was
+referenced only in those two files.
+2. **TermX-style startup screen as the app root** (user direction
+2026-11-22 08:42 IST: "add start windows like termx project do
+and give the option there for install not in under the app lol").
+`AppDelegate` now sets the startup screen as the window's root
+view controller (`startup.tabsViewController = tabs`); the modal
+presentation of startup over the tabs is gone. The startup screen
+has the Install option ON it as its only action button (Install /
+Start by state, TermX-style), plus the official OpenCode logo,
+five checklist rows, live log view and progress bar. The tabs are
+presented from it once the server is listening (same 0.7s beat at
+full green, deferred while the log is open) and return to it with
+a swipe down from the top strip (TermX's exit drag, same
+thresholds: start y < 44, down > 80, mostly vertical; simultaneous
+recognition so scrolling still works; the recognizer is attached
+once). The Install/setup button is REMOVED from the Engine tab
+(`setupButton`, its stack entry, refresh line and `setupTapped`
+all gone; the binary carries no "Run first-launch setup" string).
+Header reason strings no longer point at the Engine tab.
+3. **Engine auto-start** (user direction: "make enging auto
+start"). `maybeAutoStartEngine` in `OCEngine.m` now LOADS the
+Kernarium runtime on a background thread as part of the attempt
+(state flips to Starting FIRST so Start buttons disable and a
+manual Start cannot race it into a second boot), instead of
+skipping when the runtime is not loaded. The 9e5e9bb trade-off
+(one manual Start per launch) is superseded by the user's explicit
+direction and by the launch crash being fixed. The NotInstalled /
+Installing and Error skips deliberately do NOT consume the one
+attempt, so a later call after Install completes can still start;
+Running / Starting and userStopped DO consume it. Auto-start also
+fires on foreground return (`applicationDidBecomeActive`). The
+explicit-Stop rule is unchanged. `KernGlue ensureRuntimeLoaded`
+is `@synchronized` so a background load cannot race a manual
+Start into a double dlopen / double executor install (audited:
+no lock-order cycle — the log queue never calls back into it).
+
+KEPT: poll-based scene attach (proven 08:39:10), build-hash
+marker, lifecycle markers, official icon, scene delegate. The
+swizzle path was NOT restored. Nothing about LiveContainer was
+asked (standing rule).
+
+### Host verification (independent, from the downloaded IPA)
+
+Fresh Python verifier (`/tmp/verify-d86406f.py`, reads the IPA zip
+directly, no extraction): arm64, MH_EXECUTE, MinOS 15.0.0,
+SDK 27.0.0, LC_MAIN entryoff 0x4000, 5 segments, zero Kernarium
+load commands, code signature valid (130/130 SHA-256 page hashes),
+all four frameworks embedded, 4 app icon PNGs, all markers
+present (DYLD OK, BOOT.txt, Calling UIApplicationMain, AppDelegate
++initialize, AppDelegate -init done, Scene config requested,
+Window attached to scene, all 7 launch steps, build id `d86406f`),
+both real hash strings and both chunk part names present, no
+`TODO-FILL`, no `BUILD-NOTE`, new-behaviour strings present
+(maybePresentTabs, presentTabs, onTabsExitPan:, "Auto-start:
+loading Kernarium"), no "Run first-launch setup" string.
+Bundle id com.spyboy.opencode, version 1.0.
+
+Two verifier lessons (the parser, not the binary, was wrong both
+times): the superblob index entries are SLOT numbers, not magic —
+slot 0 IS the main CodeDirectory (check its blob magic separately);
+and the build id is a standalone string constant, so the binary
+check is for `d86406f` alone, not the literal "Build d86406f"
+(the log line assembles it at runtime from "Build %s").
+
+### Staging note (for the next coordinator)
+
+`src/OCEngine.m` in the shared checkout still carries the desktop
+coordinator's uncommitted bootstrap hunks (lines ~643+, committed
+on kernarium-desktop as 9ccab19). Only the maybeAutoStartEngine
+hunk was staged and committed here. Lesson: `git apply --cached`
+FAILS on a `-U0` filtered patch when the kept hunks are adjacent
+(it failed at line 84 twice); regenerate the filter with `-U3`
+(the four hunks merge into one anchored hunk) and it applies
+cleanly. Verify with `git diff --cached` (only the intended hunk)
+and `git diff` (only the desktop hunks left) before committing.
+
+### Device test steps (fresh install — delete the old app first)
+
+1. Install `OpenCode-Inbuilt-kernarium-d86406f.ipa` in
+LiveContainer. The startup screen should be the FIRST thing
+shown, with the OpenCode logo, the five checklist rows, and an
+**Install** button on it (not in the Engine tab).
+2. Tap **Install**. The 12 parts should download (progress bar
+under the title shows real progress), verify, extract, and the
+guest should boot — NO hash mismatch this time. Report the
+engine.log lines if it fails.
+3. After Install completes the engine should boot automatically
+with no further tap, and the tabs should present themselves once
+the server is listening.
+4. Kill the app and relaunch it: the engine must auto-start again
+with no tap. Check the log for "Auto-start: loading Kernarium
+runtime..." then "Auto-start: starting engine".
+5. Then the usual checks: `/api/info` (server on 4096), a chat
+with a real tool call, `docker run hello-world`, app.py on port
+8000, mode switch CLI ↔ Desktop UI, Stop → Start.
+6. Swipe down from the top strip of the tabs: it should return
+to the startup screen (Install / Start / Log there). Tap
+Continue to go back to the tabs.
+
+## Previous build (bf05c6c) — scene-attach poll + build identity + lifecycle markers
 
 Run
 [44976797609](https://github.com/spyboi-dev/opencode-inbuilt/actions/runs/44976797609)
