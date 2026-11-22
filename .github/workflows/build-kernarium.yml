@@ -592,6 +592,21 @@ jobs:
           strings build/Payload/OpenCode.app/OpenCode | grep -q 'Scene config requested' \
             || { echo "Scene config marker missing from the app binary"; exit 1; }
           echo "scene-config marker present"
+          # Scene delegate (OCSceneDelegate): willConnectToSession
+          # attaches the window to the UIWindowScene and logs the
+          # attachment marker. Without it the window has no scene
+          # and the screen stays black (d15b844 device evidence).
+          strings build/Payload/OpenCode.app/OpenCode | grep -q 'Window attached to scene' \
+            || { echo "Scene attach marker missing from the app binary"; exit 1; }
+          echo "scene-attach marker present"
+          # App icon + startup logo: the official OpenCode avatar
+          # (square dark 1024px from dev.opencode.ai/brand) must be
+          # in the bundle as the icon and as OpenCodeLogo.png.
+          [ -f build/Payload/OpenCode.app/AppIcon1024.png ] \
+            || { echo "AppIcon1024.png missing from the bundle"; exit 1; }
+          [ -f build/Payload/OpenCode.app/OpenCodeLogo.png ] \
+            || { echo "OpenCodeLogo.png missing from the bundle"; exit 1; }
+          echo "app icon and startup logo present"
           echo "No Kernarium framework may appear as a load command at"
           echo "all (strong or weak): the app must be dlopen-only. The"
           echo "old working build had no dyld-loaded frameworks (core"

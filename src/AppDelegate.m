@@ -2,6 +2,7 @@
 // The chat opens over them; Files lives inside the chat (Chat/Files
 // switch) and the Engine and Settings screens live in Integrations.
 #import "AppDelegate.h"
+#import "OCSceneDelegate.h"
 #import "OCCrashLog.h"
 #import "OCSessionsViewController.h"
 #import "OCIntegrationsViewController.h"
@@ -58,22 +59,28 @@
 // this method makes the hook skip the swizzles entirely; only the
 // method's existence is checked (respondsToSelector:), the hook
 // never calls it.
-// Returning nil is the documented fallback: UIKit uses the
-// configuration from Info.plist, and we have none, so UIKit uses
-// its default — exactly what happens today without the method. The
-// classic window path in didFinishLaunching is unchanged, and there
-// is no scene delegate class in the app. The marker logs the call
-// so the next device log shows whether UIKit entered the scene path
-// at all (in the standard lifecycle the scene connects after
-// didFinishLaunching, so a still-crashing run may not show it — the
-// fix works by flipping the respondsToSelector check at
-// setDelegate: time, not by the method being called).
+// That fixed the crash (d15b844, 2026-11-22 07:15: all 7 launch
+// steps, clean shutdown) — but returning nil left the screen
+// black: UIKit created a UIWindowScene with no delegate, and the
+// window from didFinishLaunching was never attached to any scene,
+// so iOS did not display it. So this now returns a REAL
+// configuration with OCSceneDelegate, whose willConnectToSession
+// attaches the existing window to the scene (window.windowScene =
+// scene, then makeKeyAndVisible again). The hook still skips its
+// swizzles — it only checks respondsToSelector:, and this method
+// still exists. The window itself is still created in
+// didFinishLaunching (step 2); the scene delegate only attaches
+// it, it does not rebuild the tab bar or the startup screen.
 - (UISceneConfiguration *)application:(UIApplication *)application
     configurationForConnectingSceneSession:(UISceneSession *)connectingSceneSession
     options:(UISceneConnectionOptions *)options {
-    (void)application; (void)connectingSceneSession; (void)options;
+    (void)application; (void)options;
     OCCrashLogMarkDelegateStage("Scene config requested");
-    return nil;
+    UISceneConfiguration *config = [[UISceneConfiguration alloc]
+        initWithName:@"Default"
+        sessionRole:connectingSceneSession.role];
+    config.delegateClass = [OCSceneDelegate class];
+    return config;
 }
 
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {

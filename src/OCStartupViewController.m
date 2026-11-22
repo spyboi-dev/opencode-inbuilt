@@ -193,7 +193,29 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
     spacer.translatesAutoresizingMaskIntoConstraints = NO;
     [spacer.heightAnchor constraintEqualToConstant:120].active = YES;
 
-    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[topRow, spacer, titleLabel, card, self.reasonLabel, buttons]];
+    // The official OpenCode logo (resources/OpenCodeLogo.png, the
+    // square dark 1024px avatar from dev.opencode.ai/brand), small
+    // and centred above the Starting row. Same artwork as the app
+    // icon. The wrap centres it: the stack's Fill alignment would
+    // stretch a bare image view to full width.
+    UIImageView *logoView = [[UIImageView alloc] initWithImage:[UIImage imageNamed:@"OpenCodeLogo"]];
+    logoView.contentMode = UIViewContentModeScaleAspectFit;
+    logoView.layer.cornerRadius = 14;
+    logoView.layer.masksToBounds = YES;
+    logoView.translatesAutoresizingMaskIntoConstraints = NO;
+    [logoView.widthAnchor constraintEqualToConstant:64].active = YES;
+    [logoView.heightAnchor constraintEqualToConstant:64].active = YES;
+
+    UIView *logoWrap = [[UIView alloc] init];
+    logoWrap.translatesAutoresizingMaskIntoConstraints = NO;
+    [logoWrap.heightAnchor constraintEqualToConstant:64].active = YES;
+    [logoWrap addSubview:logoView];
+    [NSLayoutConstraint activateConstraints:@[
+        [logoView.centerXAnchor constraintEqualToAnchor:logoWrap.centerXAnchor],
+        [logoView.centerYAnchor constraintEqualToAnchor:logoWrap.centerYAnchor],
+    ]];
+
+    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[logoWrap, topRow, spacer, titleLabel, card, self.reasonLabel, buttons]];
     stack.axis = UILayoutConstraintAxisVertical;
     stack.spacing = 28;
     stack.translatesAutoresizingMaskIntoConstraints = NO;
