@@ -1,3 +1,257 @@
+## Standing direction (user, 2026-11-22): LiveContainer is NOT the issue
+
+The user runs the app as a LiveContainer guest. That is the settled
+basis for all testing: do NOT ask how he launched the app, do NOT
+ask whether it was LiveContainer vs the home screen, and do NOT put
+any LiveContainer-vs-home-screen question in device test steps. The
+launch-path hypothesis is closed. The scene investigation (why UIKit
+never called the scene method in the 07:57 run) continues on that
+settled basis.
+
+# Kernarium Engine Build — status 2026-11-22 (updated ~03:00 UTC)
+
+## Status: GREEN — scene-attach poll + build identity + lifecycle markers, run 44976797609, verified
+
+Run
+[44976797609](https://github.com/spyboi-dev/opencode-inbuilt/actions/runs/44976797609)
+("Build Kernarium engine + IPA", branch `kernarium-engine`, head
+`bf05c6c`) completed 2026-11-22 ~02:55 UTC with conclusion
+**success** in ~20m, first try. No retries were needed: the patch
+is a poll-based scene attach plus markers, compiled clean locally
+first (clang-18 + iPhoneOS 26.5 SDK, zero warnings, all three
+touched files, both with and without `OC_KERNARIUM_LINKED`), and
+the workflow's own verify step passed (it now also requires the
+poll/lifecycle/build-identity marker strings).
+
+### Device evidence that drove this build (2026-11-22 07:57 IST, 225ebc5)
+
+engine.log, run pid 3611:
+
+```
+[07:57:01] DYLD OK pid=3611 binary loaded (constructor ran before main)
+[07:57:01] Previous run ended without shutdown (likely killed by iOS, e.g. jetsam; no signal handler runs for SIGKILL)
+[07:57:01] --- App launch ---
+[07:57:01] Early log: constructor wrote DYLD OK marker to engine.log and BOOT.txt
+[07:57:01] Calling UIApplicationMain
+[07:57:01] AppDelegate +initialize
+[07:57:01] AppDelegate -init done
+[07:57:01] Launch step 1/7: didFinishLaunching entered
+[07:57:01] Launch step 2/7: window and tabs shown
+[07:57:01] Launch step 3/7: location started
+[07:57:01] Launch step 4/7: engine state refreshed
+[07:57:01] Launch step 5/7: guest view deferred until first Start (no Metal at launch)
+[07:57:01] Auto-start skipped: runtime not loaded yet, start the engine from the Engine tab
+[07:57:01] Launch step 6/7: auto-start check done
+[07:57:01] Launch step 7/7: didFinishLaunching done
+[07:57:20] CLEAN SHUTDOWN
+```
+
+Still a black screen. The key fact: steps 1–7 all ran, but
+NEITHER `Scene config requested` NOR `Window attached to scene`
+appears. `Scene config requested` is the first line of the app
+delegate's scene method and `Window attached to scene` /
+`Scene connected but window not ready` are logged in
+OCSceneDelegate willConnect — neither fired, so UIKit NEVER
+called `configurationForConnectingSceneSession` in this run: no
+scene was ever connected, and the attach code never got a chance
+to run. Compare with the d15b844 run (2026-11-22 07:15:42): same
+steps 1–7, then `Scene config requested` immediately after step
+7. Same app family, same phone, same LiveContainer — one run
+connects a scene, the other never does. The log also could not
+name its own build (no build identity in it), so whether it was
+225ebc5 or a wrong install could not be proven from the log
+alone.
+
+### Investigation: the scene hook is exonerated, the delivery is the variable
+
+- **`hook__connectUISceneFromFBSScene` read IN FULL**
+  (`TweakLoader/UIKit+GuestHooks.m:539`). It does its
+  launch-URL / payload handling, then ALWAYS calls the original
+  (`[self hook__connectUISceneFromFBSScene:scene
+  transitionContext:context]`) at the end. It does NOT gate the
+  scene connection: if the system delivered a scene, the hook
+  would pass it through. The scene was never delivered by the
+  system in the 07:57 run. LC's hook is exonerated as the cause
+  of "no scene".
+- **TermX re-checked (grep, zero matches):** TermX
+  (`~/workspace/kernarium-termux/termx/src/`) has NO scene code
+  at all — no `UIScene`, no `windowScene`, no
+  `configurationForConnecting` anywhere. Its UI shows because
+  the swizzled `makeKeyAndVisible` calls `updateWindowScene`,
+  which attaches the window to the first connected scene on the
+  same screen — and a scene IS connected for TermX. The swizzles
+  give TermX repeated attach chances (`makeKeyAndVisible` /
+  `makeKeyWindow` / `setHidden:` all run `updateWindowScene`
+  first), so a scene that connects late still gets attached.
+  Our app skips the swizzles, so it has no equivalent — until
+  this build.
+- **The scene delivery itself is the variable.** Run A (d15b844,
+  07:15) got a scene 1 s after step 7; run B (225ebc5, 07:57)
+  never got one in 19 s. Nothing in the app's code changed the
+  delivery: the scene method's first line logs, and it never
+  fired, so the method's return value (nil vs a real
+  configuration) cannot be the cause. The trigger for the
+  missing delivery is still unproven.
+- **Launch-path hypothesis is CLOSED** (standing direction at
+  the top of this file, user 2026-11-22): the app runs as a
+  LiveContainer guest, LiveContainer is not the issue, and how
+  he launched it is not asked about. The investigation proceeds
+  on that settled basis.
+
+### The fix (commit bf05c6c)
+
+- **Poll-based attach (AppDelegate).** New
+  `attachWindowToSceneIfNeeded` mirrors LiveContainer's own
+  `updateWindowScene` in our code, with no swizzles: if a
+  `UIWindowScene` is connected on the main screen (any window
+  scene as fallback), set `window.windowScene` to it, call
+  `makeKeyAndVisible` again, and log `Window attached to scene
+  (poll)`. It runs at the end of `didFinishLaunching` (after
+  step 7), in `applicationDidBecomeActive`, in
+  `applicationWillEnterForeground`, and once a second for 30 s
+  from an `NSTimer` started at launch — so a scene that
+  connects late still gets attached within a second. The timer
+  stops on attach or after 30 attempts; all call sites are
+  main-thread. If no scene ever connects, there is nothing to
+  attach to — that case is now diagnosable instead of silent
+  (see below).
+- **Lifecycle markers.** New `applicationDidBecomeActive:`
+  logs `App became active`; `applicationWillEnterForeground:`
+  now also logs `App will enter foreground` (both to engine.log
+  and BOOT.txt, via `OCCrashLogMarkDelegateStage`). The 07:57
+  log has steps 1–7 and a clean shutdown but says nothing about
+  whether the app ever reached the foreground — the next log
+  answers that.
+- **Build identity.** `build-kernarium.sh` passes
+  `-DOC_BUILD_ID="<short-commit-hash>"` (from `git rev-parse
+  --short HEAD`, fallback `dev`; `OCCrashLog.m` defaults the
+  macro the same way for local builds). The DYLD OK line now
+  reads `... binary loaded (constructor ran before main) Build
+  bf05c6c`, in both engine.log and BOOT.txt, so the log proves
+  which IPA ran even if `main()` never runs.
+- **willConnect marker renamed** to `Window attached to scene
+  (willConnect)` so the log distinguishes the scene-delegate
+  path from the poll path.
+- Workflow verify now also requires `Window attached to scene
+  (poll)`, `App became active`, and `Build ` in the binary.
+
+### Local verification before the build
+
+`clang-18 -target arm64-apple-ios15.0` with the iPhoneOS 26.5
+SDK (`~/workspace/spytube-ios/sdks/iPhoneOS26.5.sdk`), `-Wall
+-Wextra`, compiled `src/AppDelegate.m`,
+`src/OCSceneDelegate.m` and `src/OCCrashLog.m` clean with **zero
+warnings**, both without and with `-DOC_KERNARIUM_LINKED=1`.
+The object files hold the `scene:willConnectToSession:options:`
+and `applicationDidBecomeActive:` selectors and all new marker
+strings; the `-DOC_BUILD_ID` quoting was proven by compiling
+with `test123` and finding it in the object file. Note for the
+next coordinator: the first compile attempt failed with
+`'UIUtilities/UIDefines.h' file not found` — the SDK needs the
+`-F$SDK/System/Library/SubFrameworks
+-F$SDK/System/Library/PrivateFrameworks` flags (as in
+`build-kernarium.sh`); that is an SDK-path issue, not a code
+error. The workflow YAML was validated (`yaml.safe_load`) and
+`build-kernarium.sh` passes `bash -n`. The local `./build.sh`
+was never run (it would `rm -rf build` and delete the Mac
+IPAs); only the single compile steps ran, output to `/tmp`.
+
+### The IPA (commit bf05c6c)
+
+- `build/OpenCode-Inbuilt-kernarium.ipa` — 25,141,877 bytes,
+  SHA-256 `c2691eaf9a7a7cfdcee39e0ca16e257abf0c0a9dc7b176c5fdb30e8584becab8`
+- Backed up in `mac-ipas/OpenCode-Inbuilt-kernarium.ipa` (same
+  SHA) and `mac-ipas/OpenCode-Inbuilt-kernarium-bf05c6c.ipa`.
+  The 225ebc5 build is preserved as
+  `mac-ipas/OpenCode-Inbuilt-kernarium-225ebc5.ipa`
+  (SHA-256 `95036e52…`), d15b844 as `-d15b844.ipa`
+  (`1cc72925…`), desktop 9ccab19 as `-9ccab19.ipa`
+  (`70233f26…`).
+- Verified on the downloaded IPA (independent of the workflow's
+  own checks, with the from-scratch Python Mach-O parser
+  `/tmp/verify-kern-ipa.py` — rewritten after a runtime restart
+  wiped `/tmp`): Mach-O 64-bit arm64, MH_EXECUTE, 5 segments,
+  **MinOS 15.0.0, SDK 27.0.0**, LC_MAIN entryoff 0x4000,
+  chained fixups `seg_count` = 5 = segment count, adhoc-signed
+  with all **125 SHA-256 code slots valid** (ident
+  `com.spyboy.opencode`, flags 0x2); **zero Kernarium load
+  commands** (dlopen-only); all four frameworks embedded;
+  KRuntime exports `_kernarium_runtime_get_api_v28`; **`DYLD OK`
+  (4 hits), `BOOT.txt` (6 hits), `Calling UIApplicationMain`
+  (1 hit), `AppDelegate +initialize` (1 hit), `AppDelegate
+  -init done` (1 hit), `Scene config requested` (1 hit),
+  `Window attached to scene (willConnect)` (1 hit), `Window
+  attached to scene (poll)` (1 hit), `App became active`
+  (1 hit), `App will enter foreground` (1 hit), `Build `
+  (2 hits), build id `bf05c6c` present**; all seven `Launch
+  step N/7` marker strings present (1 hit each); zero
+  `BUILD-NOTE` strings, zero `.html` in Payload;
+  `UIBackgroundModes = ['location']`, `UIFileSharingEnabled`
+  and `LSSupportsOpeningDocumentsInPlace` true; no
+  `UISceneConfigurations` in Info.plist,
+  `UILaunchStoryboardName` empty; all five icon PNGs present,
+  `AppIcon1024.png` byte-identical to the official avatar
+  (SHA-256 `14bd93dd4c44…`). 44 checks, all passed.
+  - Parser correction worth keeping: the CodeDirectory hash
+    array holds the CODE slots FIRST (index `i`), special slots
+    after them — the reverse formula (`nSpecial + i`) matched
+    0/125 and is wrong; the `i` formula matches 125/125. (The
+    earlier `LC_MAIN is 0x80000028` / `LC_DYLD_CHAINED_FIXUPS is
+    0x80000034` notes from prior builds still apply.)
+  - MinOS note: this Info.plist carries no `MinimumOSVersion`
+    key; MinOS 15.0.0 comes from the Mach-O `LC_BUILD_VERSION`
+    load command, which is authoritative.
+- Main untouched; local `./build.sh` never run. Commit landed
+  on `kernarium-engine` (branch verified before committing);
+  only the five intended files were staged
+  (`src/AppDelegate.m`, `src/OCCrashLog.m`,
+  `src/OCSceneDelegate.m`, `build-kernarium.sh`,
+  `.github/workflows/build-kernarium.yml`) — the desktop
+  coordinator's uncommitted work in the shared checkout
+  (`.gitignore`, `rootfs-build/opencode-guest-additions.sh`,
+  `src/OCEngine.m`) was left untouched. A runtime restart
+  interrupted the build watch midway; the run state was
+  re-checked directly (`in_progress` at ~12 min) and a fresh
+  quiet waiter watched it to `success` — the waiter itself only
+  polls `gh run view` and has no side effects, so nothing was
+  retried or duplicated.
+
+### Device test (exact steps)
+
+Fresh install in LiveContainer — delete the old app first so its
+data goes with it. Launch once and look at the screen FIRST:
+the startup screen should be visible (official OpenCode logo
+above "Starting", the five checklist rows), NOT a black screen.
+Then check `Documents/BOOT.txt` and `Documents/Engine/engine.log`
+and report the lines exactly. Reading it:
+
+- **First line of BOOT.txt must say `Build bf05c6c`** — that
+  proves this IPA ran. If it says another hash (or `dev`), it
+  is the wrong build; say so and stop.
+- **`Window attached to scene (poll)` or `(willConnect)`
+  present** → the window is attached to a scene; the screen
+  should show the UI. If it opens, tap Start on the Engine tab
+  and report guest boot, `/api/info`, chat, `docker run
+  hello-world`, app.py on port 8000, mode switch CLI↔Desktop
+  UI, Stop→Start, background keep-alive.
+- **`App became active` present, no attach line** → the app
+  reached the foreground but NO scene was ever connected in 30
+  s (the scene delivery itself is the remaining problem — the
+  poll had nothing to attach to).
+- **No `App became active`** → the app never reached the
+  foreground at all.
+- **`Scene config requested` present, no attach line** → a
+  scene connected but neither attach path ran (report it
+  as-is).
+- **Still a black screen WITH an attach line** → the attach
+  happened but something else hides the UI (report the
+  screenshot and the log together).
+
+Still untested on a real iPhone and in LiveContainer — host
+verification only.
+
+---
+
 # Kernarium Engine Build — status 2026-11-22 (updated 02:20 UTC)
 
 ## Status: GREEN — attach window to scene + official OpenCode icon, run 44973502489, verified
