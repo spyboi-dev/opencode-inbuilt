@@ -8,7 +8,123 @@ launch-path hypothesis is closed. The scene investigation (why UIKit
 never called the scene method in the 07:57 run) continues on that
 settled basis.
 
-# Kernarium Engine Build — status 2026-11-22 (updated ~04:57 UTC)
+# Kernarium Engine Build — status 2026-11-22 (updated ~05:45 UTC)
+
+## Status: LOCAL BUILD WORKS — build-local-kernarium.sh, 26-33 s, verified
+
+The Mac workflow takes 16-35 min per run (d6cb75f: 16m32s); the user
+asked 2026-11-22 11:06 IST to build locally instead. The local path
+is now proven: `./build-local-kernarium.sh` builds the Kernarium IPA
+on this VM in **26-33 s** (33 s cold including the one-time KRuntime
+extraction, 26-27 s warm), with the same host verification the Mac
+builds get. The Mac workflow stays as the fallback (its procedure is
+in the per-build sections below); the local script is now the
+default for the next code change.
+
+### The command
+
+From the repo root, branch `kernarium-engine`:
+
+```
+./build-local-kernarium.sh
+```
+
+Produces `build-local/OpenCode-Inbuilt-kernarium.ipa` (NOT `build/` —
+that dir holds Mac IPA leftovers and local `.o` files, and
+`build.sh`'s `rm -rf build` would delete them; and NEVER `mac-ipas/`,
+which holds Mac-built IPAs only). `build-local/` is intentionally
+untracked, like `mac-ipas/`. The script only READS `mac-ipas/`.
+
+### Why xtool was NOT used (checked, not assumed)
+
+xtool 1.22.2 was checked properly: the AppImage at
+`~/workspace/tools/xtool` (extracted to
+`~/workspace/tools/xtool-extract`, FUSE mount fails in this VM so
+`--appimage-extract` was used) runs and reports `xtool 1.22.2`; Swift
+6.3.2 is present (`~/workspace/tools/swift-6.3.2`). Its only build
+path is `xtool dev build` — "Build app with SwiftPM". This repo has
+no `Package.swift` and no `.xcodeproj`: it is a raw ObjC file list
+built by shell scripts with explicit clang flags. xtool 2.0 beta
+adds Xcode-project support (per its README), but no Xcode project
+exists either. Using xtool would mean authoring a SwiftPM wrapper
+for zero benefit, since the direct clang path below already compiles
+this exact code clean. The user's goal is a fast local build, not
+xtool for its own sake. The script's header records this verdict.
+
+### Why local builds historically did NOT link the core — answered from evidence
+
+Nothing about the app code or the linker ever prevented it. The app
+never links the runtime at all, on Mac or locally: it is dlopen-only
+(`KernGlue` loads `KRuntime_6_18_4K.framework` by path at first
+Start; zero framework load commands either way). What was missing
+locally was (a) the prebuilt KRuntime framework artifact — it is
+built on the Mac by the workflow's CMake runtime-tree build, and
+upstream's CMake refuses non-Apple hosts, so it cannot be rebuilt
+here — and (b) a local script that defines `OC_KERNARIUM_LINKED`
+and embeds the frameworks (`build.sh` explicitly does neither;
+`build-kernarium.sh` is macOS-only via `xcrun`). This script fixes
+(b) by reusing the exact Mac-built framework, and (a) is a
+non-issue: the framework only changes when upstream Kernarium
+changes (pinned commit `fbe12ee`); the app code is what changes per
+build.
+
+### KRuntime provenance (verified, not trusted)
+
+The framework comes from the Mac-built d6cb75f IPA
+(`mac-ipas/OpenCode-Inbuilt-kernarium-d6cb75f.ipa`), extracted once
+into a cache dir OUTSIDE the repo
+(`~/workspace/opencode-local-frameworks/KRuntime_6_18_4K.framework`)
+and verified by SHA-256 on every build:
+`74e97d928f3e23f106010a327dd21963b37e14d9c9017758ee2d8de267f838ac`.
+It is NOT the TermX-vendored copy: that one is a different binary
+(SHA `fe794cba…` vs the Mac build's `74e97d92…`, same 52 MB size,
+different provenance), so the Mac one is used to keep device
+behaviour identical to the shipped Mac builds. The three GPU
+frameworks come from `Frameworks/` in this repo — the Mac build
+copies those same files, so they are identical by construction.
+`KRUNTIME_FRAMEWORK` env var overrides the framework location.
+
+### The local IPA (head ee839b5 — docs commit on top of code d6cb75f, code identical)
+
+- `build-local/OpenCode-Inbuilt-kernarium.ipa`, 25,175,281 bytes,
+  SHA-256
+  `589e7d8fbef3f534077c0362fcee2f1a486c6781574e4bdca7c80703c037c404`.
+  Build id `ee839b5` (from `git rev-parse --short HEAD`).
+- Verified with `verify-local.py` (the d6cb75f verifier with the
+  build id and expected SDK parameterized): **ALL PASS** — arm64,
+  MH_EXECUTE, 5 segments (`__PAGEZERO __TEXT __DATA_CONST __DATA
+  __LINKEDIT`), LC_MAIN entryoff 0x4000, MinOS 15.0.0, SDK 26.5.0,
+  zero Kernarium load commands, code signature 156/156 SHA-256
+  page hashes valid, all four frameworks embedded, 5 app PNGs,
+  all markers (DYLD OK, BOOT.txt, Calling UIApplicationMain,
+  AppDelegate +initialize / -init done, Scene config requested,
+  Window attached to scene + (poll), App became active, Continue
+  to app, all 7 launch steps, build id `ee839b5`), both guest
+  hashes + chunk part names, no TODO-FILL, no BUILD-NOTE, no
+  "Stop engine" / "Start engine" strings.
+- **Differences vs the Mac d6cb75f IPA** (same code): SDK 26.5.0
+  vs 27.0.0 (local SDK is 26.5; the app binary's MinOS is 15.0.0
+  in both, and the embedded frameworks already declare MinOS 27.0
+  in both, so the runtime requirement is unchanged — the user is
+  on iOS 27.0.1); app binary 640,064 bytes vs 536,224 (+104 KB:
+  `__TEXT` +16 KB, `__DATA` +32 KB, `__LINKEDIT` +55 KB — toolchain
+  codegen/layout, clang-18 + ld64.lld-18 vs Xcode 27 clang + Apple
+  ld64; same code, same markers); same LC_RPATH
+  `@executable_path/Frameworks`; **all four framework binaries
+  byte-identical** (full SHA-256 match) and **Info.plist
+  byte-identical**; KRuntime exports the API symbol (string
+  present; bit-identical to the Mac-verified framework, whose
+  exports were nm-checked on the Mac). The app binary is
+  bit-reproducible across local rebuilds (SHA `5cd9a826…` twice);
+  the IPA zip itself is not (zip entry mtimes) — same as Mac
+  builds.
+- **What local verification cannot prove** (same caveat as the
+  Mac builds' host verification): the guest cannot run on this
+  Linux VM. The first device run is still the proof. The local
+  IPA was NOT delivered to the user: it is the same code as
+  d6cb75f, which he already has; the point of this work was the
+  proven pipeline, and the next code change goes through the
+  local path.
 
 ## Status: GREEN — no manual engine controls, Install-time mode choice, install race fix + auto-start retry, run 44985933495, verified
 
