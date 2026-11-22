@@ -1,3 +1,271 @@
+# Kernarium Engine Build — status 2026-11-22 (updated 02:20 UTC)
+
+## Status: GREEN — attach window to scene + official OpenCode icon, run 44973502489, verified
+
+Run
+[44973502489](https://github.com/spyboi-dev/opencode-inbuilt/actions/runs/44973502489)
+("Build Kernarium engine + IPA", branch `kernarium-engine`, head
+`225ebc5`) completed 2026-11-22 ~02:20 UTC with conclusion
+**success** in ~26m, first try. No retries were needed: the patch
+is a new scene delegate plus an icon swap, compiled clean locally
+first (clang-18 + iPhoneOS 26.5 SDK, zero warnings, all three
+touched files, both with and without `OC_KERNARIUM_LINKED`), and
+the workflow's own verify step passed (it now also requires the
+`Window attached to scene` marker string and the icon files in
+the bundle).
+
+### Device evidence that drove this build (2026-11-22 07:15 IST, d15b844)
+
+The crash is FIXED. engine.log, run pid 3490:
+
+```
+[07:15:42] DYLD OK pid=3490 binary loaded (constructor ran before main)
+[07:15:42] Previous run ended without shutdown (likely killed by iOS, e.g. jetsam; no signal handler runs for SIGKILL)
+[07:15:42] --- App launch ---
+[07:15:42] Early log: constructor wrote DYLD OK marker to engine.log and BOOT.txt
+[07:15:42] Calling UIApplicationMain
+[07:15:42] AppDelegate +initialize
+[07:15:42] AppDelegate -init done
+[07:15:43] Launch step 1/7: didFinishLaunching entered
+[07:15:43] Launch step 2/7: window and tabs shown
+[07:15:43] Launch step 3/7: location started
+[07:15:43] Launch step 4/7: engine state refreshed
+[07:15:43] Launch step 5/7: guest view deferred until first Start (no Metal at launch)
+[07:15:43] Auto-start skipped: runtime not loaded yet, start the engine from the Engine tab
+[07:15:43] Launch step 6/7: auto-start check done
+[07:15:43] Launch step 7/7: didFinishLaunching done
+[07:15:43] Scene config requested
+[07:16:07] CLEAN SHUTDOWN
+```
+
+All seven launch steps ran and the app shut down cleanly 24 s
+later. The LiveContainer setDelegate swizzles were the killer,
+and skipping them fixed the crash. BOOT.txt confirms the same
+lines. NEW PROBLEM: the user reports "this time not crashed but
+shaw black screen" — a screenshot at 07:16 shows a fully black
+screen (status bar visible, no tabs, no UI) even though step 2
+says "window and tabs shown".
+
+### Root cause, verified in LiveContainer's own source
+
+Returning nil from the scene-session method made UIKit create a
+UIWindowScene with no delegate, and the window created in
+`didFinishLaunching` was never attached to any scene. On iOS 13+
+a window with no `windowScene` is not displayed — hence the
+black screen with a visible status bar. The mechanism is
+confirmed in `TweakLoader/UIKit+GuestHooks.m:755`:
+
+```objc
+- (void)hook_makeKeyAndVisible {
+    [self updateWindowScene];
+    [self hook_makeKeyAndVisible];
+}
+- (void)updateWindowScene {
+    for (UIWindowScene *windowScene in UIApplication.sharedApplication.connectedScenes) {
+        if (!self.windowScene && self.screen == windowScene.screen) {
+            self.windowScene = windowScene;
+            break;
+        }
+    }
+}
+```
+
+The swizzled `makeKeyAndVisible` attaches a sceneless window to
+the first connected scene on the same screen BEFORE calling the
+original — that attach is the whole reason the swizzle path shows
+a UI. Skipping the swizzles (d15b844) removed the attach along
+with the crash, so the window stayed sceneless and black.
+
+### TermX diff — why TermX shows and we did not
+
+The user pointed at TermX (`~/workspace/kernarium-termux/termx/src/`),
+same KRuntime, booted and showing UI in LiveContainer. Diffed
+directly:
+
+- TermX `AppDelegate.m`: NO scene method, NO `+initialize`, NO
+  `-init`, NO `+load`. Classic window only (`UIWindow` with
+  `UIScreen` bounds, root `TXStartupViewController`,
+  `makeKeyAndVisible`). It takes the LC swizzle path and survives
+  it; the swizzled `makeKeyAndVisible` attaches its window, so
+  its UI shows.
+- TermX `Info.plist`: NO `UISceneConfigurations`,
+  `UILaunchStoryboardName ""`, `UIMainStoryboardFile ""`,
+  `MinimumOSVersion 27.0`, `UIRequiredDeviceCapabilities [arm64,
+  metal]`, `UIStatusBarStyle light`.
+- TermX `main.m` calls `TXCrashLogInstallEarly()` from `main()` —
+  no dyld constructor writing files at load.
+- TermX is built on Linux with clang-18 + ld64.lld-18 against
+  the iOS 26.5 SDK, `MIN=27.0` (`termx/build.sh`).
+
+Why the swizzles kill OpenCode but not TermX is still NOT
+isolated — but three candidates are exonerated by the timeline,
+and they should not be chased again:
+
+- **MinOS**: c032ac1 was built at MinOS 27.0 (same as TermX)
+  and still died before step 1. Not MinOS.
+- **The DYLD OK constructor**: the crash predates it (c032ac1,
+  90b0e9b, 9e5e9bb all died before step 1 with no constructor
+  in the binary). Not the constructor.
+- **The `+initialize` / `-init` file logging**: the crash
+  predates it too (af64d5b died before step 1 with no markers
+  in the code at all). Not the markers — and the marker function
+  itself is pure file writes, no locks.
+- `UIRequiredDeviceCapabilities` (`armv7` vs `arm64`+`metal`)
+  is an install-time check only; it runs no code at launch.
+
+Remaining suspects, unproven: the Xcode 27 toolchain output
+(the crashing builds are the only ones built with Xcode 27 /
+SDK 27.0 — the working LinuxRunner build used Xcode 26 / SDK
+26.5, TermX uses clang-18 + ld64.lld-18), and the
+embedded-but-unloaded framework bundle layout. Either way the
+fix does not depend on isolating the kill: the scene delegate
+below gives us the attach through the proper API, with no
+swizzle path to restore. Do NOT restore the swizzle path without
+evidence.
+
+Also checked: LC's `hook__connectUISceneFromFBSScene`
+(`UIKit+GuestHooks.m:539`) reads `lcLaunchURL` (nil) and the
+payload (nil) on a plain launch and skips both blocks, then
+calls the original — nothing in it interacts with the scene
+connection itself. And LC's `UIScene(LiveContainerHook)`
+`hook_scene:didReceiveActions:` only rewrites URL actions.
+
+### The fix (commit 225ebc5)
+
+- New `OCSceneDelegate` (`src/OCSceneDelegate.h` / `.m`,
+  `UIWindowSceneDelegate`). `AppDelegate` now returns a REAL
+  `UISceneConfiguration` (`initWithName:@"Default"`,
+  `sessionRole:connectingSceneSession.role`,
+  `delegateClass = [OCSceneDelegate class]`) instead of nil.
+  `scene:willConnectToSession:options:` attaches the existing
+  window — `window.windowScene = scene`, then
+  `makeKeyAndVisible` again — and logs `Window attached to
+  scene` to engine.log and BOOT.txt, so the next device log
+  proves the attachment happened. If the window is somehow not
+  ready it logs `Scene connected but window not ready` instead
+  of silently leaving a black screen. Window creation stays in
+  `didFinishLaunching` (step 2); the scene delegate only
+  attaches it — no tab-bar or startup-screen rebuild. The hook
+  still skips its swizzles: `hook_setDelegate` only checks
+  `respondsToSelector:`, and the scene method still exists.
+- `build-kernarium.sh` and `build.sh` both compile
+  `OCSceneDelegate.m` and link its object (explicit lists —
+  the new file had to be added to both, or the link fails on
+  the `OCSceneDelegate` symbol; `build.sh` is only kept in
+  sync, the LinuxRunner build itself is untouched).
+- Workflow verify now also requires the `Window attached to
+  scene` string in the binary and the icon files in the bundle.
+
+### App icon — official OpenCode logo (same build)
+
+The user directed the official OpenCode logo as the app icon.
+Source: the brand page https://dev.opencode.ai/brand — the
+"Square, dark" 1024px avatar,
+`https://dev.opencode.ai/brand/files/opencode-avatar-dark-1024.png`
+(black square, light-grey logo with the two-tone inner shade).
+It replaces the gold crescent that was in `resources/icons/`:
+`AppIcon1024.png` (1024, pixel-identical to the download),
+`AppIcon60x60@2x.png` (120), `AppIcon60x60@3x.png` (180),
+`AppIcon76x76@2x.png` (152), all RGB PNGs. The bundle mechanism
+was already in place (`CFBundleIcons` in Info.plist,
+`build-kernarium.sh` copies `resources/icons/` into the bundle)
+— only the artwork changed. The same artwork ships as
+`resources/OpenCodeLogo.png`, copied into the bundle root by
+both build scripts, and the startup screen shows it small
+(64x64, corner radius 14) and centred above the Starting row
+(`OCStartupViewController`, logo wrap as the first stack item —
+no other layout change). Verified in the built IPA below.
+
+### Local verification before the build
+
+`clang-18 -target arm64-apple-ios15.0` with the iPhoneOS 26.5
+SDK (`~/workspace/spytube-ios/sdks/iPhoneOS26.5.sdk`), `-Wall
+-Wextra`, compiled `src/AppDelegate.m`, `src/OCSceneDelegate.m`
+and `src/OCStartupViewController.m` clean with **zero
+warnings**, both without and with `-DOC_KERNARIUM_LINKED=1`.
+The object files hold the `scene:willConnectToSession:options:`
+selector, the `OCSceneDelegate` class, the `Window attached to
+scene` / `Scene connected but window not ready` strings, and
+the `Scene config requested` string. The workflow YAML was
+validated (`yaml.safe_load`) and both build scripts pass
+`bash -n`. The local `./build.sh` was never run (it would
+`rm -rf build` and delete the Mac IPAs); only the single
+compile steps ran, output to `/tmp`.
+
+### The IPA (commit 225ebc5)
+
+- `build/OpenCode-Inbuilt-kernarium.ipa` — 25,141,114 bytes,
+  SHA-256 `95036e52a8e5253696b712f4836a57bdc0e1165b2c02e2b30b147d9011883847`
+- Backed up in `mac-ipas/OpenCode-Inbuilt-kernarium.ipa` (same
+  SHA) and `mac-ipas/OpenCode-Inbuilt-kernarium-225ebc5.ipa`.
+  The d15b844 build is preserved as
+  `mac-ipas/OpenCode-Inbuilt-kernarium-d15b844.ipa`
+  (SHA-256 `1cc729252f6cb4ac0a8bfe6ab37fbb02ae238147d5adcf9a54f484c85624207d`),
+  6240a51 as `-6240a51.ipa` (`348350e2…`), desktop 9ccab19 as
+  `-9ccab19.ipa` (`70233f26…`).
+- Verified on the downloaded IPA (independent of the workflow's
+  own checks, with the from-scratch Python Mach-O parser
+  `/tmp/verify-kern-ipa.py`): Mach-O 64-bit arm64, MH_EXECUTE, 5
+  segments, **MinOS 15.0.0, SDK 27.0.0**, LC_MAIN entryoff
+  0x4000, chained fixups `seg_count` = 5 = segment count,
+  adhoc-signed with all **125 SHA-256 code slots valid** (ident
+  `com.spyboy.opencode`); **zero Kernarium load commands**
+  (dlopen-only); all four frameworks embedded; KRuntime exports
+  `_kernarium_runtime_get_api_v28`; **`DYLD OK` (4 hits),
+  `BOOT.txt` (6 hits), `Calling UIApplicationMain` (1 hit),
+  `AppDelegate +initialize` (1 hit), `AppDelegate -init done`
+  (1 hit), `Scene config requested` (1 hit), `Window attached
+  to scene` (1 hit)**; all seven `Launch step N/7` marker
+  strings present (1 hit each); `-[OCSceneDelegate
+  scene:willConnectToSession:options:]` and the
+  `_OBJC_CLASS_$_OCSceneDelegate` symbol present; zero
+  `BUILD-NOTE` strings, zero `.html` in Payload;
+  `UIBackgroundModes = ['location']`, `UIFileSharingEnabled`
+  and `LSSupportsOpeningDocumentsInPlace` true; no
+  `UISceneConfigurations` in Info.plist,
+  `UILaunchStoryboardName` empty.
+- Icon verified in the bundle: all four `AppIcon*.png` files
+  plus `OpenCodeLogo.png` present in
+  `Payload/OpenCode.app/`; `AppIcon1024.png` and
+  `OpenCodeLogo.png` are byte-identical to the official avatar
+  (SHA-256 `14bd93dd4c44…`).
+- Main untouched; local `./build.sh` never run. Commit landed
+  on `kernarium-engine` (branch verified before committing);
+  only the eleven intended files were staged (the desktop
+  coordinator's uncommitted work in the shared checkout —
+  `.gitignore`, `rootfs-build/opencode-guest-additions.sh`,
+  `src/OCEngine.m` — was left untouched).
+
+### Device test (exact steps)
+
+Fresh install in LiveContainer — delete the old app first so its
+data goes with it. Launch once and look at the screen FIRST:
+the startup screen should be visible (official OpenCode logo
+above "Starting", the five checklist rows), NOT a black screen.
+Then check `Documents/BOOT.txt` and `Documents/Engine/engine.log`
+and report the lines exactly. Reading it:
+
+- **`Window attached to scene` present** → the window is
+  attached to the scene; the screen should show the UI. If it
+  opens, tap Start on the Engine tab and report guest boot,
+  `/api/info`, chat, `docker run hello-world`, app.py on port
+  8000, mode switch CLI↔Desktop UI, Stop→Start, background
+  keep-alive.
+- **`Scene config requested` present, no `Window attached to
+  scene`** → the scene connected but `willConnectToSession`
+  never ran or the window was not ready (the fallback marker
+  `Scene connected but window not ready` says which).
+- **Still a black screen WITH `Window attached to scene`** →
+  the attach happened but something else hides the UI (report
+  the screenshot and the log together).
+- **No `Scene config requested`** → regressed before scene
+  connection (unexpected — report it as-is).
+
+Still untested on a real iPhone and in LiveContainer — host
+verification only.
+
+---
+
 # Kernarium Engine Build — status 2026-11-22 (updated 00:45 UTC)
 
 ## Status: GREEN — skip LiveContainer hook_setDelegate swizzles, run 44966004569, verified
