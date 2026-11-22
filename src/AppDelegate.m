@@ -48,6 +48,34 @@
     return self;
 }
 
+// Scene-session configuration (2026-11-22): LiveContainer's
+// hook_setDelegate (TweakLoader/UIKit+GuestHooks.m:638) runs four
+// method_exchangeImplementations swizzles when the delegate does
+// NOT implement application:configurationForConnectingSceneSession:
+// options:. The 6240a51 device log proves the death is after
+// -init done and before didFinishLaunching step 1 — in setDelegate:
+// (the swizzles), scene connection, or the runloop turn. Implementing
+// this method makes the hook skip the swizzles entirely; only the
+// method's existence is checked (respondsToSelector:), the hook
+// never calls it.
+// Returning nil is the documented fallback: UIKit uses the
+// configuration from Info.plist, and we have none, so UIKit uses
+// its default — exactly what happens today without the method. The
+// classic window path in didFinishLaunching is unchanged, and there
+// is no scene delegate class in the app. The marker logs the call
+// so the next device log shows whether UIKit entered the scene path
+// at all (in the standard lifecycle the scene connects after
+// didFinishLaunching, so a still-crashing run may not show it — the
+// fix works by flipping the respondsToSelector check at
+// setDelegate: time, not by the method being called).
+- (UISceneConfiguration *)application:(UIApplication *)application
+    configurationForConnectingSceneSession:(UISceneSession *)connectingSceneSession
+    options:(UISceneConnectionOptions *)options {
+    (void)application; (void)connectingSceneSession; (void)options;
+    OCCrashLogMarkDelegateStage("Scene config requested");
+    return nil;
+}
+
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
     // Crash recording is already installed in main(), before
     // UIApplicationMain: OCCrashLogInstallEarly() wrote the launch

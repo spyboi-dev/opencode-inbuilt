@@ -584,6 +584,14 @@ jobs:
           strings build/Payload/OpenCode.app/OpenCode | grep -q 'AppDelegate -init done' \
             || { echo "AppDelegate -init marker missing from the app binary"; exit 1; }
           echo "delegate-stage markers present"
+          # Scene-session method (AppDelegate): implementing
+          # application:configurationForConnectingSceneSession:options:
+          # makes LiveContainer's hook_setDelegate skip its four
+          # swizzles (it only checks respondsToSelector:). The
+          # marker string must be in the binary.
+          strings build/Payload/OpenCode.app/OpenCode | grep -q 'Scene config requested' \
+            || { echo "Scene config marker missing from the app binary"; exit 1; }
+          echo "scene-config marker present"
           echo "No Kernarium framework may appear as a load command at"
           echo "all (strong or weak): the app must be dlopen-only. The"
           echo "old working build had no dyld-loaded frameworks (core"
