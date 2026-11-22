@@ -98,12 +98,18 @@ static void ConsoleOutput(void *context, const void *buffer, size_t length) {
 // runtime returns YES at once. A failed load logs the exact reason
 // (loadRuntime) and returns NO; the caller reports it honestly and
 // never boots. Must not be called at app launch.
+//
+// Serialized: auto-start loads on a background thread while a
+// manual Start loads on the main thread, and two concurrent loads
+// would dlopen twice and install the executor twice.
 - (BOOL)ensureRuntimeLoaded {
-    if (_api) return YES;
-    _api = [self loadRuntime];
-    if (!_api) return NO;
-    [self installGuestExecutor];
-    return YES;
+    @synchronized (self) {
+        if (_api) return YES;
+        _api = [self loadRuntime];
+        if (!_api) return NO;
+        [self installGuestExecutor];
+        return YES;
+    }
 }
 
 // The framework is linked into the Mac-built IPA only, so resolve it

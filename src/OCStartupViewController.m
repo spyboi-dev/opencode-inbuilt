@@ -71,11 +71,15 @@ typedef NS_ENUM(NSInteger, OCStartupRowState) {
 
 enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpenCode, OCStartupRowServer, OCStartupRowCount };
 
-@interface OCStartupViewController ()
+@interface OCStartupViewController () <UIGestureRecognizerDelegate>
 @property (nonatomic, strong) UIView *statusDot;
 @property (nonatomic, strong) UILabel *statusLabel;
 @property (nonatomic, strong) UILabel *timerLabel;
+@property (nonatomic, strong) UIProgressView *progressView;
 @property (nonatomic, strong) UILabel *reasonLabel;
+@property (nonatomic, strong) UIButton *actionButton; // Install (or Start), by state — TermX-style, only action button
+@property (nonatomic, assign) double installFraction; // live install progress 0..1, while Installing
+@property (nonatomic, strong, nullable) NSString *installMessage; // live install step, while Installing
 @property (nonatomic, strong) NSMutableArray<UIView *> *rowIcons;
 @property (nonatomic, strong) NSMutableArray<UIImageView *> *rowChecks;
 @property (nonatomic, strong) NSMutableArray<UIActivityIndicatorView *> *rowSpinners;
@@ -84,8 +88,11 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
 @property (nonatomic, strong, nullable) NSTimer *pollTimer;
 @property (nonatomic, strong, nullable) id engineStateToken;
 @property (nonatomic, strong) NSDate *startTime;
-@property (nonatomic, assign) BOOL dismissScheduled;
-@property (nonatomic, assign) BOOL dismissAfterLogCloses;
+@property (nonatomic, assign) BOOL presentScheduled;
+@property (nonatomic, assign) BOOL tabsPresented; // tabs shown once per Running state (TermX's terminalPresented)
+@property (nonatomic, assign) BOOL presentTabsAfterLogCloses;
+@property (nonatomic, assign) BOOL exitPanAttached; // the exit drag is attached to the tabs view once
+@property (nonatomic, assign) CGPoint exitPanStart; // exit drag: where the pan began, in the tabs view
 @end
 
 @implementation OCStartupViewController
@@ -180,9 +187,17 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
     self.reasonLabel.hidden = YES;
     self.reasonLabel.translatesAutoresizingMaskIntoConstraints = NO;
 
+    // All controls live here, on this screen, and nowhere else
+    // (TermX-style, 2026-11-22): Install is the only action button
+    // — one tap installs, then the engine boots itself and the tabs
+    // open on their own. The Engine tab under Integrations has no
+    // Install button any more. Log opens the live log view.
+    // Continue gets the user into the tabs at any time; a swipe
+    // down from the top edge of the tabs returns here.
+    self.actionButton = [self buttonWithTitle:@"Install" action:@selector(actionTapped)];
     UIButton *logButton = [self buttonWithTitle:@"View log" action:@selector(logTapped)];
     UIButton *continueButton = [self buttonWithTitle:@"Continue to app" action:@selector(continueTapped)];
-    UIStackView *buttons = [[UIStackView alloc] initWithArrangedSubviews:@[logButton, continueButton]];
+    UIStackView *buttons = [[UIStackView alloc] initWithArrangedSubviews:@[self.actionButton, logButton, continueButton]];
     buttons.axis = UILayoutConstraintAxisVertical;
     buttons.spacing = 12;
     buttons.translatesAutoresizingMaskIntoConstraints = NO;
@@ -215,9 +230,22 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
         [logoView.centerYAnchor constraintEqualToAnchor:logoWrap.centerYAnchor],
     ]];
 
-    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[logoWrap, topRow, spacer, titleLabel, card, self.reasonLabel, buttons]];
+    // Thin progress bar under the title (TermX-style): real
+    // progress only — the install fraction while downloading, the
+    // serve progress once the engine is starting.
+    self.progressView = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
+    self.progressView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.progressView.trackTintColor = [UIColor colorWithWhite:0.2 alpha:1.0];
+    self.progressView.progressTintColor = OCStartupAccent();
+    self.progressView.progress = 0;
+
+    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[logoWrap, topRow, spacer, titleLabel, self.progressView, card, self.reasonLabel, buttons]];
     stack.axis = UILayoutConstraintAxisVertical;
     stack.spacing = 28;
+    // The progress bar sits tight under the title, not a full
+    // 28-point gap away.
+    [stack setCustomSpacing:12 afterView:titleLabel];
+    [stack setCustomSpacing:28 afterView:self.progressView];
     stack.translatesAutoresizingMaskIntoConstraints = NO;
 
     UIScrollView *scroll = [[UIScrollView alloc] init];
@@ -238,10 +266,17 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
 
     __weak typeof(self) weakSelf = self;
     self.engineStateToken = [[OCEngine shared] addStateChangeObserver:^(OCEngineState state) {
-        (void)state;
         dispatch_async(dispatch_get_main_queue(), ^{
             [weakSelf refresh];
-            [weakSelf maybeDismissForRunning];
+            [weakSelf maybePresentTabs];
+            // Install just finished (or the guest was already
+            // installed): auto-start now. maybeAutoStartEngine is
+            // once-per-launch and guarded, so repeat calls are
+            // no-ops; the launch-time call skipped without
+            // consuming the attempt when setup was not done yet.
+            if (state == OCEngineStateInstalled) {
+                [[OCEngine shared] maybeAutoStartEngine];
+            }
         });
     }];
 }
@@ -255,7 +290,20 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
     [super viewDidAppear:animated];
     [self startPollTimer];
     [self refresh];
-    [self maybeDismissForRunning];
+    // A new Running state may auto-present the tabs once; coming
+    // back from the tabs must not re-trigger it (TermX's
+    // terminalPresented). The flag only resets when the engine is
+    // not running — after a Stop, a later start presents again.
+    if ([OCEngine shared].state != OCEngineStateRunning) {
+        self.tabsPresented = NO;
+    }
+    [self maybePresentTabs];
+    // The guest may have been installed while this screen was away
+    // (or the app was backgrounded when it finished): auto-start
+    // now, once per launch, guarded inside maybeAutoStartEngine.
+    if ([OCEngine shared].state == OCEngineStateInstalled) {
+        [[OCEngine shared] maybeAutoStartEngine];
+    }
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
@@ -363,6 +411,90 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
                             (unsigned long)(elapsed / 60), (unsigned long)((NSInteger)elapsed % 60)];
     [self refreshHeader];
     [self refreshRows];
+    [self refreshButtons];
+    // Thin progress bar: the install fraction while downloading,
+    // the serve progress once the engine is starting, 0 otherwise.
+    OCEngine *engine = [OCEngine shared];
+    double p = engine.state == OCEngineStateInstalling ? self.installFraction : engine.serveProgress;
+    self.progressView.progress = (float)p;
+}
+
+// The one action button follows the engine state, and only the
+// state (TermX's refreshButtons): Install when nothing is
+// installed (or the last step failed), Start when the guest is
+// installed but powered off, disabled with the live phase while
+// something is in flight. The boot itself is automatic —
+// maybeAutoStartEngine runs on install completion and on launch —
+// so there is no Boot button to tap.
+- (void)refreshButtons {
+    OCEngine *engine = [OCEngine shared];
+    switch (engine.state) {
+        case OCEngineStateNotInstalled:
+        case OCEngineStateError:
+            [self.actionButton setTitle:@"Install" forState:UIControlStateNormal];
+            self.actionButton.enabled = YES;
+            break;
+        case OCEngineStateInstalled:
+        case OCEngineStateStopped:
+        case OCEngineStateCorePending:
+            [self.actionButton setTitle:@"Start" forState:UIControlStateNormal];
+            self.actionButton.enabled = YES;
+            break;
+        case OCEngineStateInstalling:
+            [self.actionButton setTitle:@"Downloading…" forState:UIControlStateNormal];
+            self.actionButton.enabled = NO;
+            break;
+        case OCEngineStateStarting:
+            [self.actionButton setTitle:@"Starting…" forState:UIControlStateNormal];
+            self.actionButton.enabled = NO;
+            break;
+        case OCEngineStateRunning:
+            [self.actionButton setTitle:@"Running" forState:UIControlStateNormal];
+            self.actionButton.enabled = NO;
+            break;
+    }
+}
+
+- (void)actionTapped {
+    OCEngine *engine = [OCEngine shared];
+    if (engine.state == OCEngineStateInstalled || engine.state == OCEngineStateStopped ||
+        engine.state == OCEngineStateCorePending) {
+        // The guest is installed but powered off (or the runtime
+        // failed to load): a manual start. This is a start the user
+        // asked for, so it clears the stopped flag inside
+        // startEngineWithCompletion.
+        [[OCEngine shared] startEngineWithCompletion:^(BOOL started, NSError * _Nullable error) {
+            (void)started; (void)error;
+        }];
+        return;
+    }
+    if (engine.state == OCEngineStateNotInstalled || engine.state == OCEngineStateError) {
+        // One tap installs; the engine boots itself when the state
+        // flips to Installed (the observer calls
+        // maybeAutoStartEngine), and the tabs open on their own
+        // once the server is listening.
+        self.installFraction = 0;
+        self.installMessage = nil;
+        __weak typeof(self) weakSelf = self;
+        [[OCEngine shared] runFirstLaunchSetupWithProgress:^(double fraction, NSString * _Nullable message) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                __strong typeof(weakSelf) strongSelf = weakSelf;
+                if (!strongSelf) return;
+                strongSelf.installFraction = fraction;
+                strongSelf.installMessage = message;
+                [strongSelf refresh];
+            });
+        } completion:^(BOOL done, NSError * _Nullable error) {
+            (void)done; (void)error;
+            // The state observer already refreshed and (on success)
+            // auto-started; refresh once more so the button and the
+            // reason line settle on the final state.
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [weakSelf refresh];
+            });
+        }];
+        return;
+    }
 }
 
 - (void)refreshHeader {
@@ -400,23 +532,24 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
 
     // The honest reason, only when the engine cannot start on its
     // own. While it is starting or running there is nothing to say.
+    // Install and Start both live on this screen now — no reason
+    // here ever points at the Engine tab.
     NSString *reason = nil;
-    if (!engine.guestCoreLinked && engine.guestCoreLoadable) {
-        // Runtime not loaded yet: it loads when Start is tapped.
-        // The engine CAN start, just not on its own at launch.
-        reason = @"The engine loads when you start it. Continue to the app and tap Start engine on the Engine tab.";
-    } else if (!engine.guestCoreLinked) {
+    if (!engine.guestCoreLinked && !engine.guestCoreLoadable) {
         reason = @"The engine is not ready yet in this build. Setup downloads the guest image first, but the engine cannot start here.";
     } else if (engine.state == OCEngineStateNotInstalled) {
-        reason = @"First-launch setup has not finished yet. Continue to the app to run setup from the Engine tab.";
+        reason = @"Tap Install below to download the guest image (1.16 GB, in 12 parts).";
     } else if (engine.state == OCEngineStateInstalling) {
-        reason = @"First-launch setup is still running.";
+        // The live install step (e.g. "Downloading guest image
+        // part 3 of 12…"), or the static line until the first
+        // progress callback arrives.
+        reason = self.installMessage.length ? self.installMessage : @"First-launch setup is still running.";
     } else if (engine.state == OCEngineStateError) {
-        reason = @"The engine did not start. Check the log for the exact reason.";
+        reason = @"Setup or start failed. Check the log for the exact reason — Install below tries again.";
     } else if (engine.state == OCEngineStateStopped) {
-        reason = @"The engine stopped. You can start it again from the Engine tab.";
-    } else if (engine.state == OCEngineStateInstalled) {
-        reason = @"The engine did not start on its own. You can start it from the Engine tab.";
+        reason = @"The engine stopped. Tap Start below to start it again.";
+    } else if (engine.state == OCEngineStateCorePending) {
+        reason = @"The engine runtime did not load. Tap Start below to try again.";
     }
     self.reasonLabel.hidden = (reason == nil);
     self.reasonLabel.text = reason ?: @"";
@@ -438,7 +571,7 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
     if (engine.guestCoreLinked) {
         [self setRow:OCStartupRowCore state:OCStartupRowDone detail:@"Linked, ready to boot"];
     } else if (engine.guestCoreLoadable) {
-        [self setRow:OCStartupRowCore state:OCStartupRowPending detail:@"Loads when you start the engine"];
+        [self setRow:OCStartupRowCore state:OCStartupRowPending detail:@"Loads automatically at startup"];
     } else {
         [self setRow:OCStartupRowCore state:OCStartupRowBlocked detail:@"Not ready in this build"];
     }
@@ -528,24 +661,90 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
     }
 }
 
-// Dismiss into the normal tabs once the server is listening. A short
-// beat at full green first, so the user sees every check done. If
-// the log screen is open on top, wait until it closes instead of
-// yanking it away.
-- (void)maybeDismissForRunning {
+// Present the tabs once the server is listening. A short beat at
+// full green first, so the user sees every check done. If the log
+// screen is open on top, wait until it closes instead of yanking
+// it away. Only once per Running state (see viewDidAppear): coming
+// back from the tabs with a swipe down must not re-trigger it.
+- (void)maybePresentTabs {
     if ([OCEngine shared].state != OCEngineStateRunning) return;
-    if (self.dismissScheduled) return;
-    self.dismissScheduled = YES;
+    if (self.tabsPresented) return;
+    if (self.presentScheduled) return;
+    self.presentScheduled = YES;
     __weak typeof(self) weakSelf = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.7 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         __strong typeof(weakSelf) strongSelf = weakSelf;
         if (!strongSelf) return;
+        strongSelf.presentScheduled = NO;
         if (strongSelf.presentedViewController) {
-            strongSelf.dismissAfterLogCloses = YES;
+            strongSelf.presentTabsAfterLogCloses = YES;
             return;
         }
-        [strongSelf dismissViewControllerAnimated:YES completion:nil];
+        [strongSelf presentTabs];
     });
+}
+
+// The tabs themselves, full-screen over this screen (TermX
+// presents its terminal the same way). The exit drag (see
+// onTabsExitPan:) is the way back here.
+- (void)presentTabs {
+    if (!self.tabsViewController) return;
+    if (self.presentedViewController) {
+        self.presentTabsAfterLogCloses = YES;
+        return;
+    }
+    self.tabsPresented = YES;
+    UITabBarController *tabs = self.tabsViewController;
+    tabs.modalPresentationStyle = UIModalPresentationFullScreen;
+    // The way back to the startup screen: a downward drag that
+    // starts in the top strip of the tabs (TermX's exit drag on
+    // its terminal). Attached once: presenting the tabs again
+    // after a swipe back must not stack a second recognizer.
+    // See onTabsExitPan:.
+    if (!self.exitPanAttached) {
+        self.exitPanAttached = YES;
+        UIPanGestureRecognizer *exitPan = [[UIPanGestureRecognizer alloc]
+            initWithTarget:self action:@selector(onTabsExitPan:)];
+        exitPan.delegate = self;
+        [tabs.view addGestureRecognizer:exitPan];
+    }
+    [self presentViewController:tabs animated:YES completion:nil];
+}
+
+// The exit drag: a downward pan that began in the top strip of the
+// tabs returns to the startup screen, where Install, Start and Log
+// live. It only fires for a drag that begins at the very top and
+// moves decisively down, so ordinary scrolling never triggers it
+// (TermX's onExitPan, same thresholds; the tabs have no single
+// scroll view to check for "at top", so the top-strip start is
+// the whole guard).
+- (void)onTabsExitPan:(UIPanGestureRecognizer *)pan {
+    switch (pan.state) {
+        case UIGestureRecognizerStateBegan:
+            self.exitPanStart = [pan locationInView:pan.view];
+            break;
+        case UIGestureRecognizerStateEnded: {
+            CGPoint translation = [pan translationInView:pan.view];
+            if (self.exitPanStart.y < 44 && translation.y > 80 &&
+                fabs(translation.y) > fabs(translation.x)) {
+                // The presenting screen dismisses the tabs; the
+                // flag stays set while Running (see viewDidAppear),
+                // so the tabs do not instantly re-present.
+                [self dismissViewControllerAnimated:YES completion:nil];
+            }
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+// Let the exit pan watch touches alongside the tabs' own scrolling,
+// so a drag can be both a scroll and a candidate exit.
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
+    shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+    (void)gestureRecognizer; (void)otherGestureRecognizer;
+    return YES;
 }
 
 - (void)logTapped {
@@ -562,15 +761,15 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
     __weak typeof(self) weakSelf = self;
     [self dismissViewControllerAnimated:YES completion:^{
         // The server came up while the log was open: go to the app now.
-        if (weakSelf.dismissAfterLogCloses) {
-            weakSelf.dismissAfterLogCloses = NO;
-            [weakSelf dismissViewControllerAnimated:YES completion:nil];
+        if (weakSelf.presentTabsAfterLogCloses) {
+            weakSelf.presentTabsAfterLogCloses = NO;
+            [weakSelf presentTabs];
         }
     }];
 }
 
 - (void)continueTapped {
-    [self dismissViewControllerAnimated:YES completion:nil];
+    [self presentTabs];
 }
 
 @end

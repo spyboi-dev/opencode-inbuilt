@@ -194,9 +194,16 @@
 
     UITabBarController *tabs = [[UITabBarController alloc] init];
     tabs.viewControllers = @[sessionsNav, integrationsNav];
-    self.window.rootViewController = tabs;
+    // The startup screen IS the app root (TermX-style): the window
+    // shows it first, with Install on it, and the tabs are
+    // presented from it once the server is listening (or on
+    // Continue). The tabs are built here so the startup screen can
+    // present them without rebuilding the navigation stacks.
+    OCStartupViewController *startup = [[OCStartupViewController alloc] init];
+    startup.tabsViewController = tabs;
+    self.window.rootViewController = startup;
     [self.window makeKeyAndVisible];
-    [[OCEngine shared] appendEngineLogSync:@"Launch step 2/7: window and tabs shown"];
+    [[OCEngine shared] appendEngineLogSync:@"Launch step 2/7: window and startup screen shown"];
 
     // Background execution: Always location keeps the app (and the
     // in-process guest engine) alive in the background. The prompt
@@ -207,11 +214,12 @@
     [[OCEngine shared] appendEngineLogSync:@"Launch step 3/7: location started"];
 
     // Engine state only, then auto-start when it can start. The
-    // runtime framework is NOT loaded here: it loads on the first
-    // Start (see KernGlue ensureRuntimeLoaded), never at launch, so
-    // a framework that dies while loading cannot kill the launch.
-    // At launch the guest executor is nil, so auto-start skips
-    // cleanly and the app opens to the tabs and startup screen.
+    // runtime framework loads as part of the auto-start attempt
+    // now (background thread inside maybeAutoStartEngine): the
+    // 9e5e9bb trade-off of one manual Start per launch is gone —
+    // the user directed auto-start, and the launch crash is fixed.
+    // At launch the guest executor is nil, so the attempt loads it
+    // first instead of skipping.
     [[OCEngine shared] refreshState];
     [[OCEngine shared] appendEngineLogSync:@"Launch step 4/7: engine state refreshed"];
 #ifdef OC_KERNARIUM_LINKED
@@ -226,16 +234,6 @@
 #endif
     [[OCEngine shared] maybeAutoStartEngine];
     [[OCEngine shared] appendEngineLogSync:@"Launch step 6/7: auto-start check done"];
-    // Boot screen: Andarium-style, shows the real-time engine and
-    // server start, with a Log button opening the Engine tab's live
-    // log. It dismisses itself once the server is listening, and the
-    // user can always continue to the app from it, so a failed start
-    // never traps anyone on this screen.
-    OCStartupViewController *startup = [[OCStartupViewController alloc] init];
-    startup.modalPresentationStyle = UIModalPresentationFullScreen;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [tabs presentViewController:startup animated:NO completion:nil];
-    });
     [[OCEngine shared] appendEngineLogSync:@"Launch step 7/7: didFinishLaunching done"];
     // Scene attach, first attempt now, then the poll: the scene may
     // already be connected, or it may connect seconds later, or
@@ -253,6 +251,12 @@
     // answers that on the next log.
     OCCrashLogMarkDelegateStage("App became active");
     [self attachWindowToSceneIfNeeded];
+    // A foreground return is an auto-start chance too: the install
+    // may have finished while the app was backgrounded, or the
+    // launch-time attempt may have been skipped for setup not done
+    // yet. Guarded inside maybeAutoStartEngine (once per launch,
+    // never after an explicit Stop), so repeat calls are no-ops.
+    [[OCEngine shared] maybeAutoStartEngine];
 }
 
 - (void)applicationDidEnterBackground:(UIApplication *)application {

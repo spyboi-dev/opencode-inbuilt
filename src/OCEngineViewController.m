@@ -12,7 +12,6 @@
 @property (nonatomic, strong) UIButton *showDesktopButton;
 @property (nonatomic, strong) UIProgressView *progressView;
 @property (nonatomic, strong) UILabel *progressLabel;
-@property (nonatomic, strong) UIButton *setupButton;
 @property (nonatomic, strong) UIButton *startButton;
 @property (nonatomic, strong) UIButton *stopButton;
 @property (nonatomic, strong) UITextView *logTextView;
@@ -37,7 +36,9 @@
     self.progressView.translatesAutoresizingMaskIntoConstraints = NO;
     self.progressView.hidden = YES;
 
-    self.setupButton = [self buttonWithTitle:@"Run first-launch setup" action:@selector(setupTapped)];
+    // Install lives on the startup screen now (TermX-style,
+    // 2026-11-22), not here: there is no setup button on this tab
+    // any more. Start/Stop and the mode switch stay here.
     self.startButton = [self buttonWithTitle:@"Start engine" action:@selector(startTapped)];
     self.stopButton = [self buttonWithTitle:@"Stop engine" action:@selector(stopTapped)];
 
@@ -86,7 +87,7 @@
 
     UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[
         self.stateLabel, self.detailLabel, self.modeSegment, self.progressView, self.progressLabel,
-        self.setupButton, self.startButton, self.stopButton, self.showDesktopButton,
+        self.startButton, self.stopButton, self.showDesktopButton,
         logHeader, self.logTextView, self.shareLogButton]];
     stack.axis = UILayoutConstraintAxisVertical;
     stack.spacing = 16;
@@ -260,7 +261,6 @@
     } else {
         self.detailLabel.text = @"Engine not ready yet. Setup downloads the guest image first. The engine cannot start in this build.";
     }
-    self.setupButton.hidden = ([OCEngine shared].state != OCEngineStateNotInstalled && [OCEngine shared].state != OCEngineStateError);
     self.startButton.hidden = ([OCEngine shared].state == OCEngineStateRunning || [OCEngine shared].state == OCEngineStateStarting);
     // When the engine cannot start, the button looks unavailable
     // (dimmed and disabled) instead of looking tappable and then
@@ -290,52 +290,6 @@
 - (void)showDesktopTapped {
     OCDesktopViewController *desktop = [[OCDesktopViewController alloc] init];
     [self.navigationController pushViewController:desktop animated:YES];
-}
-
-- (void)setupTapped {
-    // Guard: ignore the tap while a setup chain is already running.
-    // Without this, a second tap started a second download chain over
-    // the same files and the completion block could fire twice.
-    if ([OCEngine shared].state == OCEngineStateInstalling) return;
-    self.setupButton.enabled = NO;
-    self.progressView.hidden = NO;
-    self.progressView.progress = 0;
-    if (![OCEngine shared].engineCanStart) {
-        // Setup only downloads the guest image in this build; the
-        // guest core is not linked yet, so the engine cannot start
-        // after setup. Say so up front instead of implying otherwise.
-        self.progressLabel.text = @"Setup only downloads the guest image. The engine cannot start yet.";
-    } else {
-        self.progressLabel.text = @"Downloading the Debian guest image (Node and OpenCode baked in)…";
-    }
-    [[OCEngine shared] runFirstLaunchSetupWithProgress:^(double fraction, NSString *message) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            self.progressView.progress = (float)fraction;
-            self.progressLabel.text = message;
-        });
-    } completion:^(BOOL done, NSError *error) {
-        // OCEngine already calls completion on the main queue; dispatch
-        // again defensively, so a UI update can never run off-main
-        // even if a future caller invokes setup from a background queue.
-        dispatch_async(dispatch_get_main_queue(), ^{
-            self.setupButton.enabled = YES;
-            self.progressView.hidden = YES;
-            if (done) {
-                if (![OCEngine shared].engineCanStart) {
-                    self.progressLabel.text = @"Setup done. Guest image saved. The engine cannot start yet.";
-                } else {
-                    self.progressLabel.text = @"Setup done. Guest image downloaded and verified.";
-                }
-                [[OCEngine shared] refreshState];
-                [self refresh];
-            } else {
-                NSString *msg = error.localizedDescription ?: @"Unknown error";
-                self.progressLabel.text = [NSString stringWithFormat:@"Setup failed: %@", msg];
-                [[OCEngine shared] refreshState];
-                [self refresh];
-            }
-        });
-    }];
 }
 
 - (void)startTapped {

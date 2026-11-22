@@ -79,21 +79,78 @@ static NSString *const kGuestImageInstalled = @"oc.guestImageInstalled";
 // Start the engine on app launch when it can start. Once per
 // launch; every guard is checked again here so a second call (or a
 // foreground return) cannot restart an engine the user stopped.
+//
+// Two skips deliberately do NOT consume the one attempt: setup not
+// done yet (the startup screen's Install finishes it, and the
+// state observer calls this again when it does), and a failed
+// setup/start (the user retries from the startup screen, and a
+// later state change must be able to start). A skip that consumed
+// the attempt would leave a fresh install unable to auto-start
+// after its own Install.
 - (void)maybeAutoStartEngine {
     if (self.autoStartAttempted) return;
-    self.autoStartAttempted = YES;
-    if (self.state == OCEngineStateRunning || self.state == OCEngineStateStarting) return;
-    if (self.userStoppedEngineThisSession) return;
-    if (!self.guestCoreLinked) {
-        [self appendEngineLogSync:@"Auto-start skipped: runtime not loaded yet, start the engine from the Engine tab"];
+    if (self.state == OCEngineStateRunning || self.state == OCEngineStateStarting) {
+        self.autoStartAttempted = YES;
+        return;
+    }
+    if (self.userStoppedEngineThisSession) {
+        self.autoStartAttempted = YES;
         return;
     }
     if (self.state == OCEngineStateNotInstalled || self.state == OCEngineStateInstalling) {
         [self appendEngineLogSync:@"Auto-start skipped: first-launch setup not done yet"];
         return;
     }
-    [self appendEngineLogSync:@"Auto-start: starting engine"];
+    if (self.state == OCEngineStateError) {
+        [self appendEngineLogSync:@"Auto-start skipped: setup or start failed — Install or Start from the startup screen"];
+        return;
+    }
+    // This is a real attempt now: consume the flag before any async
+    // work, so a second call (observer, foreground return) cannot
+    // start a second engine behind this one.
+    self.autoStartAttempted = YES;
     __weak typeof(self) weakSelf = self;
+    if (!self.guestCoreLinked) {
+        if (!self.guestCoreLoadable) {
+            [self appendEngineLogSync:@"Auto-start skipped: runtime cannot load in this build"];
+            return;
+        }
+        // Load the runtime on a background thread (dlopen of the
+        // 52 MB framework), then start on the main thread: boot
+        // and serve both expect the main thread, and the UI must
+        // show Starting while the load is in flight. The state
+        // flips to Starting FIRST so the startup screen (and the
+        // Engine tab) show the attempt and disable their Start
+        // buttons — otherwise a manual Start during the load
+        // would race this one into a second boot.
+        [self setState:OCEngineStateStarting];
+        [self appendEngineLogSync:@"Auto-start: loading Kernarium runtime..."];
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+#ifdef OC_KERNARIUM_LINKED
+            BOOL loaded = [[OCKernGlue shared] ensureRuntimeLoaded];
+#else
+            BOOL loaded = NO;
+#endif
+            dispatch_async(dispatch_get_main_queue(), ^{
+                typeof(self) strongSelf = weakSelf;
+                if (!strongSelf) return;
+                if (!loaded) {
+                    [strongSelf appendEngineLogSync:@"Auto-start failed: the Kernarium runtime did not load"];
+                    [strongSelf setState:OCEngineStateCorePending];
+                    return;
+                }
+                [strongSelf startEngineWithCompletion:^(BOOL started, NSError * _Nullable error) {
+                    typeof(self) strongSelf2 = weakSelf;
+                    if (!strongSelf2) return;
+                    if (!started) {
+                        [strongSelf2 appendEngineLogSync:[NSString stringWithFormat:@"Auto-start failed: %@", error.localizedDescription ?: @"unknown"]];
+                    }
+                }];
+            });
+        });
+        return;
+    }
+    [self appendEngineLogSync:@"Auto-start: starting engine"];
     [self startEngineWithCompletion:^(BOOL started, NSError * _Nullable error) {
         typeof(self) strongSelf = weakSelf;
         if (!strongSelf) return;

@@ -621,6 +621,26 @@ jobs:
           [ -f build/Payload/OpenCode.app/OpenCodeLogo.png ] \
             || { echo "OpenCodeLogo.png missing from the bundle"; exit 1; }
           echo "app icon and startup logo present"
+          # Guest image hashes (OCGuestInstall.m): the real SHA-256
+          # values from rootfs-build/SHA256SUMS must be in the
+          # binary, and no TODO placeholder may remain. On
+          # 2026-11-22 the user downloaded the 1.16 GB image three
+          # times and every one failed the hash check against a
+          # literal "TODO-FILL-..." placeholder string — the
+          # expected hashes had never been filled in. The chunked
+          # delivery's part names must be present too.
+          strings build/Payload/OpenCode.app/OpenCode | grep -q 'b1018c9357236ea2355bff488eda32171cc25c450997cccd7052b15992d3a8fa' \
+            || { echo "guest .gz SHA-256 missing from the app binary"; exit 1; }
+          strings build/Payload/OpenCode.app/OpenCode | grep -q 'c7511200d3e23e21bcd68e63904e489b4724e24c263464e92c8dd72963a83e1f' \
+            || { echo "guest .ext4 SHA-256 missing from the app binary"; exit 1; }
+          if strings build/Payload/OpenCode.app/OpenCode | grep -q 'TODO-FILL'; then
+            echo "TODO placeholder hash still in the app binary"; exit 1
+          fi
+          strings build/Payload/OpenCode.app/OpenCode | grep -q 'opencode-debian-trixie-arm64.ext4.gz.part00' \
+            || { echo "guest chunk part00 name missing from the app binary"; exit 1; }
+          strings build/Payload/OpenCode.app/OpenCode | grep -q 'opencode-debian-trixie-arm64.ext4.gz.part11' \
+            || { echo "guest chunk part11 name missing from the app binary"; exit 1; }
+          echo "guest image hashes and chunk names present, no TODO placeholder"
           echo "No Kernarium framework may appear as a load command at"
           echo "all (strong or weak): the app must be dlopen-only. The"
           echo "old working build had no dyld-loaded frameworks (core"
