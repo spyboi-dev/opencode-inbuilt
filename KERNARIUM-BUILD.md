@@ -8,9 +8,227 @@ launch-path hypothesis is closed. The scene investigation (why UIKit
 never called the scene method in the 07:57 run) continues on that
 settled basis.
 
-# Kernarium Engine Build — status 2026-11-22 (updated ~03:50 UTC)
+# Kernarium Engine Build — status 2026-11-22 (updated ~04:57 UTC)
 
-## Status: GREEN — guest install hash fix + TermX-style startup root + engine auto-start, run 44980528771, verified
+## Status: GREEN — no manual engine controls, Install-time mode choice, install race fix + auto-start retry, run 44985933495, verified
+
+Run
+[44985933495](https://github.com/spyboi-dev/opencode-inbuilt/actions/runs/44985933495)
+("Build Kernarium engine + IPA", branch `kernarium-engine`, head
+`d6cb75f`) completed 2026-11-22 ~04:54 UTC with conclusion
+**success** in 16m32s, first try. No retries were needed: the
+patch compiled clean locally first (clang-18 + iPhoneOS 26.5 SDK,
+zero warnings, all touched files, both with and without
+`OC_KERNARIUM_LINKED`), and the workflow's own verify step passed.
+
+IPA: `mac-ipas/OpenCode-Inbuilt-kernarium-d6cb75f.ipa`
+(also `mac-ipas/OpenCode-Inbuilt-kernarium.ipa`), 25,151,483 bytes,
+SHA-256
+`c6eb36c19609cf4f449fbc596e92ea222159ed9b8f48f04e6a74f44c5521d6d5`.
+
+This build folds in the 48ab330 redesign/animation commit (one-page
+startup, staggered entrance, Continue to app): its run 44984856083
+was cancelled at 15m2s once d6cb75f was pushed, so 48ab330 never
+shipped as its own IPA — everything in it is in this one.
+
+### Device evidence that drove this build
+
+Three directions from the user on 2026-11-22, all in this build:
+
+1. **09:49 IST, TermX screenshot** — "animate it first shaw
+   install button then one loading then anathee one by one"
+   (staggered entrance; done in 48ab330, shipped here).
+2. **09:56 IST, Engine tab screenshot** — "why is the install-type
+   picker (CLI / Desktop UI) on the Engine tab instead of logs;
+   ask it when the user taps Install instead." The same
+   screenshot's log showed Install failing twice at 09:54:47 and
+   09:54:51 with "First-launch setup failed: install already in
+   progress", ending "State: Not installed" at 09:54:53.
+3. **09:57 IST** — "why the start engine button there engine
+   should be automated not stop or start menualiy."
+
+### Root causes (verified in source, not guessed)
+
+**The install race.** Two compounding defects, both in
+`OCEngine.m`:
+
+- `refreshState` guarded Running/Starting against being clobbered
+  back to Installed/NotInstalled — but NOT Installing. While a
+  download was in flight, `kGuestImageInstalled` was still NO, so
+  any `refreshState` call (Engine tab `viewWillAppear`, the
+  startup screen's 0.5s poll, launch step 4) reset the state to
+  NotInstalled mid-download. That re-enabled the Install button.
+- `runFirstLaunchSetupWithProgress` guarded re-entry only by
+  checking `state == Installing` — which the clobber had just
+  defeated. The second tap sailed through to `OCGuestInstall`,
+  whose static `s_installInProgress` guard answered "install
+  already in progress", and the completion handler treated that
+  as a setup failure: it logged "First-launch setup failed" and
+  set state to Error — killing the first download's state. The
+  next `refreshState` then re-derived NotInstalled. That is the
+  exact 09:54:47 / 09:54:51 / 09:54:53 sequence in his log.
+
+**The mode picker and the Start/Stop buttons** were design, not
+bugs: the Engine tab carried an install-time decision (CLI vs
+Desktop UI) and manual controls for an engine the user wants
+fully automatic.
+
+### What changed (commit d6cb75f, 6 files, +285/-249)
+
+1. **Install race, fixed at the root** (`OCEngine.m`).
+   `refreshState` now also returns early while Installing.
+   `runFirstLaunchSetupWithProgress` coalesces on a
+   `setupInFlight` flag (`@synchronized`), not on the state
+   variable: a second call while one is in flight is a silent
+   no-op — no error, no log failure, no state change; the
+   in-flight attempt owns the outcome. Backstop: if
+   `installGuestTo` ever still answers "install already in
+   progress", the completion handler logs "duplicate install
+   ignored" and leaves the state alone instead of flipping to
+   Error. The button is disabled while Installing (it already
+   was — the clobber is what re-enabled it).
+2. **Mode choice asked at Install time**
+   (`OCStartupViewController.m`). The Engine tab's CLI / Desktop
+   UI segmented control is gone. Tapping Install on the startup
+   screen now presents an action sheet — CLI or Desktop UI +
+   Cancel — then proceeds with the install in the chosen mode,
+   persisted as `oc.engineMode`. **Same image, confirmed from
+   code:** `OCGuestInstall.installGuestTo` takes no mode and
+   always downloads the same release `rootfs-20261120` (12
+   chunks); the mode only changes what the guest boots into
+   (`consoleBootstrapForDesktop:` / `checkHealthWithCompletion`).
+   The image already contains both the OpenCode CLI and the
+   desktop app, so the choice is a mode preference that takes
+   effect at boot — nothing is ever downloaded twice. After
+   install there is currently no mode switch UI: the choice is
+   made at Install and persists.
+3. **No manual Start/Stop anywhere.** Engine tab: mode segment,
+   Start and Stop buttons removed (state + Logs + Copy log only);
+   detail line now says plainly what each state means and what
+   happens next. Integrations: the Start/Stop engine row removed
+   (Engine section is one row, opening the Engine screen).
+   Startup screen: Installed/Stopped/CorePending now show
+   "Starting…" disabled instead of a Start button, and the
+   manual-start branch of `actionTapped` is gone. Reason lines
+   updated (no "Tap Start below" anywhere): a start failure says
+   "It tries again by itself", a setup failure says Install
+   below tries again.
+4. **Automatic retry after a failed start** (`OCEngine.m`).
+   `maybeAutoStartEngine` on Error now retries when the image is
+   installed (falls through to a fresh attempt); a failed setup
+   (Error + image not installed) still skips — the startup
+   screen's Install retries that, a 1.16 GB download does not
+   restart on its own. `noteAutoStartFailed` releases the
+   once-per-launch attempt and schedules one 60 s retry timer per
+   launch (reset when the server is next confirmed healthy), and
+   the log says plainly: "Auto-start failed: … Retrying in 60s;
+   bringing the app to the foreground tries again." A foreground
+   return retries too.
+5. **`userStoppedEngineThisSession` removed** (header + all uses).
+   Dead with no Stop button. `stopEngine` itself is KEPT — it is
+   still used by the health timer's 3-strike restart and the
+   mode-switch restart (and its serve-generation guard now says
+   so). `AUTO-START.md` updated to match: the stop flag, the
+   "once per launch, never cleared" rule and the Stop/Start test
+   steps are superseded (dated note at the top).
+6. **"Show desktop" stays on the Engine tab** — deliberate
+   judgment call, not an oversight. It is the only way to view
+   the desktop in Desktop UI mode (no other screen presents
+   `OCDesktopViewController`), and it only appears while the
+   desktop is Running/Starting in Desktop UI mode. The user never
+   named it; if he wants it gone too, it is a one-line removal.
+   Flagged here so the next coordinator does not "fix" it
+   silently.
+
+KEPT: one-page startup screen + staggered entrance + Continue to
+app (48ab330), poll scene attach, build-hash marker, lifecycle
+markers, official icon, scene delegate, chunked download,
+auto-start. The swizzle path was NOT restored. Nothing about
+LiveContainer was asked (standing rule).
+
+### Host verification (independent, from the downloaded IPA)
+
+Fresh Python verifier (`/tmp/verify-d6cb75f.py`, reads the IPA zip
+directly, no extraction): arm64, MH_EXECUTE, MinOS 15.0.0,
+SDK 27.0.0, LC_MAIN entryoff 0x4000, 5 segments, zero Kernarium
+load commands, code signature valid (130/130 SHA-256 page
+hashes), all four frameworks embedded, 5 app PNGs (AppIcon1024,
+3 sizes, OpenCodeLogo), all markers present (DYLD OK, BOOT.txt,
+Calling UIApplicationMain, AppDelegate +initialize, AppDelegate
+-init done, Scene config requested, Window attached to scene,
+Window attached to scene (poll), App became active, all 7 launch
+steps, build id `d6cb75f`), both real hash strings and both chunk
+part names present, no `TODO-FILL`, no `BUILD-NOTE`, new-behaviour
+strings present (mode sheet "Install OpenCode" / "Choose how
+OpenCode runs", "Automatic retry: starting engine", "Retrying in
+60s", "duplicate install ignored", "Auto-start: retrying after a
+failed start", Engine tab details, "Show desktop"), no "Stop
+engine" string, no "Start engine" string. Bundle id
+com.spyboy.opencode, version 1.0.
+
+Three verifier lessons (the parser, not the binary, was wrong
+all three times — the first run failed 15 checks):
+
+- Marker checks must be SUBSTRING searches (`grep -q`), not set
+  membership: most markers sit inside longer literals
+  ("Launch step 1/7: …", "Choose how OpenCode runs. Both use
+  the same guest image.").
+- NSString literals containing a non-ASCII char (the em dash in
+  the Engine tab detail lines) are emitted as UTF-16 in
+  `__TEXT,__ustring`: extract UTF-16LE runs too, or those strings
+  read as missing.
+- In the CodeDirectory hash array, the code-slot hashes come
+  FIRST (page i at array index i); the special-slot hashes follow
+  them. The "special first" reading fails 0/130 — page 0's hash
+  sits at array offset 0, verified directly.
+
+### Staging note (for the next coordinator)
+
+`src/OCEngine.m` in the shared checkout NO LONGER carries the
+desktop coordinator's uncommitted bootstrap hunks: they were
+restored to this branch's HEAD while preparing this commit (the
+server-first bootstrap + `pgrep ai.opencode` changes live on
+kernarium-desktop as 9ccab19 — this branch keeps the old
+"PROGRESS 90 Starting desktop…" bootstrap until the desktop
+branch merges). `.gitignore` and
+`rootfs-build/opencode-guest-additions.sh` still carry
+uncommitted desktop modifications in this checkout — do NOT stage
+or commit them on kernarium-engine. Only the six intended files
+were staged here (verified with `git diff --cached` before
+committing).
+
+### Device test steps (fresh install — delete the old app first)
+
+1. Install `OpenCode-Inbuilt-kernarium-d6cb75f.ipa` in
+   LiveContainer. The whole startup screen must fit on one page
+   with Install AND Continue to app both on screen, no scrolling.
+   Watch the entrance: Install shows first, then the five
+   checklist rows light up one by one, then Continue to app +
+   Log.
+2. Tap **Continue to app** (no install): the tabs must open with
+   no install and no engine start; Threads/Files show their
+   existing engine-down inline states. Swipe down from the top
+   strip to return to the startup screen.
+3. Tap **Install**: an action sheet must ask CLI or Desktop UI
+   first (Cancel backs out, nothing downloads). Pick one — the
+   12 parts download, verify, extract, and the guest auto-boots;
+   the tabs present themselves once the server is listening.
+4. **Race check:** while the download is running, the Install
+   button must stay "Downloading…" and disabled — no second tap
+   can get through, and the log must never show "install already
+   in progress" again.
+5. Engine tab (Integrations → OpenCode engine): state + Logs +
+   Copy log ONLY — no mode picker, no Start, no Stop. In
+   Desktop UI mode while running, a "Show desktop" button appears.
+6. Kill the app and relaunch: the engine must auto-start again
+   with no tap. If a start fails, the log must say "Retrying in
+   60s" and the engine must try again by itself (or on the next
+   foreground return) — never a button to recover.
+7. Then the usual checks: `/api/info` (server on 4096), a chat
+   with a real tool call, `docker run hello-world`, app.py on port
+   8000.
+
+## Previous build (d86406f) — guest install hash fix + TermX-style startup root + engine auto-start
 
 Run
 [44980528771](https://github.com/spyboi-dev/opencode-inbuilt/actions/runs/44980528771)
@@ -2327,11 +2545,13 @@ at boot. **Do not merge without the persistence decision.**
 ## Still unproven — needs the user's on-device test
 
 Nothing about the guest has run: boot to `login: `, vsock bridge +
-`GET /api/info` + SSE, Desktop UI window/tap/typing, mode-switch restart,
-Stop → Start, background keep-alive, `docker run hello-world`. Restart-in-place
+`GET /api/info` + SSE, Desktop UI window/tap/typing, Install-time
+mode choice (CLI vs Desktop UI), automatic retry after a failed
+start, background keep-alive, `docker run hello-world`. Restart-in-place
 is specifically doubtful — upstream docs say a host-stopped guest can't be
-released in the same process, so mode switches and Stop → Start may need an app
-relaunch; the code attempts the restart and surfaces the error honestly.
+released in the same process, so the health timer's restart and a
+mode-switch restart may need an app relaunch; the code attempts the
+restart and surfaces the error honestly.
 `KRuntime_6_18_4K` does not exist anywhere on this VM (only the Android
 flavour in the Andarium IPA); it must be Mac-built by the new workflow
 (`package-ios-frameworks.sh --sdk device`). The three GPU frameworks are
