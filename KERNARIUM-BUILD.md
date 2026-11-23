@@ -126,7 +126,7 @@ copies those same files, so they are identical by construction.
   proven pipeline, and the next code change goes through the
   local path.
 
-## Status: TermX auto-start/update fix ported to OpenCode — LOCAL BUILD <BUILD_ID>, verified
+## Status: TermX auto-start/update fix ported to OpenCode — LOCAL BUILD 084ae47, verified
 
 User direction 2026-11-23 08:01 IST: "build the oc too" — the
 TermX fix (auto-start racing the Update button, commits c2f4ed5 +
@@ -134,9 +134,9 @@ cc36b93 + 28f2191) applied to OpenCode, built locally with
 `./build-local-kernarium.sh`. No GitHub Actions run for this
 build.
 
-IPA: `mac-ipas/OpenCode-Inbuilt-kernarium-<BUILD_ID>.ipa`
-(also `build-local/OpenCode-Inbuilt-kernarium.ipa`), <SIZE> bytes,
-SHA-256 `<SHA>`. Build id `<BUILD_ID>`.
+IPA: `mac-ipas/OpenCode-Inbuilt-kernarium-084ae47.ipa`
+(also `build-local/OpenCode-Inbuilt-kernarium.ipa`), 25,179,457 bytes,
+SHA-256 `a0de22acc079ea62bf366274f1c8b2aa399cd8447a7bc284283fbb3d9f415e90`. Build id `084ae47`.
 
 ### Audit findings — both TermX issues exist in OpenCode
 
@@ -172,7 +172,7 @@ NotInstalled) and Continue to app cannot race (auto-start
 presents the same tabs), so the pending choice that matters is
 Update vs boot-as-is — exactly the TermX 28f2191 shape.
 
-### What changed (commit <BUILD_ID>, 5 files)
+### What changed (commit 084ae47, 7 files)
 
 1. **`OCGuestInstall.h/.m` — boot with the image you have.**
    `guestInstalledAt:` now accepts exists + exact size +
@@ -244,7 +244,7 @@ was asked (standing rule).
 ALL PASS: arm64, MH_EXECUTE, MinOS 15.0.0, SDK 26.5.0, LC_MAIN
 0x4000, 5 segments, zero Kernarium load commands, code
 signature valid, all four frameworks embedded, icons present,
-all markers incl. build id `<BUILD_ID>` and all 7 launch steps,
+all markers incl. build id `084ae47` and all 7 launch steps,
 both guest hashes + chunk part names, no TODO-FILL, no
 BUILD-NOTE, no "Stop engine"/"Start engine" strings, new
 strings present. Local compile clean (clang-18, zero warnings).
