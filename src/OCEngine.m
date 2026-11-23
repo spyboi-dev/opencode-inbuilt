@@ -42,7 +42,17 @@ static NSString *const kGuestImageInstalled = @"oc.guestImageInstalled";
 @property (nonatomic, strong, nullable) NSTimer *autoStartRetryTimer;
 @property (nonatomic, assign) BOOL autoStartRetryUsed;
 @property (nonatomic, assign) NSUInteger serveGeneration;
+// Launch update check (TermX c2f4ed5 + 28f2191): YES while the
+// background check is still settling whether the installed image
+// is this build's release; YES once it has settled on an older
+// release. Readwrite here so the check can set them; the header
+// exposes them readonly.
+@property (nonatomic, assign) BOOL updateAvailable;
+@property (nonatomic, assign) BOOL launchUpdateCheckInFlight;
+@property (nonatomic, assign) BOOL launchUpdateCheckStarted;
 - (void)startServeWithCompletion:(void (^)(BOOL, NSError * _Nullable))completion;
+- (void)checkForImageUpdateForLaunch;
+- (void)noteAutoStartFailed:(NSString *)reason;
 @end
 
 @implementation OCEngine
@@ -56,8 +66,128 @@ static NSString *const kGuestImageInstalled = @"oc.guestImageInstalled";
 - (instancetype)init {
     if ((self = [super init])) {
         _stateObserverEntries = [NSMutableArray array];
+        // The launch update check starts here, at first access:
+        // AppDelegate calls refreshState then maybeAutoStartEngine
+        // right after, so the in-flight flag must already be set
+        // for the auto-start to wait on it.
+        [self startLaunchUpdateCheckIfNeeded];
     }
     return self;
+}
+
+// The guest image path, computed directly (engineDirectory/guest
+// + name) instead of through OCKernGlue: the glue's guestImagePath
+// calls [OCEngine shared], and this runs from init inside
+// shared's dispatch_once — going through the glue would deadlock.
+// Identical path either way (KernGlue guestDirectory is
+// engineDirectory/guest).
+- (NSString *)guestImagePath {
+    return [[[self engineDirectory] stringByAppendingPathComponent:@"guest"]
+        stringByAppendingPathComponent:kOCGuestImageName];
+}
+
+// Launch update check (TermX c2f4ed5 + 28f2191): settles whether
+// the installed image is this build's release, on a background
+// queue — never the main thread, it can hash 4.46 GB. It sets
+// updateAvailable, and when a newer image is available it holds
+// the guest stopped (Installed -> Stopped) so the startup screen
+// offers a tappable Update button (and a Start button to boot
+// as-is) instead of racing the auto-boot. Runs once per launch,
+// only when an image is installed. The in-flight flag is set
+// synchronously here so the auto-start call right after this in
+// didFinishLaunching waits instead of racing.
+- (void)startLaunchUpdateCheckIfNeeded {
+    if (self.launchUpdateCheckStarted) return;
+    self.launchUpdateCheckStarted = YES;
+    if (!self.guestImageInstalled) return;
+    _launchUpdateCheckInFlight = YES;
+    [self checkForImageUpdateForLaunch];
+}
+
+- (void)checkForImageUpdateForLaunch {
+    NSString *imagePath = [self guestImagePath];
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        __strong typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        // Cheap first: the fingerprint recorded by the install
+        // pipeline carries the hash it verified. A recorded hash
+        // answers with no 4.46 GB hash at all — equal means
+        // current, different means an older release.
+        NSString *recordedHash = [OCGuestInstall installedImageVerifiedHashAt:imagePath];
+        BOOL answered = recordedHash != nil;
+        BOOL current = answered && [recordedHash isEqualToString:kOCGuestImageSHA256];
+        if (!answered) {
+            // No fingerprint hash to answer from (image installed
+            // by an older build, or the fingerprint predates the
+            // hash field): one full hash settles it, and the hash
+            // is recorded in the fingerprint either way, so the
+            // next launch answers cheaply — a mismatch is an older
+            // release, not a reason to hash 4.46 GB every launch.
+            // (TermX records only on success; with a 4.46 GB
+            // image the repeated hash costs too much to copy.)
+            NSString *hash = [OCGuestInstall SHA256OfImageAt:imagePath];
+            if (hash) {
+                current = [hash isEqualToString:kOCGuestImageSHA256];
+                NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:imagePath error:nil];
+                if (attrs) [OCGuestInstall recordVerifiedFingerprintForPath:imagePath attrs:attrs hash:hash];
+            } else {
+                // Unreadable file: not current; the Update button
+                // reinstalls it, and boot refuses it as damaged.
+                current = NO;
+            }
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(self) strongSelf2 = weakSelf;
+            if (!strongSelf2 || !strongSelf2->_launchUpdateCheckInFlight) return;
+            strongSelf2->_launchUpdateCheckInFlight = NO;
+            // If the user tapped Install meanwhile, the install
+            // owns the flag now and this completion stands down.
+            if (strongSelf2.setupInFlight || strongSelf2.state == OCEngineStateInstalling) return;
+            // An update holds the boot: the guest stays stopped so
+            // the startup screen shows a tappable Update button
+            // (and a Start button to boot as-is) instead of racing
+            // the auto-boot into "Starting...". Only while the
+            // guest is still Installed — if it already booted, the
+            // Update button is offered from Running instead. The
+            // state moves first, so no refresh in between can
+            // schedule the auto-boot.
+            if (!current && strongSelf2.state == OCEngineStateInstalled) {
+                [strongSelf2 appendEngineLogSync:@"Update available — tap Update to install it, or Start to boot the image you have"];
+                [strongSelf2 setState:OCEngineStateStopped];
+            }
+            strongSelf2.updateAvailable = !current;
+            [strongSelf2 appendEngineLogSync:[NSString stringWithFormat:@"Image update check: installed image is %@", current ? @"the current release" : @"an older release — update available"]];
+            if (current) {
+                // Current release: the auto-start that waited for
+                // this check can go now, without waiting for a
+                // foreground return.
+                [strongSelf2 maybeAutoStartEngine];
+            }
+        });
+    });
+}
+
+// Boot the installed image as-is, update or no update. Only from
+// the stopped-with-update state (the startup screen's secondary
+// Start button). The update stays available: updateAvailable is
+// untouched, so the next launch (and the startup screen after
+// this guest stops) still offers it. A failure here goes through
+// the normal auto-start retry: the state leaves Stopped, so the
+// hold no longer applies.
+- (void)bootInstalledImageAsIs {
+    if (self.state != OCEngineStateStopped || !self.updateAvailable) return;
+    if (!self.guestImageInstalled) return;
+    self.autoStartAttempted = YES;
+    [self appendEngineLogSync:@"Booting installed image as-is (update still available)"];
+    __weak typeof(self) weakSelf = self;
+    [self startEngineWithCompletion:^(BOOL started, NSError * _Nullable error) {
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        if (!started) {
+            [strongSelf noteAutoStartFailed:error.localizedDescription ?: @"unknown"];
+        }
+    }];
 }
 
 - (id)addStateChangeObserver:(void (^)(OCEngineState))observer {
@@ -130,6 +260,14 @@ static NSString *const kGuestImageInstalled = @"oc.guestImageInstalled";
 }
 
 - (void)maybeAutoStartEngine {
+    // Wait for the launch update check to settle before
+    // auto-starting: if a newer image is available the engine
+    // holds the guest stopped and the Update button is the choice,
+    // not a race with the auto-boot. The poll tick / the check's
+    // own completion re-enters here once it has settled, so
+    // nothing is lost by waiting — and the attempt is NOT
+    // consumed, so a current-release image still boots.
+    if (self.launchUpdateCheckInFlight) return;
     if (self.autoStartAttempted) return;
     if (self.state == OCEngineStateRunning || self.state == OCEngineStateStarting) {
         self.autoStartAttempted = YES;
@@ -137,6 +275,15 @@ static NSString *const kGuestImageInstalled = @"oc.guestImageInstalled";
     }
     if (self.state == OCEngineStateNotInstalled || self.state == OCEngineStateInstalling) {
         [self appendEngineLogSync:@"Auto-start skipped: first-launch setup not done yet"];
+        return;
+    }
+    // An update holds the boot: the guest stays stopped so the
+    // startup screen offers a tappable Update button (and a Start
+    // button to boot as-is). The Start button goes through
+    // bootInstalledImageAsIs, not this method, so it is never
+    // blocked here.
+    if (self.updateAvailable && self.state == OCEngineStateStopped) {
+        [self appendEngineLogSync:@"Auto-start held: update available — Update or Start on the startup screen"];
         return;
     }
     if (self.state == OCEngineStateError) {
@@ -298,6 +445,12 @@ static NSString *const kGuestImageInstalled = @"oc.guestImageInstalled";
     // Installed so auto-start can retry it.
     if (self.state == OCEngineStateRunning || self.state == OCEngineStateStarting ||
         self.state == OCEngineStateInstalling) return;
+    // Do not undo the update hold: while the guest is stopped
+    // with an update available, the state must stay Stopped so
+    // the startup screen keeps offering Update / Start. Without
+    // this, re-deriving from the install flag would flip it back
+    // to Installed and the next auto-start would race the choice.
+    if (self.updateAvailable && self.state == OCEngineStateStopped) return;
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
     if (![d boolForKey:kGuestImageInstalled]) { [self setState:OCEngineStateNotInstalled]; return; }
     [self setState:OCEngineStateInstalled];
@@ -566,6 +719,11 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
         @synchronized (strongSelf) { strongSelf.setupInFlight = NO; }
         if (ok) {
             [[NSUserDefaults standardUserDefaults] setBool:YES forKey:kGuestImageInstalled];
+            // The new image is the current release: the update is
+            // done, so clear the flag BEFORE the state flips to
+            // Installed — the observer auto-starts from there, and
+            // a still-set flag would hold the fresh install.
+            self.updateAvailable = NO;
             [strongSelf appendEngineLogSync:@"First-launch setup done: guest image downloaded and verified"];
             [strongSelf setState:OCEngineStateInstalled];
             dispatch_async(dispatch_get_main_queue(), ^{ completion(YES, nil); });

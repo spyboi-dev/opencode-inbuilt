@@ -172,7 +172,14 @@ new_strings = ["Install OpenCode", "Choose how OpenCode runs",
                "Auto-start: retrying after a failed start",
                "it tries again by itself",
                "Guest image not installed yet",
-               "Show desktop"]
+               "Show desktop",
+               # TermX auto-start/update port (2026-11-23)
+               "Update available",
+               "Image update check",
+               "Booting installed image as-is",
+               "Auto-start held",
+               "the download is damaged",
+               "guest image is damaged"]
 for m in new_strings:
     check(f"new string present: {m}", m in blob)
 # Removed controls must be gone as button titles

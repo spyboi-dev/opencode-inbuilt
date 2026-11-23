@@ -126,6 +126,150 @@ copies those same files, so they are identical by construction.
   proven pipeline, and the next code change goes through the
   local path.
 
+## Status: TermX auto-start/update fix ported to OpenCode — LOCAL BUILD <BUILD_ID>, verified
+
+User direction 2026-11-23 08:01 IST: "build the oc too" — the
+TermX fix (auto-start racing the Update button, commits c2f4ed5 +
+cc36b93 + 28f2191) applied to OpenCode, built locally with
+`./build-local-kernarium.sh`. No GitHub Actions run for this
+build.
+
+IPA: `mac-ipas/OpenCode-Inbuilt-kernarium-<BUILD_ID>.ipa`
+(also `build-local/OpenCode-Inbuilt-kernarium.ipa`), <SIZE> bytes,
+SHA-256 `<SHA>`. Build id `<BUILD_ID>`.
+
+### Audit findings — both TermX issues exist in OpenCode
+
+(a) **An older image fails instead of booting — CONFIRMED.**
+`src/OCGuestInstall.m` `guestInstalledAt:` (old lines ~197-215)
+required the exact size (4,462,739,456) AND the exact SHA-256 of
+the current release (`c7511200…`); any other image answered
+"guest image hash mismatch — reinstall". That refusal bites on
+the BOOT path, not just Install: `src/KernGlue.m:245`
+(`bootWithCompletion:`) fails the boot with GlueError(2, that
+string) when the check fails — so a phone holding an older image
+shows Installed (the state flag trusts NSUserDefaults), auto-
+starts, then dies with an Engine error. The install pipeline
+made it worse: `installGuestToOnQueue:` deleted `rootfsPath` up
+front and extracted directly onto the live path, so a failed
+update bricked the working image. Honest scope: this is LATENT
+on device today — every OC build so far used the same image
+(`rootfs-20261120`; the dd734a5-era builds carried TODO
+placeholder hashes and could never install one), so no phone
+holds a mismatching OC image yet. It bites the moment a new
+image release ships. The fix makes that release safe.
+
+(b) **Auto-start races a pending user choice — CONFIRMED in the
+update shape.** `AppDelegate` calls `maybeAutoStartEngine` at
+launch (step 6/7) and on every foreground return, and the
+startup screen's observer calls it when the state flips to
+Installed. There was no update concept at all, so nothing to
+wait on today — but once (a) is fixed and an older image is
+installed, the launch auto-start would boot the old image
+immediately and the user would never get to tap Update. The
+Install-time mode choice cannot race (auto-start skips when
+NotInstalled) and Continue to app cannot race (auto-start
+presents the same tabs), so the pending choice that matters is
+Update vs boot-as-is — exactly the TermX 28f2191 shape.
+
+### What changed (commit <BUILD_ID>, 5 files)
+
+1. **`OCGuestInstall.h/.m` — boot with the image you have.**
+   `guestInstalledAt:` now accepts exists + exact size +
+   read-only + (recorded fingerprint, whatever release it was
+   verified as, OR ext4 superblock magic 0xEF53 at offset 1080).
+   Only a file that cannot be a guest image at all (wrong size,
+   not ext4) is damaged. New fingerprint
+   (`oc.verified-rootfs` in NSUserDefaults: path, size, mtime,
+   sha256), `installedImageIsCurrentReleaseAt:`,
+   `installedImageVerifiedHashAt:`, `SHA256OfImageAt:`,
+   `imageLooksLikeExt4At:`, `guestImageHashValidAt:` (pipeline
+   verify, records the fingerprint). The words "hash mismatch"
+   appear nowhere in `src/` any more — not in errors, not in
+   comments. One deliberate improvement over TermX: the launch
+   check records the fingerprint with the ACTUAL computed hash
+   even on a mismatch, so the next launch answers from it
+   ("different hash = older release") instead of re-hashing
+   4.46 GB every launch (TermX re-hashes its 1 GiB; at 4.46 GB
+   the cost is too high to copy).
+2. **Install pipeline — update cannot brick a working setup.**
+   Skip only when the image is already the current release;
+   the installed image is NOT deleted up front; extraction goes
+   to a side file (`<name>.new`), is verified, chmod 0444, then
+   swapped in (rename) with the fingerprint re-recorded for the
+   final path. A failed update leaves the old image in place.
+   "download hash mismatch" is now "the download is damaged".
+3. **`OCEngine.h/.m` — update hold + as-is boot.**
+   New `updateAvailable` and `launchUpdateCheckInFlight`
+   properties. `init` starts the launch update check (background
+   queue, fingerprint first, one full hash only when no
+   fingerprint answers); `maybeAutoStartEngine` waits while it
+   is in flight (attempt NOT consumed) and never auto-starts
+   past a pending update (`updateAvailable && Stopped`). When
+   the check finds an older release it moves Installed ->
+   Stopped with "Update available" in the log, and the check's
+   completion re-triggers auto-start when the image is current.
+   New `bootInstalledImageAsIs` boots from the stopped-with-
+   update state without clearing `updateAvailable`; a failure
+   there goes through the normal auto-start retry (the state
+   leaves Stopped, so the hold no longer applies).
+   `refreshState` no longer re-derives a held Stopped state back
+   to Installed. A successful install clears `updateAvailable`
+   before the state flips to Installed. The launch check stands
+   down if the user tapped Install meanwhile.
+4. **`OCStartupViewController.m` — Update + Start buttons.**
+   The main action reads "Update" when an update is pending
+   (NotInstalled / Error / held Stopped); a secondary Start
+   button appears only in the stopped-with-update state and
+   boots the installed image as-is. Header shows "Update
+   available" with the reason line. The Start button is the
+   TermX 28f2191 escape hatch, not a return of manual engine
+   controls: the Engine tab stays state + logs only, and auto-
+   start is unchanged when nothing is pending. One-page fit
+   holds: +60pt only while the Start button is visible (~795pt
+   vs ~839pt safe area); hidden arranged subviews collapse.
+5. **`verify-local.py`** — new-behaviour strings added
+   ("Update available", "Image update check", "Booting
+   installed image as-is", "Auto-start held", "the download is
+   damaged", "guest image is damaged").
+
+KEPT: poll scene attach, build-hash marker, lifecycle markers,
+official icon, scene delegate, chunked download, auto-start,
+Install-time mode choice, Continue to app, install race fix.
+The swizzle path was NOT restored. Nothing about LiveContainer
+was asked (standing rule).
+
+### Host verification (verify-local.py)
+
+ALL PASS: arm64, MH_EXECUTE, MinOS 15.0.0, SDK 26.5.0, LC_MAIN
+0x4000, 5 segments, zero Kernarium load commands, code
+signature valid, all four frameworks embedded, icons present,
+all markers incl. build id `<BUILD_ID>` and all 7 launch steps,
+both guest hashes + chunk part names, no TODO-FILL, no
+BUILD-NOTE, no "Stop engine"/"Start engine" strings, new
+strings present. Local compile clean (clang-18, zero warnings).
+
+### Device test steps (fresh install — delete the old app first)
+
+1. The startup screen is unchanged when nothing is installed:
+   Install + Continue to app on one page, entrance animates
+   Install first, then rows one by one.
+2. Tap Install, pick a mode: 12 parts download, verify,
+   extract, guest auto-boots, tabs present when the server
+   listens. The log must never show a hash-mismatch error.
+3. Kill and relaunch: engine auto-starts with no tap (the
+   installed image is the current release, so no hold).
+4. Update path (needs an older image on the phone — simulate
+   by installing this build over a phone holding an image from
+   an earlier release, when one exists): the startup screen
+   must show "Update available" with Update + Start buttons and
+   must NOT auto-start. Tap Start: the old image boots as-is
+   and the update stays available. Relaunch, tap Update: the
+   new image downloads, the old image keeps working until the
+   swap, then the engine boots the new image by itself.
+5. Usual checks: `/api/info`, a chat with a real tool call,
+   `docker run hello-world`, app.py on port 8000.
+
 ## Status: GREEN — no manual engine controls, Install-time mode choice, install race fix + auto-start retry, run 44985933495, verified
 
 Run

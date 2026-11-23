@@ -84,7 +84,8 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
 @property (nonatomic, strong) UILabel *timerLabel;
 @property (nonatomic, strong) UIProgressView *progressView;
 @property (nonatomic, strong) UILabel *reasonLabel;
-@property (nonatomic, strong) UIButton *actionButton; // Install (or Start), by state — TermX-style, only action button
+@property (nonatomic, strong) UIButton *actionButton; // Install (or Update), by state — TermX-style, only action button
+@property (nonatomic, strong) UIButton *startButton; // secondary, visible only when stopped with an update: boots the installed image as-is
 @property (nonatomic, strong) UIButton *continueButton; // secondary: enter the tabs without installing
 @property (nonatomic, strong) UIButton *logButton; // secondary: open the live log view
 @property (nonatomic, strong) NSMutableArray<UIView *> *rowViews; // the five checklist rows, for the entrance animation
@@ -204,11 +205,20 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
     // open on their own. The Engine tab under Integrations has no
     // Install button any more. Log opens the live log view.
     // Continue gets the user into the tabs at any time; a swipe
-    // down from the top edge of the tabs returns here.
+    // down from the top edge of the tabs returns here. The Start
+    // button is the exception (TermX 28f2191): it appears only
+    // when the guest is stopped and an update is available, so the
+    // user can boot the installed image as-is instead of
+    // updating. A hidden arranged subview collapses in the stack,
+    // so it takes no space when it is not needed — the one-page
+    // fit holds: +60pt only while visible, ~795pt against ~839pt
+    // of safe area.
     self.actionButton = [self buttonWithTitle:@"Install" action:@selector(actionTapped)];
+    self.startButton = [self buttonWithTitle:@"Start" action:@selector(startTapped)];
+    self.startButton.hidden = YES;
     self.continueButton = [self buttonWithTitle:@"Continue to app" action:@selector(continueTapped)];
     self.logButton = [self buttonWithTitle:@"View log" action:@selector(logTapped)];
-    UIStackView *buttons = [[UIStackView alloc] initWithArrangedSubviews:@[self.actionButton, self.continueButton, self.logButton]];
+    UIStackView *buttons = [[UIStackView alloc] initWithArrangedSubviews:@[self.actionButton, self.startButton, self.continueButton, self.logButton]];
     buttons.axis = UILayoutConstraintAxisVertical;
     buttons.spacing = 12;
     buttons.translatesAutoresizingMaskIntoConstraints = NO;
@@ -359,6 +369,7 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
 // fight it.
 - (void)prepareEntrance {
     self.actionButton.alpha = 0;
+    self.startButton.alpha = 0;
     for (UIView *row in self.rowViews) {
         row.alpha = 0;
         row.transform = CGAffineTransformMakeTranslation(0, 8);
@@ -382,6 +393,7 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
     }
     // Secondary buttons last, together. Ends at 0.84 s.
     [UIView animateWithDuration:0.16 delay:0.68 options:UIViewAnimationOptionCurveEaseOut animations:^{
+        self.startButton.alpha = 1;
         self.continueButton.alpha = 1;
         self.logButton.alpha = 1;
     } completion:nil];
@@ -502,20 +514,44 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
 // any more (2026-11-22): the engine starts by itself on launch,
 // after install, and again on a foreground return or a retry
 // timer, so an installed-but-off engine just shows Starting…
-// while the automatic attempt runs.
+// while the automatic attempt runs. The two exceptions are the
+// update hold (TermX 28f2191, 2026-11-23): when a newer image is
+// waiting, the main action becomes Update and a secondary Start
+// button boots the installed image as-is.
 - (void)refreshButtons {
     OCEngine *engine = [OCEngine shared];
+    // The Start button lives only in the stopped-with-update
+    // state: Update is the main action there, Start is the way
+    // out of it.
+    self.startButton.hidden = !(engine.state == OCEngineStateStopped && engine.updateAvailable);
+    // An update renames the main action: Install becomes Update
+    // whenever a newer image is waiting (not installed yet, a
+    // failed setup, or the held stopped state).
+    BOOL updatePending = engine.updateAvailable &&
+        (engine.state == OCEngineStateNotInstalled || engine.state == OCEngineStateError ||
+         engine.state == OCEngineStateStopped);
     switch (engine.state) {
         case OCEngineStateNotInstalled:
         case OCEngineStateError:
-            [self.actionButton setTitle:@"Install" forState:UIControlStateNormal];
+            [self.actionButton setTitle:updatePending ? @"Update" : @"Install" forState:UIControlStateNormal];
             self.actionButton.enabled = YES;
             break;
         case OCEngineStateInstalled:
-        case OCEngineStateStopped:
         case OCEngineStateCorePending:
             [self.actionButton setTitle:@"Starting…" forState:UIControlStateNormal];
             self.actionButton.enabled = NO;
+            break;
+        case OCEngineStateStopped:
+            // Held for an update: Update is a live button. Any
+            // other stop is transient (the engine restarts
+            // itself), so the button just says Starting….
+            if (updatePending) {
+                [self.actionButton setTitle:@"Update" forState:UIControlStateNormal];
+                self.actionButton.enabled = YES;
+            } else {
+                [self.actionButton setTitle:@"Starting…" forState:UIControlStateNormal];
+                self.actionButton.enabled = NO;
+            }
             break;
         case OCEngineStateInstalling:
             [self.actionButton setTitle:@"Downloading…" forState:UIControlStateNormal];
@@ -532,12 +568,21 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
     }
 }
 
+// Boot the installed image as-is, update or no update. Only in
+// the stopped-with-update state; the update stays available for
+// next time. (TermX 28f2191.)
+- (void)startTapped {
+    [[OCEngine shared] bootInstalledImageAsIs];
+}
+
 - (void)actionTapped {
     OCEngine *engine = [OCEngine shared];
-    // The button is disabled in every state but NotInstalled /
-    // Error, so this only ever runs for an install. Starting is
-    // fully automatic now (2026-11-22): there is no manual Start.
-    if (engine.state == OCEngineStateNotInstalled || engine.state == OCEngineStateError) {
+    // The button is enabled only for an install (or an update):
+    // NotInstalled / Error, plus Stopped with an update waiting.
+    // Starting is fully automatic now (2026-11-22): there is no
+    // manual Start.
+    if (engine.state == OCEngineStateNotInstalled || engine.state == OCEngineStateError ||
+        (engine.state == OCEngineStateStopped && engine.updateAvailable)) {
         [self presentInstallModeChoice];
         return;
     }
@@ -617,7 +662,11 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
             text = @"Setup needed"; dot = OCStartupFaint(); labelColor = OCStartupMuted();
             break;
         case OCEngineStateStopped:
-            text = @"Stopped"; dot = OCStartupFaint(); labelColor = OCStartupMuted();
+            if (engine.updateAvailable) {
+                text = @"Update available"; dot = OCStartupAccent(); labelColor = OCStartupAccent();
+            } else {
+                text = @"Stopped"; dot = OCStartupFaint(); labelColor = OCStartupMuted();
+            }
             break;
         case OCEngineStateCorePending:
             text = @"Not ready"; dot = OCStartupFaint(); labelColor = OCStartupMuted();
@@ -653,7 +702,11 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
             reason = @"Setup failed. Check the log for the exact reason — Install below tries again.";
         }
     } else if (engine.state == OCEngineStateStopped) {
-        reason = @"The engine stopped. It starts again by itself.";
+        if (engine.updateAvailable) {
+            reason = @"A newer guest image is available — tap Update to install it, or Start to boot the image you have.";
+        } else {
+            reason = @"The engine stopped. It starts again by itself.";
+        }
     } else if (engine.state == OCEngineStateCorePending) {
         reason = @"The engine runtime did not load. It tries again by itself.";
     }

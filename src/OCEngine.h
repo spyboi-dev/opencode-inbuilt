@@ -79,7 +79,22 @@ typedef void (^OCGuestExecutor)(NSString *command, NSString *workingDirectory,
 // any more): the next foreground return tries again, and one
 // retry timer fires 60 s later. Safe to call in the unlinked
 // build: it just leaves the honest "cannot start" state alone.
+// It also waits for the launch update check to settle, and never
+// auto-starts past a pending update (see updateAvailable).
 - (void)maybeAutoStartEngine;
+// YES when the installed guest image is an older release than
+// this build's. A version difference is an update, never a
+// failure: the image boots as-is, and the startup screen offers
+// Update (plus Start to boot as-is) instead of auto-starting
+// into the old image. Set by the launch update check.
+@property (nonatomic, readonly) BOOL updateAvailable;
+// YES while the launch update check (background, at cold launch)
+// is still running. Auto-start waits for it to settle.
+@property (nonatomic, readonly) BOOL launchUpdateCheckInFlight;
+// Boot the installed image as-is, update or no update. Only from
+// the stopped-with-update state (the startup screen's secondary
+// Start button). The update stays available afterwards.
+- (void)bootInstalledImageAsIs;
 // In-app engine log + serve progress (for the Logs view and the Engine tab).
 // serveProgress is 0..1 while the engine is starting; serveStatus is the
 // current start stage ("Checking Node...", "Starting desktop...", ...).

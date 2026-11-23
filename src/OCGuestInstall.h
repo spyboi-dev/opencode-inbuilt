@@ -15,8 +15,19 @@
 // verifies the whole archive hash before extracting. A part that
 // fails verification is re-downloaded, never a corrupt image. See
 // DESKTOP-UI.md.
+//
+// A version difference is an update, not a failure (TermX c2f4ed5,
+// same mechanism here): an installed image from an older release
+// boots as-is, and the new one is offered as an Update. Only a file
+// that cannot be a guest image at all (wrong size, not ext4, or a
+// fresh download that fails its hash) is damaged. The install
+// pipeline extracts to a side file and swaps it in only after the
+// new image verifies, so a failed update leaves the working image
+// in place.
 // SPDX-License-Identifier: GPL-2.0-or-later
 #import <Foundation/Foundation.h>
+
+NS_ASSUME_NONNULL_BEGIN
 
 extern NSString *const kOCGuestImageChunkBaseURL; // release download base URL; chunk name appended
 extern NSString *const kOCGuestImageName;     // opencode-debian-trixie-arm64.ext4
@@ -26,14 +37,57 @@ extern const long long kOCGuestImageSize;     // bytes of the extracted image
 
 @interface OCGuestInstall : NSObject
 
-// True when rootfsPath exists, has the expected size, and hashes to
-// kOCGuestImageSHA256.
-+ (BOOL)guestInstalledAt:(NSString *)rootfsPath error:(NSString **)error;
+// True when rootfsPath holds a valid guest image: it exists, has
+// the expected size, is read-only, and either matches the recorded
+// verified fingerprint (whatever release it was verified as) or
+// passes the ext4 superblock-magic check. A version difference is
+// NOT a failure: an older release boots as-is. Only a file that
+// cannot be a guest image at all (wrong size, not ext4) is
+// damaged. Never hashes the file: this runs on the boot path
+// (KernGlue) and a 4.46 GB hash there would stall every launch.
++ (BOOL)guestInstalledAt:(NSString *)rootfsPath error:(NSString * _Nullable * _Nullable)error;
+
+// Cheap: is the installed image already this build's release?
+// Only the fingerprint's recorded hash can answer without
+// hashing 4.46 GB.
++ (BOOL)installedImageIsCurrentReleaseAt:(NSString *)rootfsPath;
+
+// The hash this exact file was verified as, from its fingerprint
+// — nil when no fingerprint (or no hash field in it) answers for
+// this file.
++ (nullable NSString *)installedImageVerifiedHashAt:(NSString *)rootfsPath;
+
+// Full SHA-256 of the file, or nil when it cannot be read. The
+// launch update check uses this (not guestImageHashValidAt:) so a
+// mismatching hash can still be recorded in the fingerprint —
+// "different hash" is how the next launch knows the image is an
+// older release without hashing 4.46 GB again.
++ (nullable NSString *)SHA256OfImageAt:(NSString *)path;
+
+// Record the verified fingerprint (path, size, mtime, hash) for a
+// file. The fingerprint only counts for the exact file it was
+// recorded for: any size or mtime change voids it.
++ (void)recordVerifiedFingerprintForPath:(NSString *)path attrs:(NSDictionary *)attrs hash:(NSString *)hash;
+
+// The ext4 superblock magic (0xEF53 at offset 1080), little-endian.
+// A two-byte pread: the cheap proof a read-only image with no
+// fingerprint is a real ext4 filesystem, not a truncated or
+// foreign file.
++ (BOOL)imageLooksLikeExt4At:(NSString *)path;
+
+// Full SHA-256 of the file against kOCGuestImageSHA256; records
+// the fingerprint (with the hash) on success. A failure here is a
+// genuinely damaged fresh download, so the error says damaged —
+// a version difference is not corruption, and this only ever runs
+// against the file the pipeline just extracted for this release.
++ (BOOL)guestImageHashValidAt:(NSString *)rootfsPath error:(NSString * _Nullable * _Nullable)error;
 
 // Download + verify + extract the image to rootfsPath.
 // Calls progress(0..1, step) on the main queue.
 + (void)installGuestTo:(NSString *)rootfsPath
-              progress:(void (^)(double fraction, NSString *step))progress
-            completion:(void (^)(BOOL ok, NSString *error))completion;
+              progress:(void (^ _Nullable)(double fraction, NSString *step))progress
+            completion:(void (^ _Nullable)(BOOL ok, NSString * _Nullable error))completion;
 
 @end
+
+NS_ASSUME_NONNULL_END
