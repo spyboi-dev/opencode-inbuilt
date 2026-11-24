@@ -8,6 +8,7 @@
 #import "OCIntegrationsViewController.h"
 #import "OCStartupViewController.h"
 #import "OCEngine.h"
+#import "OCGuestInstall.h"
 
 #ifdef OC_KERNARIUM_LINKED
 #import "KernGlue.h"
@@ -257,6 +258,20 @@
     // yet. Guarded inside maybeAutoStartEngine (once per launch,
     // never after an explicit Stop), so repeat calls are no-ops.
     [[OCEngine shared] maybeAutoStartEngine];
+}
+
+// The background download finished a part while the app was
+// suspended or killed: re-attach to the session so its delegate
+// callbacks arrive, and hand the system completion handler over so
+// it is called once the session has delivered all its events.
+// (2026-11-24, the download crash: the transfer runs in the
+// daemon, not the app process. TermX, same shape.)
+- (void)application:(UIApplication *)application
+    handleEventsForBackgroundURLSession:(NSString *)identifier
+                      completionHandler:(void (^)(void))completionHandler {
+    (void)application;
+    (void)identifier;
+    [OCGuestInstall reconnectBackgroundSessionWithCompletionHandler:completionHandler];
 }
 
 - (void)applicationDidEnterBackground:(UIApplication *)application {

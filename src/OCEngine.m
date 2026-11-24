@@ -529,6 +529,12 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
     [fh seekToEndOfFile];
     [fh writeData:data];
     unsigned long long size = [fh offsetInFile];
+    // fsync before close: a SIGKILL a millisecond later cannot
+    // lose the line. (write() alone survives process death, but
+    // the download milestones must survive anything short of the
+    // phone losing power, so the next log names the exact part,
+    // percent and footprint where it died.)
+    [fh synchronizeFile];
     [fh closeFile];
     if (size > 512 * 1024) OCEngineCapLogFileToTail(path);
 }

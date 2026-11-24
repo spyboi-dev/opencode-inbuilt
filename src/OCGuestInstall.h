@@ -88,6 +88,15 @@ extern const long long kOCGuestImageSize;     // bytes of the extracted image
               progress:(void (^ _Nullable)(double fraction, NSString *step))progress
             completion:(void (^ _Nullable)(BOOL ok, NSString * _Nullable error))completion;
 
+// Re-attach to the background download session after the system
+// relaunched the app for background URL events: creates the
+// session (if needed) so the daemon delivers its pending events,
+// and holds the system completion handler until the session has
+// delivered them all. Called from the AppDelegate background
+// handler. The download itself runs in the daemon (see
+// OCGuestInstall.m, OCChunkedDownload), not in the app process.
++ (void)reconnectBackgroundSessionWithCompletionHandler:(void (^)(void))handler;
+
 @end
 
 NS_ASSUME_NONNULL_END

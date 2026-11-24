@@ -1,8 +1,10 @@
 // OCGuestInstall - see OCGuestInstall.h.
 // SPDX-License-Identifier: GPL-2.0-or-later
 #import "OCGuestInstall.h"
+#import "OCEngine.h"
 #import <CommonCrypto/CommonDigest.h>
 #import <UIKit/UIKit.h>
+#import <mach/mach.h>
 #import <zlib.h>
 
 // Guest image published 2026-11-21 as release rootfs-20261120
@@ -20,14 +22,36 @@
 // Install resumes at the first missing part instead of restarting
 // from zero.
 //
-// No NSURLSession resume data is used anywhere in this file, by
-// design: TermX's resume fix (commit 8c76d48) showed that
-// downloadTaskWithResumeData: THROWS NSInvalidArgumentException on a
-// stale blob instead of returning nil, so a stale resume file made
-// every Install tap crash in under a second. Per-part resume (keep
-// verified parts, re-download only the failed one) gives the same
-// benefit with no blob that can go stale. Task creation is still
-// wrapped in @try/@catch, and the whole install runs on a background
+// Download design (2026-11-24, the download crash): the transfer
+// runs in a BACKGROUND NSURLSession (OCChunkedDownload below), so it
+// lives in the nsurlsessiond daemon, not in the app process — the
+// app's memory stays flat while 100 MB parts arrive, and the
+// download survives the app being suspended or killed (the daemon
+// finishes the part; the next Install resumes from the verified
+// parts). The old design — [NSURLSession sharedSession] with a
+// completion handler and a dispatch_semaphore_wait poll loop on a
+// blocked GCD thread — kept the whole 1.16 GB transfer in-process
+// while the app sat in the background on its location budget, and
+// died SIGKILL-class (no CRASH line, no error, log stops
+// mid-download) on two builds. The log never named the killer
+// because nothing logged during the download at all: progress only
+// updated the UI. So this file now logs every part start/finish and
+// every 10% with bytes AND footprint, via appendEngineLogSync
+// (synchronous; the engine-log write fsyncs), so the next log names
+// the exact part, percent and footprint where it died.
+//
+// Resume data IS used now, but validated first (TermX 8c76d48:
+// downloadTaskWithResumeData: THROWS NSInvalidArgumentException on
+// a stale blob instead of returning nil, so a stale resume file
+// made every Install tap crash in under a second). A blob is only
+// used when it is a plist dictionary whose remote URL matches the
+// part being downloaded, and the call is still wrapped in
+// @try/@catch — a bad blob can only ever cost a fresh download,
+// never a crash. A part that fails verification is deleted and
+// re-downloaded; already-verified parts are kept, so a killed
+// Install resumes at the first missing part instead of restarting
+// from zero. Task creation is still wrapped in @try/@catch, and the
+// install pipeline (assemble / gunzip / verify) runs on a background
 // queue: the installed check SHA-256s a 4.46 GB image and must never
 // run on the main thread.
 NSString *const kOCGuestImageChunkBaseURL =
@@ -108,6 +132,92 @@ static BOOL FileHasSize(NSString *path, long long expected) {
     return attrs && [attrs fileSize] == (unsigned long long)expected;
 }
 
+// Human-readable byte counts for the log (TermX TXFormatBytes).
+static NSString *OCFormatBytes(unsigned long long bytes) {
+    if (bytes >= (1ULL << 30)) {
+        return [NSString stringWithFormat:@"%.2f GiB", (double)bytes / (double)(1ULL << 30)];
+    }
+    if (bytes >= (1ULL << 20)) {
+        return [NSString stringWithFormat:@"%.0f MiB", (double)bytes / (double)(1ULL << 20)];
+    }
+    if (bytes >= (1ULL << 10)) {
+        return [NSString stringWithFormat:@"%.0f KiB", (double)bytes / (double)(1ULL << 10)];
+    }
+    return [NSString stringWithFormat:@"%llu B", bytes];
+}
+
+// The app's own memory footprint (phys_footprint via task_info).
+// Logged with every download milestone: if the app is ever killed
+// mid-download again, the last footprint line says whether memory
+// was climbing. (TermX TXCurrentFootprintBytes.)
+static unsigned long long OCCurrentFootprintBytes(void) {
+    task_vm_info_data_t info;
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count) == KERN_SUCCESS) {
+        return (unsigned long long)info.phys_footprint;
+    }
+    return 0;
+}
+
+// One log line to the engine log, synchronously: a SIGKILL a
+// millisecond later cannot lose it (the write fsyncs). Used for
+// every download milestone, so a killed download leaves its exact
+// position instead of silence.
+static void OCInstallLog(NSString *line) {
+    if (!line.length) return;
+    [[OCEngine shared] appendEngineLogSync:line];
+}
+
+// Resume data is a plist the system wrote when a download was
+// interrupted. It can go stale: the daemon temp file it names may
+// be purged between runs, or the blob can be truncated. And
+// downloadTaskWithResumeData: THROWS NSInvalidArgumentException on
+// malformed data instead of returning nil — an unguarded call is an
+// instant crash on every Install tap until the file is deleted.
+// (TermX 8c76d48, same validation here.) Validate first (lenient:
+// a plist dictionary with a remote URL), and still catch, so a bad
+// blob can only ever cost a fresh download, never a crash. The
+// remote URL must also match the part this blob is for: a resume
+// blob for another part is stale by definition — resuming it would
+// keep downloading the wrong bytes, which then fail the hash check.
+static BOOL OCResumeDataIsUsable(NSData *data, NSString *partURLString) {
+    if (!data.length) return NO;
+    NSError *error = nil;
+    id plist = [NSPropertyListSerialization propertyListWithData:data
+                                                         options:NSPropertyListImmutable
+                                                          format:NULL
+                                                           error:&error];
+    if (![plist isKindOfClass:[NSDictionary class]]) return NO;
+    NSString *remoteURL = plist[@"NSURLSessionResumeInfoRemoteURL"];
+    if (![remoteURL isKindOfClass:[NSString class]] || !remoteURL.length) return NO;
+    if (![remoteURL isEqualToString:partURLString]) return NO;
+    return YES;
+}
+
+// Disk-full, anywhere in the error chain: an NSURLSession failure
+// can carry ENOSPC as an NSPOSIXErrorDomain code, or as
+// NSFileWriteOutOfSpaceError in the Cocoa domain, on the error
+// itself or on its underlying error. A full disk is not a Wi-Fi
+// problem, and the old generic "check Wi-Fi" message sent the user
+// to the wrong fix. (TermX, same helper.)
+static BOOL OCErrorIsOutOfSpace(NSError *error) {
+    for (NSError *e = error; e; e = e.userInfo[NSUnderlyingErrorKey]) {
+        if (![e isKindOfClass:[NSError class]]) break;
+        if ([e.domain isEqualToString:NSPOSIXErrorDomain] && e.code == ENOSPC) return YES;
+        if ([e.domain isEqualToString:NSCocoaErrorDomain] && e.code == NSFileWriteOutOfSpaceError) return YES;
+    }
+    return NO;
+}
+
+// Free bytes on the volume holding path, or 0 when it cannot be
+// measured (fails open: the install proceeds and the real error,
+// if any, names itself).
+static unsigned long long OCFreeSpaceAtPath(NSString *path) {
+    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfFileSystemForPath:path error:nil];
+    NSNumber *free = attrs[NSFileSystemFreeSize];
+    return free ? [free unsignedLongLongValue] : 0;
+}
+
 // Progress is always reported on the main queue (the interface
 // contract in OCGuestInstall.h); the install itself runs on a
 // background queue.
@@ -116,39 +226,366 @@ static void ReportProgress(void (^progress)(double, NSString *), double fraction
     dispatch_async(dispatch_get_main_queue(), ^{ progress(fraction, step); });
 }
 
+// OCChunkedDownload: one background download, owned for the
+// process lifetime. It is the NSURLSessionDownloadDelegate, so
+// progress, completion, resume data and the background wake-up all
+// arrive here even when the app was killed and relaunched in the
+// background: the daemon (nsurlsessiond) owns the transfer, not the
+// app process, so a part keeps downloading while the app is
+// suspended and finishes even if the app died — and the next
+// Install finds the part already verified instead of restarting
+// from zero. (TermX TXRootfsDownload, same shape, single file;
+// here one part at a time, 12 parts in sequence.)
+//
+// Why a background session (2026-11-24, the download crash): the
+// old code used [NSURLSession sharedSession] with a completion
+// handler and a dispatch_semaphore_wait poll loop on a blocked GCD
+// thread — the whole 1.16 GB transfer ran in-process while the app
+// sat on its background location budget, and died SIGKILL-class
+// (no CRASH line, no error, log stops mid-download) on two builds.
+// A background session moves the transfer out of the app's memory
+// budget entirely, so the app's footprint stays flat while parts
+// arrive; the only in-process work per part is a SHA-256 verify.
+//
+// The session identifier is stable across builds: the daemon
+// matches pending tasks by identifier, so a part started by an
+// older build is still delivered to this build's delegate. A
+// task's taskDescription carries its destination path, so a part
+// that finished while the app was dead is moved into place by the
+// delegate on relaunch with no pipeline running.
+static NSString *const kOCGuestDownloadSessionID = @"com.spyboy.opencode.guestdownload";
+
+@interface OCChunkedDownload : NSObject <NSURLSessionDownloadDelegate>
+@property (nonatomic, strong) NSURLSession *session;
+@property (nonatomic, strong, nullable) NSURLSessionDownloadTask *task;
+@property (nonatomic, copy, nullable) NSString *currentURLString;
+@property (nonatomic, copy, nullable) NSString *currentDstPath;
+@property (nonatomic, copy, nullable) NSString *currentPartName;
+@property (nonatomic, copy, nullable) void (^progressBlock)(double);
+@property (nonatomic, copy, nullable) void (^completionBlock)(BOOL ok, NSString * _Nullable error);
+@property (nonatomic, copy, nullable) void (^backgroundCompletion)(void);
+@property (nonatomic) int64_t received;
+@property (nonatomic) int64_t expected;
+@property (nonatomic) NSInteger lastLoggedPercent; // -1 until the first 10%
+@end
+
+static OCChunkedDownload *s_sharedDownload = nil;
+
+@implementation OCChunkedDownload
+
++ (instancetype)sharedDownload {
+    // Thread-safe: installGuestTo: starts on a background queue and
+    // the background-wake path calls this from the main thread, so
+    // two threads can race a plain nil check and create two sessions
+    // with the same identifier (the second invalidates the first,
+    // and its tasks die with it). (TermX, same note.)
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        s_sharedDownload = [[OCChunkedDownload alloc] init];
+        s_sharedDownload.lastLoggedPercent = -1;
+        NSURLSessionConfiguration *config =
+            [NSURLSessionConfiguration backgroundSessionConfigurationWithIdentifier:kOCGuestDownloadSessionID];
+        config.allowsCellularAccess = YES;
+        config.sessionSendsLaunchEvents = YES;
+        s_sharedDownload.session = [NSURLSession sessionWithConfiguration:config
+                                                                 delegate:s_sharedDownload
+                                                            delegateQueue:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:s_sharedDownload
+                                                 selector:@selector(memoryWarning:)
+                                                     name:UIApplicationDidReceiveMemoryWarningNotification
+                                                   object:nil];
+    });
+    return s_sharedDownload;
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)memoryWarning:(NSNotification *)note {
+    (void)note;
+    OCInstallLog([NSString stringWithFormat:@"MEMORY WARNING during download: %@ — %@ of %@ received, footprint %@",
+                  self.currentPartName ?: @"?",
+                  OCFormatBytes((unsigned long long)MAX(0, self.received)),
+                  OCFormatBytes((unsigned long long)MAX(0, self.expected)),
+                  OCFormatBytes(OCCurrentFootprintBytes())]);
+}
+
+// Re-attach after a background relaunch: create the session (if it
+// does not exist yet) so the daemon delivers its pending events to
+// this delegate, and hold the system completion handler until the
+// session has delivered them all. Called from the AppDelegate
+// background-session handler. (TermX, same shape.)
++ (void)reconnectBackgroundSessionWithCompletionHandler:(void (^)(void))handler {
+    OCChunkedDownload *dl = [self sharedDownload];
+    @synchronized (dl) {
+        dl.backgroundCompletion = handler;
+    }
+    OCInstallLog([NSString stringWithFormat:@"Background URL session event: %@", kOCGuestDownloadSessionID]);
+}
+
+// Resume file for a part: tmp/<partname>.resume, next to the part.
+- (NSString *)resumePathForDstPath:(NSString *)dstPath {
+    return [dstPath stringByAppendingString:@".resume"];
+}
+
+// Download one part (urlString -> dstPath). The transfer runs in
+// the daemon; this call blocks the calling thread on a semaphore
+// until the delegate reports the part done or failed — the thread
+// is parked, not working, and the app's memory stays flat. If the
+// daemon is already downloading this part (the app died mid-part
+// and was relaunched), attach to that task instead of creating a
+// second one for the same URL. Calls progress (0..1 within this
+// part) and completion (YES when the file is in place) — completion
+// is invoked exactly once per call. Safe to call from any thread.
+- (void)downloadPartAtURL:(NSString *)urlString
+                   toPath:(NSString *)dstPath
+                 progress:(void (^)(double))progress
+               completion:(void (^)(BOOL ok, NSString * _Nullable error))completion {
+    // Adopt a task the daemon is still running for this URL (the
+    // app died mid-part and the user tapped Install again before
+    // it finished): creating a second task for the same URL would
+    // download the same 100 MB twice and race the move. The query
+    // is local and fast; the 10 s cap means a stuck query can only
+    // ever cost a duplicate task, never a hang.
+    __block NSArray<NSURLSessionDownloadTask *> *inflight = nil;
+    dispatch_semaphore_t found = dispatch_semaphore_create(0);
+    [self.session getTasksWithCompletionHandler:^(NSArray<NSURLSessionDataTask *> *dataTasks,
+                                                  NSArray<NSURLSessionUploadTask *> *uploadTasks,
+                                                  NSArray<NSURLSessionDownloadTask *> *downloadTasks) {
+        (void)dataTasks; (void)uploadTasks;
+        inflight = downloadTasks;
+        dispatch_semaphore_signal(found);
+    }];
+    dispatch_semaphore_wait(found, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)));
+    @synchronized (self) {
+        for (NSURLSessionDownloadTask *t in inflight) {
+            if (t.state == NSURLSessionTaskStateRunning &&
+                [t.originalRequest.URL.absoluteString isEqualToString:urlString]) {
+                OCInstallLog([NSString stringWithFormat:@"Download: part %@ is already downloading in the background — waiting for it",
+                              [urlString lastPathComponent]]);
+                self.task = t;
+                self.currentURLString = urlString;
+                self.currentDstPath = dstPath;
+                self.currentPartName = [urlString lastPathComponent];
+                self.progressBlock = progress;
+                self.completionBlock = completion;
+                self.received = t.countOfBytesReceived;
+                self.expected = t.countOfBytesExpectedToReceive;
+                self.lastLoggedPercent = -1;
+                return;
+            }
+        }
+    }
+
+    // No live task for this part: start one, resuming from
+    // validated resume data when it exists.
+    NSURLSessionDownloadTask *task = nil;
+    NSString *resumePath = [self resumePathForDstPath:dstPath];
+    NSData *resumeData = [NSData dataWithContentsOfFile:resumePath];
+    if (resumeData.length > 0 && OCResumeDataIsUsable(resumeData, urlString)) {
+        OCInstallLog([NSString stringWithFormat:@"Download: Resuming part %@ from saved resume data (%@)",
+                      [urlString lastPathComponent], OCFormatBytes((unsigned long long)resumeData.length)]);
+        @try {
+            task = [self.session downloadTaskWithResumeData:resumeData];
+        } @catch (NSException *exception) {
+            // Stale resume data throws instead of returning nil.
+            // Log it, drop the blob, and start fresh — never crash.
+            OCInstallLog([NSString stringWithFormat:@"Download: resume data threw %@ — starting part %@ fresh",
+                          exception.name ?: @"?", [urlString lastPathComponent]]);
+            task = nil;
+        }
+        if (!task) [[NSFileManager defaultManager] removeItemAtPath:resumePath error:nil];
+    } else if (resumeData.length > 0) {
+        OCInstallLog([NSString stringWithFormat:@"Download: saved resume data for part %@ failed validation — discarding it",
+                      [urlString lastPathComponent]]);
+        [[NSFileManager defaultManager] removeItemAtPath:resumePath error:nil];
+    }
+    if (!task) {
+        NSURL *url = [NSURL URLWithString:urlString];
+        if (!url) {
+            if (completion) completion(NO, @"bad download URL");
+            return;
+        }
+        @try {
+            task = [self.session downloadTaskWithURL:url];
+        } @catch (NSException *exception) {
+            OCInstallLog([NSString stringWithFormat:@"Download: creating the task for part %@ threw %@",
+                          [urlString lastPathComponent], exception.name ?: @"?"]);
+            if (completion) completion(NO, @"could not start the download — try again");
+            return;
+        }
+        if (!task) {
+            if (completion) completion(NO, @"could not start the download — try again");
+            return;
+        }
+    }
+    // The destination rides on the task: a part that finished
+    // while the app was dead is moved into place by the delegate
+    // on relaunch with no pipeline running.
+    task.taskDescription = dstPath;
+    @synchronized (self) {
+        self.task = task;
+        self.currentURLString = urlString;
+        self.currentDstPath = dstPath;
+        self.currentPartName = [urlString lastPathComponent];
+        self.progressBlock = progress;
+        self.completionBlock = completion;
+        self.received = 0;
+        self.expected = 0;
+        self.lastLoggedPercent = -1;
+    }
+    [task resume];
+}
+
+// Invoke the current waiter's completion exactly once, on the
+// calling queue. Nil when no pipeline is waiting (a part that
+// finished while the app was away): the file is already moved by
+// then, and the next Install resumes from it.
+- (void)completeCurrentWaiter:(BOOL)ok error:(NSString * _Nullable)error {
+    void (^cb)(BOOL, NSString * _Nullable) = nil;
+    @synchronized (self) {
+        cb = self.completionBlock;
+        self.completionBlock = nil;
+        self.progressBlock = nil;
+        self.task = nil;
+    }
+    if (cb) cb(ok, error);
+}
+
+#pragma mark - NSURLSessionDownloadDelegate
+
+- (void)URLSession:(NSURLSession *)session
+      downloadTask:(NSURLSessionDownloadTask *)downloadTask
+      didWriteData:(int64_t)bytesWritten
+ totalBytesWritten:(int64_t)totalBytesWritten
+totalBytesExpectedToWrite:(int64_t)totalBytesExpectedToWrite {
+    (void)session; (void)downloadTask; (void)bytesWritten;
+    void (^pb)(double) = nil;
+    @synchronized (self) {
+        self.received = totalBytesWritten;
+        self.expected = totalBytesExpectedToWrite;
+        pb = self.progressBlock;
+    }
+    if (totalBytesExpectedToWrite > 0) {
+        double f = (double)totalBytesWritten / (double)totalBytesExpectedToWrite;
+        NSInteger pct = (NSInteger)(f * 100.0);
+        @synchronized (self) {
+            if (pct >= self.lastLoggedPercent + 10) {
+                self.lastLoggedPercent = (pct / 10) * 10;
+                OCInstallLog([NSString stringWithFormat:@"Download part %@: %ld%% · %@ of %@ · footprint %@",
+                              self.currentPartName ?: @"?",
+                              (long)pct,
+                              OCFormatBytes((unsigned long long)totalBytesWritten),
+                              OCFormatBytes((unsigned long long)totalBytesExpectedToWrite),
+                              OCFormatBytes(OCCurrentFootprintBytes())]);
+            }
+        }
+        if (pb) pb(f);
+    }
+}
+
+- (void)URLSession:(NSURLSession *)session
+      downloadTask:(NSURLSessionDownloadTask *)downloadTask
+didFinishDownloadingToURL:(NSURL *)location {
+    (void)session;
+    NSString *dstPath = downloadTask.taskDescription;
+    NSString *partName = dstPath.lastPathComponent ?: downloadTask.originalRequest.URL.lastPathComponent ?: @"?";
+    if (!dstPath.length || !location) {
+        [self completeCurrentWaiter:NO error:@"could not save the download"];
+        return;
+    }
+    NSFileManager *fm = [NSFileManager defaultManager];
+    [fm removeItemAtPath:dstPath error:nil];
+    NSError *moveError = nil;
+    BOOL moved = [fm moveItemAtURL:location toURL:[NSURL fileURLWithPath:dstPath] error:&moveError];
+    if (!moved) {
+        OCInstallLog([NSString stringWithFormat:@"Download part %@: could not save the finished part: %@",
+                      partName, moveError.localizedDescription ?: @"?"]);
+        [self completeCurrentWaiter:NO error:@"could not save the download"];
+        return;
+    }
+    // The part is on disk; its resume blob (if any) is now stale.
+    [[NSFileManager defaultManager] removeItemAtPath:[self resumePathForDstPath:dstPath] error:nil];
+    OCInstallLog([NSString stringWithFormat:@"Download part %@: finished, %@ received",
+                  partName, OCFormatBytes((unsigned long long)self.received)]);
+    [self completeCurrentWaiter:YES error:nil];
+}
+
+- (void)URLSession:(NSURLSession *)session
+              task:(NSURLSessionTask *)task
+didCompleteWithError:(NSError *)error {
+    (void)session;
+    if (!error) return; // success is handled by didFinishDownloadingToURL
+    NSString *dstPath = nil;
+    NSString *urlString = nil;
+    @synchronized (self) {
+        dstPath = self.currentDstPath;
+        urlString = self.currentURLString;
+    }
+    if (!dstPath.length) dstPath = task.taskDescription;
+    if (!urlString.length) urlString = task.originalRequest.URL.absoluteString;
+    NSString *partName = dstPath.lastPathComponent ?: urlString.lastPathComponent ?: @"?";
+    // Save resume data so the next attempt continues mid-part
+    // instead of from zero. It is validated before any use (see
+    // OCResumeDataIsUsable), so a stale blob can never crash the
+    // next Install.
+    NSData *resumeData = error.userInfo[NSURLSessionDownloadTaskResumeData];
+    if (resumeData.length > 0 && dstPath.length) {
+        [resumeData writeToFile:[self resumePathForDstPath:dstPath] atomically:YES];
+        OCInstallLog([NSString stringWithFormat:@"Download part %@: saved resume data (%@) — the next Install continues from %@",
+                      partName, OCFormatBytes((unsigned long long)resumeData.length),
+                      OCFormatBytes((unsigned long long)MAX(0, self.received))]);
+    }
+    if (OCErrorIsOutOfSpace(error)) {
+        OCInstallLog([NSString stringWithFormat:@"Download part %@: failed, out of space at %@ of %@",
+                      partName,
+                      OCFormatBytes((unsigned long long)MAX(0, self.received)),
+                      OCFormatBytes((unsigned long long)MAX(0, self.expected))]);
+        [self completeCurrentWaiter:NO error:@"the phone ran out of free space while downloading — free some space and try again"];
+        return;
+    }
+    OCInstallLog([NSString stringWithFormat:@"Download part %@: failed at %@ of %@: %@",
+                  partName,
+                  OCFormatBytes((unsigned long long)MAX(0, self.received)),
+                  OCFormatBytes((unsigned long long)MAX(0, self.expected)),
+                  error.localizedDescription ?: @"?"]);
+    [self completeCurrentWaiter:NO error:@"download failed — check Wi-Fi and try again"];
+}
+
+- (void)URLSessionDidFinishEventsForBackgroundURLSession:(NSURLSession *)session {
+    (void)session;
+    void (^handler)(void) = nil;
+    @synchronized (self) {
+        handler = self.backgroundCompletion;
+        self.backgroundCompletion = nil;
+    }
+    if (handler) {
+        OCInstallLog(@"Background download events delivered");
+        handler();
+    }
+}
+
+@end
+
 // Downloads one chunk to dstPath. Returns YES when the file is in
-// place. Reports this chunk's 0..1 progress via progressBlock. Task
-// creation is wrapped in @try/@catch (TermX 8c76d48: session calls can
-// throw); a nil task or an error is a clean NO, never a crash. No
-// resume data is used: a failed chunk is simply re-downloaded.
+// place. Reports this chunk's 0..1 progress via progressBlock. The
+// transfer itself runs in the background session's daemon (see
+// OCChunkedDownload); this call only parks the calling thread until
+// the delegate reports the part done or failed.
 static BOOL DownloadChunk(NSString *urlString, NSString *dstPath, void (^progressBlock)(double)) {
-    NSURL *url = [NSURL URLWithString:urlString];
-    if (!url) return NO;
+    if (!urlString.length || !dstPath.length) return NO;
     __block BOOL ok = NO;
     dispatch_semaphore_t done = dispatch_semaphore_create(0);
-    NSURLSessionDownloadTask *task = nil;
-    @try {
-        task = [[NSURLSession sharedSession] downloadTaskWithURL:url completionHandler:^(NSURL *location, NSURLResponse *response, NSError *error) {
-            (void)response;
-            if (!error && location) {
-                NSFileManager *fm = [NSFileManager defaultManager];
-                [fm removeItemAtPath:dstPath error:nil];
-                NSError *moveError = nil;
-                ok = [fm moveItemAtURL:location toURL:[NSURL fileURLWithPath:dstPath] error:&moveError];
-            }
-            dispatch_semaphore_signal(done);
-        }];
-    } @catch (NSException *exception) {
-        return NO;
-    }
-    if (!task) return NO;
-    [task resume];
-    // Wait for the handler, polling byte counts for progress.
-    while (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)))) {
-        int64_t received = task.countOfBytesReceived;
-        int64_t expected = task.countOfBytesExpectedToReceive;
-        if (progressBlock && expected > 0) progressBlock((double)received / (double)expected);
-    }
+    [[OCChunkedDownload sharedDownload] downloadPartAtURL:urlString
+                                                   toPath:dstPath
+                                                 progress:progressBlock
+                                               completion:^(BOOL success, NSString * _Nullable error) {
+        (void)error;
+        ok = success;
+        dispatch_semaphore_signal(done);
+    }];
+    dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
     return ok;
 }
 
@@ -372,6 +809,10 @@ static NSString *const kOCVerifiedRootfsKey = @"oc.verified-rootfs";
     return ok;
 }
 
++ (void)reconnectBackgroundSessionWithCompletionHandler:(void (^)(void))handler {
+    [OCChunkedDownload reconnectBackgroundSessionWithCompletionHandler:handler];
+}
+
 + (void)installGuestTo:(NSString *)rootfsPath
               progress:(void (^)(double, NSString *))progress
             completion:(void (^)(BOOL, NSString *))completion {
@@ -440,6 +881,26 @@ static NSString *const kOCVerifiedRootfsKey = @"oc.verified-rootfs";
     // image is verified, so a failed or cancelled update leaves
     // the working image in place (see below).
 
+    // Free-space gate (TermX Phase 1: a download that dies on a
+    // full disk used to look like a network failure, and the user
+    // was sent to check Wi-Fi). Peak disk use is the assembled .gz
+    // plus the extracted image plus the old image (it stays until
+    // the swap), plus margin. The parts are deleted after assembly,
+    // so they do not add to the extraction peak. Fails cleanly with
+    // the real numbers instead of dying mid-extraction.
+    unsigned long long freeSpace = OCFreeSpaceAtPath(tmpDir);
+    unsigned long long gzSize = 0;
+    for (NSInteger i = 0; i < kOCGuestImageChunkCount; i++) gzSize += (unsigned long long)kOCGuestImageChunkSizes[i];
+    unsigned long long neededSpace = gzSize + (unsigned long long)kOCGuestImageSize + (512ULL << 20);
+    if ([fm fileExistsAtPath:rootfsPath]) neededSpace += (unsigned long long)kOCGuestImageSize;
+    OCInstallLog([NSString stringWithFormat:@"Install: %@ free, %@ needed for the guest image",
+                  OCFormatBytes(freeSpace), OCFormatBytes(neededSpace)]);
+    if (freeSpace > 0 && freeSpace < neededSpace) {
+        finish(NO, [NSString stringWithFormat:@"not enough free space — the install needs %@ free, this phone has %@",
+                    OCFormatBytes(neededSpace), OCFormatBytes(freeSpace)]);
+        return;
+    }
+
     // Download each chunk in order. A chunk that is already on disk
     // with the right size and SHA-256 is kept: that is the resume.
     NSMutableArray<NSString *> *chunkPaths = [NSMutableArray arrayWithCapacity:(NSUInteger)kOCGuestImageChunkCount];
@@ -448,6 +909,8 @@ static NSString *const kOCVerifiedRootfsKey = @"oc.verified-rootfs";
         NSString *chunkPath = [tmpDir stringByAppendingPathComponent:name];
         [chunkPaths addObject:chunkPath];
         if (FileHasSize(chunkPath, kOCGuestImageChunkSizes[i]) && FileHasHash(chunkPath, kOCGuestImageChunkSHA256[i])) {
+            OCInstallLog([NSString stringWithFormat:@"Part %ld of %ld already downloaded and verified — keeping it",
+                          (long)(i + 1), (long)kOCGuestImageChunkCount]);
             ReportProgress(progress, (double)i / (double)kOCGuestImageChunkCount * 0.6,
                            [NSString stringWithFormat:@"Part %ld of %ld already downloaded…", (long)(i + 1), (long)kOCGuestImageChunkCount]);
             continue;
@@ -458,6 +921,8 @@ static NSString *const kOCVerifiedRootfsKey = @"oc.verified-rootfs";
         for (int attempt = 1; attempt <= 3 && !chunkOK; attempt++) {
             NSInteger chunkIndex = i;
             NSString *step = [NSString stringWithFormat:@"Downloading guest image part %ld of %ld…", (long)(chunkIndex + 1), (long)kOCGuestImageChunkCount];
+            OCInstallLog([NSString stringWithFormat:@"Downloading part %ld of %ld… (attempt %d)",
+                          (long)(chunkIndex + 1), (long)kOCGuestImageChunkCount, attempt]);
             ReportProgress(progress, (double)chunkIndex / (double)kOCGuestImageChunkCount * 0.6, step);
             chunkOK = DownloadChunk(chunkURL, chunkPath, ^(double chunkFraction) {
                 double overall = (double)chunkIndex + chunkFraction;
@@ -465,7 +930,14 @@ static NSString *const kOCVerifiedRootfsKey = @"oc.verified-rootfs";
             });
             if (chunkOK) {
                 chunkOK = FileHasSize(chunkPath, kOCGuestImageChunkSizes[i]) && FileHasHash(chunkPath, kOCGuestImageChunkSHA256[i]);
-                if (!chunkOK) [fm removeItemAtPath:chunkPath error:nil];
+                if (!chunkOK) {
+                    OCInstallLog([NSString stringWithFormat:@"Part %ld of %ld failed verification — re-downloading it",
+                                  (long)(i + 1), (long)kOCGuestImageChunkCount]);
+                    [fm removeItemAtPath:chunkPath error:nil];
+                } else {
+                    OCInstallLog([NSString stringWithFormat:@"Part %ld of %ld downloaded and verified",
+                                  (long)(i + 1), (long)kOCGuestImageChunkCount]);
+                }
             }
         }
         if (!chunkOK) {
@@ -482,6 +954,16 @@ static NSString *const kOCVerifiedRootfsKey = @"oc.verified-rootfs";
         finish(NO, @"the download is damaged — try again");
         return;
     }
+    // The .gz is verified: the parts are redundant now (a later
+    // failure is in gunzip, where re-downloading is the correct
+    // recovery anyway), so drop them before the 4.46 GB extraction
+    // — that keeps the extraction peak at .gz + new image + old
+    // image instead of adding 1.16 GB of parts to it.
+    for (NSString *chunkPath in chunkPaths) {
+        [fm removeItemAtPath:chunkPath error:nil];
+        [fm removeItemAtPath:[chunkPath stringByAppendingString:@".resume"] error:nil];
+    }
+    OCInstallLog(@"Download verified — part files removed to free space for extraction");
     ReportProgress(progress, 0.7, @"Extracting the image…");
     // Extract to a side file, not the live image: the installed
     // image keeps booting until the new one is verified, and a

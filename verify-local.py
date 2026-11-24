@@ -179,7 +179,15 @@ new_strings = ["Install OpenCode", "Choose how OpenCode runs",
                "Booting installed image as-is",
                "Auto-start held",
                "the download is damaged",
-               "guest image is damaged"]
+               "guest image is damaged",
+               # Background-session download (2026-11-24)
+               "Background URL session",
+               "Download part",
+               "footprint",
+               "not enough free space",
+               "Resuming part",
+               "MEMORY WARNING during download",
+               "Download verified"]
 for m in new_strings:
     check(f"new string present: {m}", m in blob)
 # Removed controls must be gone as button titles
