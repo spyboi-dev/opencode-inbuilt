@@ -126,6 +126,155 @@ copies those same files, so they are identical by construction.
   proven pipeline, and the next code change goes through the
   local path.
 
+## Status: DOWNLOAD CRASH FIX — background session, LOCAL BUILD a29614b, verified
+
+User report 2026-11-24 10:24 IST, build 084ae47: "still crashing
+when downloading", with engine.log. The log shows a clean launch
+(all 7 steps, scene attached via willConnect), mode Desktop UI
+picked at Install, "First-launch setup started (guest image
+download)", "State: Installing guest image" — then nothing. No
+download progress lines, no error, no CRASH line. The previous
+run had also ended without shutdown. "Still" implies d6cb75f
+crashed the same way (never reported).
+
+### Diagnosis — what the log proves, and what it does not
+
+- The log's silence during download is BY DESIGN, not evidence
+  of an early death: download progress only ever updated the UI
+  (progress bar + reason label); nothing logged during the
+  download at all. The death could have been at any point in the
+  multi-minute LTE download.
+- No CRASH line means a SIGKILL-class death (jetsam, or a
+  force-quit after a stall). The signal handler covers
+  SIGSEGV/SIGABRT/SIGBUS/SIGILL + uncaught exceptions; none
+  fired.
+- Audit, suspect by suspect (src/OCGuestInstall.m, OCEngine.m,
+  OCStartupViewController.m, OCCrashLog.m):
+  - (a) Memory: our code streams everywhere (download task to
+    disk; SHA-256 and assembly in 1 MB chunks; gunzip on a
+    256 KiB heap buffer) — no whole-part in-memory accumulation.
+    BUT the transfer itself ran IN-PROCESS via
+    `[NSURLSession sharedSession]`, and the app is kept alive in
+    the background by location mode. A foreground jetsam at
+    ~100 MB is implausible; a background jetsam of an
+    in-process transfer is the plausible SIGKILL mechanism —
+    and the app's footprint during download was unmeasured
+    (no footprint logging anywhere in OC).
+  - (b) Stale partials: handled correctly (size+hash gate,
+    short-circuit, delete-and-redownload). No crash path.
+  - (c) Session config: THE WEAK DESIGN. `sharedSession` +
+    completion handler + `dispatch_semaphore_wait` poll loop on
+    a blocked GCD thread. The transfer lived and died with the
+    app process. TermX's downloader (proven on device, same
+    phone, same LiveContainer) uses a background session +
+    delegate: the transfer runs in nsurlsessiond, out of the
+    app's memory budget, and survives suspension and kill.
+  - (d) First-part setup: clean (mkdir, stale .gz/.new removal).
+  - (e) Main thread: progress hops to main async; `refresh`
+    only sets label text (rows are built once); no deadlock,
+    no per-tick allocation.
+- The OC chunked downloader had NEVER completed a device
+  download (bf05c6c failed on the TODO hashes; d6cb75f/084ae47
+  crashed during download), so the mechanism was entirely
+  unproven on device.
+
+### What changed (commit a29614b, 5 files, +559/-39)
+
+1. **Background session (OCChunkedDownload, new in
+   OCGuestInstall.m, TermX TXRootfsDownload shape).** One
+   singleton background `NSURLSession`
+   (`com.spyboy.opencode.guestdownload`,
+   `sessionSendsLaunchEvents = YES`, `allowsCellularAccess =
+   YES`), delegate = itself. Parts download sequentially via
+   delegate callbacks: `didWriteData` → progress + log every
+   10% with bytes AND footprint; `didFinishDownloadingToURL`
+   → move to the part path → verify → next part;
+   `didCompleteWithError` → save validated resume data,
+   distinguish out-of-space from network failure. The
+   transfer runs in the daemon; the app's footprint stays flat.
+   If the app dies mid-part, the daemon finishes it, and the
+   delegate moves it into place on relaunch (the destination
+   rides on `task.taskDescription`); the next Install resumes
+   from the verified parts. Starting a part first checks
+   `getTasksWithCompletionHandler` and adopts a live task for
+   the same URL instead of downloading it twice.
+2. **Resume data, validated (TermX 8c76d48).** Saved per part
+   on failure (`<part>.resume`); used only when it parses as
+   a plist dictionary whose remote URL matches the part, and
+   the `downloadTaskWithResumeData:` call is still wrapped in
+   @try/@catch — a stale blob can only ever cost a fresh
+   download, never a crash.
+3. **Free-space gate.** Peak disk use is the assembled .gz +
+   the extracted image + the old image (until the swap) +
+   margin; fails cleanly ("not enough free space — the
+   install needs X free, this phone has Y") instead of dying
+   mid-extraction. Parts are deleted after assembly+hash, so
+   the extraction peak drops by 1.16 GB.
+4. **Diagnostics so the next log names the killer.** Every
+   part start/finish and every 10% logs bytes + footprint
+   (`OCCurrentFootprintBytes`, task_info phys_footprint);
+   memory-warning observer logs footprint + bytes; the
+   engine-log write now fsyncs (`[fh synchronizeFile]` in
+   OCEngineWriteLogLineToFile), so a SIGKILL a millisecond
+   later cannot lose a milestone line.
+5. **AppDelegate wiring.**
+   `application:handleEventsForBackgroundURLSession:completionHandler:`
+   re-attaches via
+   `OCGuestInstall reconnectBackgroundSessionWithCompletionHandler:`.
+   The `dispatch_semaphore_wait` poll loop is gone; the
+   `DownloadChunk` wrapper still parks the calling thread on a
+   semaphore until the delegate reports the part, but the
+   thread does no work and the transfer is out-of-process.
+
+Kept: 12-part chunked design, per-part SHA verification,
+streaming assemble, heap gunzip buffer, side-file swap,
+fingerprint, update hold, auto-start, Install-time mode choice,
+Continue to app, install race fix. Swizzle path NOT restored.
+Nothing about LiveContainer was asked.
+
+### Host verification (verify-local.py)
+
+ALL PASS: arm64, MH_EXECUTE, MinOS 15.0.0, SDK 26.5.0, LC_MAIN
+0x4000, 5 segments, zero Kernarium load commands, code signature
+162/162 SHA-256 page hashes, all four frameworks embedded, icons
+present, all markers incl. build id `a29614b` and all 7 launch
+steps, both guest hashes + chunk part names, no TODO-FILL, no
+BUILD-NOTE, no "Stop engine"/"Start engine" strings, all seven
+new strings present (Background URL session, Download part,
+footprint, not enough free space, Resuming part, MEMORY WARNING
+during download, Download verified). Local compile clean
+(clang-18, zero warnings). Build time 26 s. (One verifier
+catch, fixed before shipping: "Download part" / "Resuming
+part" were not literals — the format strings were "Download
+%@" / "Download: resuming part %@" with the words supplied at
+runtime. The format strings now carry the words.)
+
+IPA: `mac-ipas/OpenCode-Inbuilt-kernarium-a29614b.ipa`,
+25,189,775 bytes, SHA-256
+`dfb4c226f7263a2ea918efd9dfb953f5abc8be422f39ba278e6a9bdb4424100b`.
+
+### Device test steps (fresh install — delete the old app first)
+
+1. Tap Install, pick a mode. The download must now run with
+   per-part log lines: "Downloading part N of 12…", "Download
+   part …: 10% · … · footprint …" every 10%, "Part N
+   downloaded and verified", and "Install: X free, Y needed"
+   at the start.
+2. Let it run to the end (12 parts, ~1.16 GB on LTE — leave
+   the app in the foreground; backgrounding/locking is also
+   safe now, the daemon keeps the part going). The guest
+   must auto-boot and the tabs present when the server
+   listens.
+3. If it crashes again, send engine.log AND BOOT.txt. The log
+   now names the exact part, percent, and footprint where it
+   died — that is the next fact the diagnosis needs. Also
+   note whether the app was in the foreground or backgrounded
+   when it died, and how much free space the phone has
+   (Settings → General → iPhone Storage).
+4. Usual checks after a good install: `/api/info`, a chat
+   with a real tool call, `docker run hello-world`, app.py on
+   port 8000.
+
 ## Status: TermX auto-start/update fix ported to OpenCode — LOCAL BUILD 084ae47, verified
 
 User direction 2026-11-23 08:01 IST: "build the oc too" — the
