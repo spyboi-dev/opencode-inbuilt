@@ -194,7 +194,11 @@ new_strings = ["Retrying in 60s", "Automatic retry: starting engine",
                "Extraction finished",
                "Background time expired during install",
                "Install paused",
-               "Install complete"]
+               "Install complete",
+               # Guest boot -1 fix (2026-11-25)
+               "Canonicalized boot paths",
+               "Boot paths:",
+               "Boot pre-flight:"]
 for m in new_strings:
     check(f"new string present: {m}", m in blob)
 # Removed controls must be gone as button titles

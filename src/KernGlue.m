@@ -8,6 +8,10 @@
 #import <UIKit/UIKit.h>
 #import <dlfcn.h>
 #import <errno.h>
+#import <limits.h>
+#import <stdlib.h>
+#import <string.h>
+#import <sys/stat.h>
 
 // Local typedef: the header declares the getter as a plain function,
 // not as a function-pointer type.
@@ -41,6 +45,47 @@ static void ConsoleOutput(void *context, const void *buffer, size_t length) {
     if (!glue) return;
     NSData *data = [NSData dataWithBytes:buffer length:length];
     [glue handleConsoleData:data];
+}
+
+// Canonicalize a path with realpath(): /var is a symlink to
+// /private/var, so the guest paths the app builds start with
+// /var/mobile/... while the framework resolves
+// /private/var/mobile/... . The runtime's own path checks
+// (std::filesystem) refuse the symlinked form with a bare -1 —
+// TermX hit the identical -1 and fixed it this way (termx
+// 2682d24). Falls back to canonicalizing the parent directory and
+// re-appending the last component when the file itself does not
+// exist yet (the session record is created by the runtime during
+// the run; the guest dir may not exist before the first install).
+static NSString *OCCanonicalizePath(NSString *path) {
+    if (!path.length) return path;
+    char resolved[PATH_MAX];
+    if (realpath(path.UTF8String, resolved)) {
+        return [NSString stringWithUTF8String:resolved];
+    }
+    NSString *parent = [path stringByDeletingLastPathComponent];
+    NSString *name = [path lastPathComponent];
+    if (parent.length && realpath(parent.UTF8String, resolved)) {
+        return [[NSString stringWithUTF8String:resolved] stringByAppendingPathComponent:name];
+    }
+    return path;
+}
+
+// Whether a host path can be named in a `ubd<n>=` kernel argument
+// as itself: the runtime's uml::block::usable_ubd_path, replicated
+// (space, tab, newline, vertical tab, form feed, carriage return,
+// 0xA0, double quote, comma, colon).
+static BOOL OCPathUsableOnKernelCommandLine(const char *path) {
+    if (!path || !path[0]) return NO;
+    for (const unsigned char *p = (const unsigned char *)path; *p; p++) {
+        switch (*p) {
+            case ' ': case '\t': case '\n': case '\v': case '\f': case '\r':
+            case 0xA0: case '"': case ',': case ':':
+                return NO;
+            default: break;
+        }
+    }
+    return YES;
 }
 
 @interface OCKernGlue () {
@@ -136,7 +181,12 @@ static void ConsoleOutput(void *context, const void *buffer, size_t length) {
         [[OCEngine shared] appendEngineLogSync:@"Kernarium runtime did not load: KRuntime_6_18_4K.framework is not in this build"];
         return NULL;
     }
-    void *handle = dlopen(frameworkBinary.UTF8String, RTLD_NOW | RTLD_LOCAL);
+    // RTLD_GLOBAL, not RTLD_LOCAL: the guest kernel's ELF loader
+    // resolves its Darwin imports through dlsym(RTLD_DEFAULT), so
+    // the framework's symbols (e.g. darwin_uml_guest_shutdown) must
+    // be globally visible or the guest dies 30 s into boot with an
+    // unresolved-symbol error and exits 126 (TermX ba05bc4).
+    void *handle = dlopen(frameworkBinary.UTF8String, RTLD_NOW | RTLD_GLOBAL);
     if (!handle) {
         const char *err = dlerror();
         [[OCEngine shared] appendEngineLogSync:[NSString stringWithFormat:@"Kernarium runtime did not load: dlopen failed: %s", err ? err : "unknown error"]];
@@ -204,8 +254,10 @@ static void ConsoleOutput(void *context, const void *buffer, size_t length) {
 // Create the sparse overlay file the boot formats fresh on ubd1.
 // The path must name no spaces, quotes, commas or colons (the runtime
 // names it on the kernel command line); NSTemporaryDirectory is safe.
+// Canonicalized: /var is a symlink to /private/var (see
+// OCCanonicalizePath above).
 - (BOOL)createOverlayWithError:(NSString **)error {
-    NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:@"opencode-overlay.ext4"];
+    NSString *path = OCCanonicalizePath([NSTemporaryDirectory() stringByAppendingPathComponent:@"opencode-overlay.ext4"]);
     NSFileManager *fm = [NSFileManager defaultManager];
     [fm removeItemAtPath:path error:nil];
     int fd = open(path.UTF8String, O_WRONLY | O_CREAT | O_TRUNC, 0644);
@@ -228,6 +280,73 @@ static void ConsoleOutput(void *context, const void *buffer, size_t length) {
     dispatch_async(dispatch_get_main_queue(), ^{
         for (void (^w)(BOOL, NSError * _Nullable) in waiters) w(ok, error);
     });
+}
+
+// Repeat the runtime's own path gate (KernariumRuntime.mm,
+// run(): usableFile / immutableExt4Rootfs / usable_ubd_path, plus
+// the session-record length check) on the boot struct's own C
+// strings, immediately before run(), each result logged. The
+// runtime prints its refusal to stderr, which this app never
+// sees — so a failure here refuses the boot with the named cause
+// instead of handing possibly bad paths to the runtime and getting
+// a bare -1 back. Runs on the canonical strings (bootWithCompletion
+// canonicalizes first); the POSIX stat calls are the same semantics
+// as the runtime's std::filesystem checks for a regular file and
+// its permission bits.
+- (BOOL)preflightBootPathsWithReason:(NSString **)reason {
+    const char *rootfs = _boot.rootfs_path;
+    const char *overlay = _boot.overlay_path;
+    const char *session = _boot.session_record_path;
+    [[OCEngine shared] appendEngineLogSync:[NSString stringWithFormat:@"Boot paths: rootfs=%s overlay=%s session=%s", rootfs ?: "", overlay ?: "", session ?: ""]];
+    struct stat st;
+    // rootfs: a regular file.
+    if (!rootfs || !rootfs[0]) {
+        if (reason) *reason = @"rootfs path is empty";
+        return NO;
+    }
+    if (stat(rootfs, &st) != 0) {
+        if (reason) *reason = [NSString stringWithFormat:@"rootfs is not a regular file: %s (errno %d)", rootfs, errno];
+        return NO;
+    }
+    if (!S_ISREG(st.st_mode)) {
+        if (reason) *reason = [NSString stringWithFormat:@"rootfs is not a regular file: %s", rootfs];
+        return NO;
+    }
+    // rootfs: a .ext4 image must carry no write bits at all
+    // (runtime immutableExt4Rootfs).
+    NSString *rootfsPath = [NSString stringWithUTF8String:rootfs];
+    if ([[rootfsPath.pathExtension lowercaseString] isEqualToString:@"ext4"]) {
+        if (st.st_mode & (S_IWUSR | S_IWGRP | S_IWOTH)) {
+            if (reason) *reason = [NSString stringWithFormat:@"rootfs is writable (mode %o) — the runtime requires a read-only image", st.st_mode & 0777];
+            return NO;
+        }
+    }
+    // overlay: a regular file.
+    if (!overlay || !overlay[0]) {
+        if (reason) *reason = @"overlay path is empty";
+        return NO;
+    }
+    if (stat(overlay, &st) != 0) {
+        if (reason) *reason = [NSString stringWithFormat:@"overlay is not a regular file: %s (errno %d)", overlay, errno];
+        return NO;
+    }
+    if (!S_ISREG(st.st_mode)) {
+        if (reason) *reason = [NSString stringWithFormat:@"overlay is not a regular file: %s", overlay];
+        return NO;
+    }
+    // kernel command line: no spaces, quotes, commas or colons.
+    if (!OCPathUsableOnKernelCommandLine(rootfs) || !OCPathUsableOnKernelCommandLine(overlay)) {
+        if (reason) *reason = @"a boot path cannot be named on the kernel command line (space, quote, comma or colon)";
+        return NO;
+    }
+    // session record: non-empty, under PATH_MAX (runtime run() gate).
+    size_t sessionLen = session ? strlen(session) : 0;
+    if (sessionLen == 0 || sessionLen >= PATH_MAX) {
+        if (reason) *reason = @"session record path is empty or too long";
+        return NO;
+    }
+    [[OCEngine shared] appendEngineLogSync:@"Boot pre-flight: rootfs OK (regular, read-only), overlay OK (regular), kernel command line OK"];
+    return YES;
 }
 
 - (void)bootWithCompletion:(void (^)(BOOL, NSError * _Nullable))completion {
@@ -280,6 +399,18 @@ static void ConsoleOutput(void *context, const void *buffer, size_t length) {
     CGFloat scale = [UIScreen mainScreen].scale;
     _rootfsPath = [self guestImagePath];
     _sessionRecordPath = [[self guestDirectory] stringByAppendingPathComponent:@"session.json"];
+    // Canonicalize the boot paths before anything reads them: /var
+    // is a symlink to /private/var, and the runtime's path checks
+    // refuse the symlinked form with a bare -1 (TermX 2682d24).
+    // Log it when it changes anything: that is the evidence the
+    // fix fired. The overlay was already canonicalized at creation.
+    NSString *oldRootfs = _rootfsPath;
+    NSString *oldSession = _sessionRecordPath;
+    _rootfsPath = OCCanonicalizePath(_rootfsPath);
+    _sessionRecordPath = OCCanonicalizePath(_sessionRecordPath);
+    if (![_rootfsPath isEqualToString:oldRootfs] || ![_sessionRecordPath isEqualToString:oldSession]) {
+        [[OCEngine shared] appendEngineLogSync:[NSString stringWithFormat:@"Canonicalized boot paths: rootfs %@ -> %@, session %@ -> %@", oldRootfs, _rootfsPath, oldSession, _sessionRecordPath]];
+    }
     memset(&_boot, 0, sizeof(_boot));
     _boot.struct_size = (uint32_t)sizeof(_boot);
     _boot.width = (uint32_t)(view.bounds.size.width * scale);
@@ -291,17 +422,49 @@ static void ConsoleOutput(void *context, const void *buffer, size_t length) {
     _boot.overlay_path = _overlayPath.UTF8String;
     _boot.session_record_path = _sessionRecordPath.UTF8String;
     _boot.use_jit = 0; // gadget (interpreter) engine: no JIT, no debugger
+    // Pre-flight: repeat the runtime's own path gate on the boot
+    // struct's strings before run() sees them. A failure refuses
+    // the boot with the named cause instead of a bare -1.
+    NSString *preflightReason = nil;
+    if (![self preflightBootPathsWithReason:&preflightReason]) {
+        [self stopBridges];
+        [self finishBootWithSuccess:NO error:GlueError(9, preflightReason ?: @"Boot refused: a guest path failed the pre-flight check")];
+        return;
+    }
+    // The boot struct's C strings must stay valid until run()
+    // returns, on the run's own thread: copy them into buffers this
+    // boot owns, so no NSString UTF8String lifetime question can
+    // remain (TermX 2682d24). The run's block frees them after
+    // run() returns; a second boot allocates its own buffers, so
+    // the two can never share one.
+    char *bootRootfs = _boot.rootfs_path ? strdup(_boot.rootfs_path) : NULL;
+    char *bootOverlay = _boot.overlay_path ? strdup(_boot.overlay_path) : NULL;
+    char *bootSession = _boot.session_record_path ? strdup(_boot.session_record_path) : NULL;
+    if (!bootRootfs || !bootOverlay || (_boot.session_record_path && !bootSession)) {
+        free(bootRootfs); free(bootOverlay); free(bootSession);
+        [self stopBridges];
+        [self finishBootWithSuccess:NO error:GlueError(9, @"Boot refused: could not copy the guest paths")];
+        return;
+    }
+    _boot.rootfs_path = bootRootfs;
+    _boot.overlay_path = bootOverlay;
+    _boot.session_record_path = bootSession;
     _running = YES;
     [[OCEngine shared] appendEngineLogSync:@"Guest boot started (Kernarium, Debian 13)"];
     // run() blocks until the guest stops, so it owns its own thread.
-    // The boot struct lives in an ivar (see above); the C strings
-    // point into NSStrings this object holds, so every pointer stays
-    // valid until run() returns.
+    // The boot struct lives in an ivar (see above); its C strings
+    // are the strdup'd buffers above, freed after run() returns.
     __weak typeof(self) weakSelf = self;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         typeof(self) strongSelf = weakSelf;
         if (!strongSelf) return;
         int result = strongSelf->_api->run(view, &strongSelf->_boot);
+        free((void *)strongSelf->_boot.rootfs_path);
+        free((void *)strongSelf->_boot.overlay_path);
+        free((void *)strongSelf->_boot.session_record_path);
+        strongSelf->_boot.rootfs_path = NULL;
+        strongSelf->_boot.overlay_path = NULL;
+        strongSelf->_boot.session_record_path = NULL;
         strongSelf->_running = NO;
         strongSelf->_booted = NO;
         [strongSelf stopBridges];
@@ -316,7 +479,7 @@ static void ConsoleOutput(void *context, const void *buffer, size_t length) {
             [[OCEngine shared] appendEngineLogSync:@"Guest stopped by the app"];
             [strongSelf finishBootWithSuccess:NO error:GlueError(6, @"Guest stopped")];
         } else {
-            [[OCEngine shared] appendEngineLogSync:[NSString stringWithFormat:@"Guest run failed (%d)", result]];
+            [[OCEngine shared] appendEngineLogSync:[NSString stringWithFormat:@"Guest run failed (%d) — see Boot paths above for the paths passed", result]];
             [strongSelf finishBootWithSuccess:NO error:GlueError(7, [NSString stringWithFormat:@"Guest run failed (%d)", result])];
         }
     });
