@@ -126,6 +126,98 @@ copies those same files, so they are identical by construction.
   proven pipeline, and the next code change goes through the
   local path.
 
+## Status: AI SLOP TEXT REMOVED — LOCAL BUILD e608dc6, verified
+
+User direction 2026-11-25 13:23 IST: "why u aded ai slops text
+every ware like inbuld kernarium or somthing". He is right: the
+same rule he set in the TermX chat applies here — never add
+defensive explanatory slop to the app or its docs, do not explain
+a limitation nobody asked about, do not write notes narrating
+what the app cannot do. Text-only pass: no behaviour, engine,
+bootstrap, navigation, or layout change.
+
+### What was removed / replaced (audit of every user-visible string)
+
+Settings About: "Real OpenCode 2.3.0, inside this app (LinuxRunner
+interpreter, Debian 13, JITless)." → row "OpenCode", detail
+"OpenCode 2.3.0". The "Limits" row ("If the app is closed, the
+engine stops...") is deleted entirely. "sign in to a provider
+inside the guest" → "sign in to a provider". "Agent files live in
+the guest workspace (~/Projects)" → "Agent files live in
+~/Projects". Engine tab: "Guest image not installed yet" → "Not
+installed yet"; "Downloading the guest image…" → "Downloading…";
+"Guest core linked. Debian 13 guest with the OpenCode desktop
+app..." → "Engine ready. Open the desktop from below once it is
+running."; "Guest runtime loads automatically..." → "Engine
+ready."; "The engine cannot start in this build" cut → "Engine
+not ready yet." State labels: "Installing guest image" →
+"Installing", "Installed, guest stopped" → "Installed, stopped".
+Startup screen: rows "Engine core" → "Engine", "Guest boot" →
+"Boot"; details "Linked, ready to boot" → "Ready to start",
+"Loads automatically at startup" → "Starts automatically",
+"Not ready in this build" → "Not ready", "Debian 13 guest" →
+"Started" / "Starting…" / "Waiting"; reasons "The engine is not
+ready yet in this build. Setup downloads the guest image first,
+but the engine cannot start here." → "The engine is not ready
+yet.", "Guest image 1.16 GB · 12 parts" → "1.16 GB download",
+"A newer guest image is available..." → "A newer version is
+available — tap Update to install it, or Start to keep the one
+you have.", "The engine runtime did not load" → "The engine did
+not start." Install progress: "Downloading guest image part N of
+12…" → "Downloading part N of 12…", "Extracting the image…" →
+"Extracting…", "Verifying the image…" → "Verifying…", "Guest
+ready" → "Ready". Engine start status: "Booting guest..." →
+"Starting…". Files: "Could not reach the engine server at
+127.0.0.1:4096" → "Could not reach the engine". Integrations row
+"OpenCode engine" → "Engine". Location prompts (Info.plist):
+"keeps its Linux engine running" → "keeps your coding session
+running". README.md rewritten short and plain (old one described
+the dead LinuxRunner build, v1, and a SideStore install flow).
+Header comments swept the same way (OCEngine.h architecture
+comment rewritten plain, plus the one-line file headers);
+identifiers (KernGlue, OCVsockBridge, guestCoreLinked) and the
+engine LOG strings stay — logs are diagnostics and must keep
+naming the runtime and paths. IPA output renamed
+OpenCode-Inbuilt-kernarium.ipa → OpenCode-iOS.ipa (the file the
+user downloads carried both words he quoted).
+
+### Host verification (verify-local.py)
+
+Local build 29 s, build id `e608dc6`. IPA:
+`mac-ipas/OpenCode-iOS-e608dc6.ipa`, 25,193,126 bytes, SHA-256
+`9aa61a15ab69a840b7b5f5c1d6692ae83c56b50541f7e6f42f4ea605b464058b`.
+Same SHA in `build-local/`, `mac-ipas/`, and
+`~/workspace/goals/opencode-for-ios/files/`. **ALL PASS** —
+arm64, MH_EXECUTE, 5 segments, LC_MAIN entryoff 0x4000, MinOS
+15.0.0, SDK 26.5.0, zero Kernarium load commands, code signature
+162/162 SHA-256 page hashes valid, all four frameworks embedded,
+all markers incl. build id `e608dc6`, both guest hashes + chunk
+part names, no TODO-FILL, no BUILD-NOTE, no "Stop engine"/"Start
+engine" strings, plus the new slop checks: "JITless",
+"LinuxRunner", "inbuilt", "Real OpenCode 2.3.0, inside this app",
+"Guest image not installed yet", "Downloading guest image part",
+"Guest core linked", "Debian 13 guest", "The engine cannot start
+in this build", "Not ready in this build", "inside the guest",
+"guest workspace", "Guest ready", "Verifying the image",
+"Booting guest", "Extracting the image…" all absent from the
+binary; "Extracting…", "Verifying…", "Starting…" present
+(UTF-16LE); no "Linux engine" in the location prompts. GitHub
+release:
+[opencode-e608dc6](https://github.com/spyboi-dev/opencode-ios/releases/tag/opencode-e608dc6).
+Tag-only release, as the last seven.
+
+### Device test steps (install over the current app — do NOT delete it)
+
+Install over the current app (do NOT delete it — the guest image
+is already installed). Open the app and check the wording: the
+startup rows read Engine / Boot / Node / OpenCode / Server; the
+Engine tab and Settings About carry no implementation names; the
+location prompt (if it appears) says nothing about a Linux
+engine. Then: tap + on Threads — the real OpenCode desktop must
+open, not the custom chat; the desktop window must be visible,
+not black. If it is still black, send engine.log AND BOOT.txt
+AND the guest log.
+
 ## Status: CHAT OPENS THE REAL DESKTOP + BLACK-DESKTOP HARDENING — LOCAL BUILD 5e258fb, verified
 
 User decision 2026-11-25 12:44 IST: tapping a chat opens the real
