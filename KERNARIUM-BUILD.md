@@ -126,6 +126,117 @@ copies those same files, so they are identical by construction.
   proven pipeline, and the next code change goes through the
   local path.
 
+## Status: CHAT OPENS THE REAL DESKTOP + BLACK-DESKTOP HARDENING — LOCAL BUILD 5e258fb, verified
+
+User decision 2026-11-25 12:44 IST: tapping a chat opens the real
+OpenCode desktop (tapped "Yes, open the real desktop"). Plus a
+screenshot at 12:44 of the Desktop view still black, tty1 login
+sliver still at the top edge — on an UNKNOWN build (no engine log
+sent for c9493ce; the screenshot came 4 minutes after c9493ce was
+delivered).
+
+### Audit — black desktop, both hypotheses
+
+App side EXONERATED (from the runtime source, ~/workspace/kernarium,
+read-only): native_display_ios.mm sets enableSetNeedsDisplay=YES,
+paused=YES; the presentation layer calls requestRedraw → [view draw]
+whenever the guest posts a new frame, and metal_presentation.mm
+draw() presents the newest frame (it skips only when there is nothing
+new). The view is live — it showed the console during boot. No
+reattach/refresh is needed after X starts; a VT switch posts new
+frames. So the black screen + tty1 sliver means the guest scanout IS
+the tty1 console: X is not on the active VT (or not running). The
+view is not the problem.
+
+Hypothesis (a) — still on c360a14 — is the more likely one: the
+screenshot came 4 minutes after c9493ce was delivered,
+mid-conversation, and the symptom is exactly the c360a14 VT bug (X on
+a free VT, display on tty1 console). Hypothesis (b) — on c9493ce and
+vt01 failed — cannot be ruled out without an engine log (the DYLD OK
+line carries the build id). The fixes below harden the real
+silent-failure modes in the c9493ce bootstrap so the next log is
+decisive either way.
+
+Bootstrap audit (c9493ce): the desktop service is DISABLED at boot
+(guest-additions.sh), so no race with it on a fresh boot. Genuine
+silent-failure mode found: on engine RESTART, the old Xorg may still
+be dying when the new one starts — fixed `sleep 1` + no lock cleanup.
+A still-dying Xorg leaves /tmp/.X0-lock; the new Xorg fails with
+"Server is already active for display 0", and the socket wait loop
+breaks at once on the STALE /tmp/.X11-unix/X0 — openbox and the app
+then start against a dead server. Also: if Xorg fails before opening
+/var/log/Xorg.0.log, the reason is only in /tmp/Xorg.log (the stderr
+redirect), which the diagnostics never dumped.
+
+### What changed (commit 5e258fb, 4 files, +55/-5)
+
+1. Chat opens the real desktop (OCSessionsViewController.m
+   openSession:): + and thread taps push OCDesktopViewController
+   instead of OCChatViewController. newChat still creates the session
+   via the API first, so it is at the top of the desktop's session
+   list. No deep-link to a specific session exists in the desktop
+   app; the user picks the session inside the desktop, which joins
+   the same server. OCChatViewController stays in the codebase as the
+   fallback (not deleted, no longer reached from Threads).
+2. Bootstrap hardening (OCEngine.m consoleBootstrap): wait out the
+   old Xorg (poll pgrep -x Xorg up to 10 s) then rm -f /tmp/.X0-lock
+   /tmp/.X11-unix/X0 before starting Xorg, so the socket wait only
+   breaks on a fresh server. If the socket never appears, echo
+   "ERROR Xorg did not start" + tail -20 /tmp/Xorg.log. Diagnostics
+   dump gains "Xorg log:" (tail -20 /tmp/Xorg.log) and "Desktop app
+   log:" (tail -10 /tmp/ai-opencode.log); the dump already ran
+   unconditionally, before and after READY.
+3. App-side view log (OCDesktopViewController.m viewWillAppear): one
+   engine-log line "Desktop view shown: guestView frame ...
+   superview ... window ... drawable ... booted ..." — the honest
+   app-side evidence (geometry/window state; the app cannot know the
+   guest's surface content).
+4. verify-local.py: four new strings.
+
+KEPT: server-first bootstrap, extraction/download/boot-path code,
+Desktop UI only, TermX startup styling. Swizzle path NOT restored.
+Nothing about LiveContainer asked. No guest image rebuild, no
+re-download.
+
+Note: clang-18/lld-18 were wiped by a VM restart again; reinstalled
+via apt-get update + apt-get install (same as 5f307ff). Same reinstall
+will be needed after the next restart.
+
+### Host verification (verify-local.py)
+
+Local build 29 s, build id `5e258fb`. IPA:
+`mac-ipas/OpenCode-Inbuilt-kernarium-5e258fb.ipa`, 25,193,389 bytes,
+SHA-256
+`8997882ad06a7c265167b10deaa38ede8a8fb1765c332f0270135ed36b26a860`.
+Same SHA in `build-local/`, `mac-ipas/`, and
+`~/workspace/goals/opencode-for-ios/files/`. **ALL PASS** — arm64,
+MH_EXECUTE, 5 segments, LC_MAIN entryoff 0x4000, MinOS 15.0.0,
+SDK 26.5.0, zero Kernarium load commands, code signature 162/162
+SHA-256 page hashes valid, all four frameworks embedded, all markers
+incl. build id `5e258fb`, both guest hashes + chunk part names, no
+TODO-FILL, no BUILD-NOTE, no "Stop engine"/"Start engine" strings,
+all four new strings present. GitHub release:
+[opencode-5e258fb](https://github.com/spyboi-dev/opencode-ios/releases/tag/opencode-5e258fb).
+Tag-only release, as the last six.
+
+### Device test steps (install over the current app — do NOT delete it)
+
+1. Install over the current app (do NOT delete it — the guest image
+   is already installed; deleting wipes it and forces a 1.16 GB
+   re-download). Open the app; auto-start retries the boot by itself.
+2. Tap + on Threads: the REAL OpenCode desktop must open, not the
+   custom chat window. Tap a thread in the list: same, the desktop
+   opens; pick the session inside the desktop app.
+3. The desktop window must be visible (dark Electron UI), not black.
+   If it is still black, send engine.log AND BOOT.txt AND the guest
+   log: the DYLD OK line names the build (tells us whether this was
+   c9493ce or the new build), "Desktop view shown:" names the view
+   state, and the "--- desktop diagnostics ---" block names the
+   Active VT, the window tree, and the Xorg/app log tails.
+4. Then: a chat with a real tool call from the desktop, `docker run
+   hello-world`, app.py on port 8000 (still "no app.py in guest"
+   until persistence lands — expected).
+
 ## Status: SERVER-FIRST BOOTSTRAP + DESKTOP VT FIX — LOCAL BUILD c9493ce, verified
 
 Device evidence (2026-11-25 12:26 IST, build c360a14, pid 23692):
