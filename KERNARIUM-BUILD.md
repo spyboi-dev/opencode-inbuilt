@@ -8,6 +8,160 @@ launch-path hypothesis is closed. The scene investigation (why UIKit
 never called the scene method in the 07:57 run) continues on that
 settled basis.
 
+## Status: BLACK DESKTOP — DIAGNOSTICS FETCHED EVERY 10 s, FAIL FAST ON A DEAD XORG — LOCAL BUILD 16f1cc2, verified
+
+User test of 25bb172, 2026-11-25 16:01 IST: desktop STILL black.
+He sent all three logs. Files: `engine-2c1908ad.log` (621 lines),
+`guest-11d54a18.log` (4911 lines),
+`display-activity-7f4c0430.log` (396 lines), all in
+`~/workspace/user/files/`. No screenshot was sent with this run.
+
+### What the 25bb172 logs prove (verified from the files)
+
+1. **Server-file delivery WORKED — the 25bb172 fix is proven.**
+   25bb172 run (16:01:15–16:02:02, 47 s): "Server healthy"
+   16:01:31, "Desktop launch started" 16:01:38, no "Desktop
+   bootstrap write failed" line. Guest log line 4909: the app
+   typed only `sh /tmp/desktop-bootstrap.sh` and the shell ran
+   it; line 4910 `PROGRESS 95 Starting desktop...`, line 4911
+   `SELFTEST fb0 red` — the first time the self-test echo ever
+   appeared in a guest log. The script ran intact from the
+   file: no mangled heredocs, no split launch line in the
+   typed input.
+2. **The diagnostics snapshot channel WORKED.** The fetch at
+   16:01:42 returned a real snapshot (not FileNotFoundError):
+   Active VT tty1, `xwininfo: error: unable to open display
+   ":0"`, DIAG Windows on :0: 0, DIAG fb-flush: NOT running,
+   DIAG fbdev driver: (empty), DIAG fb size: unknown, DIAG
+   selftest: OK. The snapshot script was written from the
+   file and ran.
+3. **The fetched snapshot was too early to answer anything.**
+   It was the first snapshot (~16:01:39, right after the pkill
+   lines, before Xorg started): Xorg not running, no display,
+   0 windows is the correct state for that moment, not
+   evidence about Xorg's fate. The diag-loop rewrites the
+   file every 10 s, so the 16:01:49 and 16:01:59 snapshots
+   would have shown /tmp/Xorg.log and the self-test outcome —
+   but the fetch was once per boot on success
+   (`guestDiagnosticsFetched` early-return), so nothing ever
+   fetched again. The evidence that names Xorg's fate was
+   written and never read.
+4. **The script went silent after SELFTEST, and the run was
+   too short to outlast the silence.** The guest log ends at
+   line 4911 (SELFTEST fb0 red): no XORG RUNNING/DEAD, no
+   fb-flush, no ai.opencode, no READY-loop output, no
+   DESKTOP STATE, no diagnostics re-emit, in either log.
+   Timeline: launch started 16:01:38, self-test ~16:01:40,
+   Xorg start ~16:01:41, then the socket wait (up to 30 s,
+   silent) — the app shut down at 16:02:02, 21 s into that
+   wait. Xorg had 21 s to create /tmp/.X11-unix/X0 and did
+   not (had it appeared, the wait would have broken and XORG
+   RUNNING would have printed). The READY loop (up to 120 s)
+   never started. Whether Xorg died on the fbdev config or is
+   just slow is still unknown: the reason is in /tmp/Xorg.log,
+   which the un-fetched snapshots already tail.
+5. **"DIAG selftest: OK" is ambiguous, and "DIAG fb size:
+   unknown" is an open question.** OK only means
+   /tmp/selftest.log was empty or missing. The echo
+   "SELFTEST fb0 red" prints regardless (it follows a `;`),
+   so the python may have failed on the same
+   /sys/class/graphics/fb0/virtual_size path the snapshot's
+   cat could not read — or it may have succeeded with empty
+   stderr. No screenshot was sent, so whether red reached
+   the screen is also unknown.
+6. Display log: the 25bb172 section (lines 348–396, 0–46.354
+   s) has ONLY 2D CPU flushes of resource 2 at 1290x2796,
+   ~5/s, no virgl scanout ever. A red fill transferring
+   would be indistinguishable here (same resource, same
+   damage, one extra flush in a ~5/s stream).
+
+### Root cause — this round: the evidence was written but never read, and the waits are silent
+
+Not the delivery (proven working) and not yet the desktop:
+(a) the diagnostics fetch stopped after the first success,
+so the only block in the engine log is the too-early first
+snapshot; (b) the socket wait is silent for up to 30 s and
+the READY loop for up to 120 s, so a dead Xorg burns both
+spans without a word — and the user closes the app after
+~45 s, before either span ends. The fix is to keep fetching
+every 10 s and to fail fast, with the reason, the moment
+Xorg is known dead.
+
+### What changed (commit 16f1cc2, 2 files, +91/-12)
+
+- `src/OCEngine.m` `fetchGuestDiagnosticsIfNeeded` — repeated
+  fetching: the `guestDiagnosticsFetched` early-return is
+  gone; the fetch now runs every 10 s (one pending at a
+  time, cap 12 attempts ~= 2 min, stops when the engine
+  stops) whether the previous fetch hit or missed, and a
+  block is logged only when its content changed since the
+  last fetch (`lastGuestDiagnosticsText`), so the engine log
+  gets the state transitions (early / Xorg up / Xorg dead /
+  ready) instead of twelve copies of one block. The cadence
+  starts in `deliverDesktopBootstrap` (both branches), so it
+  no longer depends on the user opening the Desktop view;
+  viewDidAppear and the post-READY trigger funnel into the
+  same cadence.
+- `src/OCEngine.m` `desktopBootstrap` — socket wait with
+  early death detection: after a 3 s grace for exec, if
+  `pgrep -x Xorg` fails while the socket is still absent,
+  the script prints `ERROR Xorg died before its socket
+  appeared` with the /tmp/Xorg.log tail at once instead of
+  burning the 30 s wait.
+- `src/OCEngine.m` `desktopBootstrap` — READY loop early
+  breaks: if Xorg dies mid-loop (`ERROR Xorg died while
+  waiting for the desktop`) or ai.opencode never appeared
+  after 10 s of exec grace (`ERROR Desktop did not start
+  (ai.opencode never appeared)`), the loop breaks at once
+  and DESKTOP STATE prints immediately instead of after
+  120 s.
+- `src/OCEngine.m` `desktopBootstrap` — unambiguous
+  self-test: the python writes `/tmp/selftest.result`
+  (`red WxH`) on success, so the DIAG line now reads red
+  WxH / FAILED (traceback in the log) / NOT-RUN (python
+  never reached the write) instead of the empty-log "OK".
+  The snapshot also lists the framebuffer devices (`DIAG
+  graphics:`), so the "fb size: unknown" path question is
+  visible instead of a bare unknown.
+- `verify-local.py` — new-string checks for
+  `lastGuestDiagnosticsText`, `Guest diagnostics (via
+  server) [fetch `, both "Xorg died" lines,
+  `selftest.result`, `DIAG graphics:`. ALL PASS (144 checks).
+
+Server-file delivery, two-phase bootstrap, fbdev config,
+self-test, fb-flush loop, chat-opens-desktop navigation,
+runtime/framework, Settings untouched. Nothing merged to
+main. `kernarium-desktop` and termx untouched. Both
+bootstrap phases were extracted from the ObjC literals and
+parsed with `bash -n` before building (phase 1: 1439 bytes,
+phase 2: 5190 bytes); the python self-test one-liner was
+compile-checked separately.
+
+Build 16f1cc2, local, 2026-11-25 ~10:39 IST. IPA
+`mac-ipas/OpenCode-iOS-16f1cc2.ipa`, 25,199,158 bytes,
+SHA-256
+033d9f78703d3ce983265c43c38a62728c7f5b9c47e1c02f4fb981a511cfae3e.
+GitHub release opencode-16f1cc2. Staged in
+`~/workspace/goals/opencode-for-ios/files/OpenCode-iOS-16f1cc2.ipa`.
+
+### Device test (16f1cc2)
+
+Install over 25bb172, do NOT delete the app — the guest image
+is already installed. Tap + on Threads, then LEAVE THE APP
+OPEN at least 2 minutes (the READY loop runs up to 120 s; the
+25bb172 run ended after 47 s), then send a screenshot AND
+engine.log. What to look for: "Desktop launch started" ~2 s
+after "Server healthy"; "Guest diagnostics (via server)
+[fetch N]:" blocks arriving every 10 s with fresh content —
+Active VT, window count, Xorg errors, app log tail, and now
+"DIAG selftest: red 1290x2796" (or FAILED / NOT-RUN) and
+"DIAG graphics:" naming the framebuffer devices; "SELFTEST
+fb0 red" and red on screen if the write path works; "XORG
+RUNNING"/"XORG DEAD" and "DESKTOP STATE" naming whether Xorg
+lived and whether ai.opencode mapped a window — or an "ERROR
+Xorg died ..." line with the Xorg log tail if Xorg died,
+within ~30 s of launch even in a short run.
+
 ## Status: BLACK DESKTOP — DESKTOP BOOTSTRAP DELIVERED AS A SERVER FILE, NOT TYPED — LOCAL BUILD 25bb172, verified
 
 User test of df597d2, 2026-11-25 15:50 IST: desktop STILL black.
