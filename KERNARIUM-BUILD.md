@@ -126,6 +126,123 @@ copies those same files, so they are identical by construction.
   proven pipeline, and the next code change goes through the
   local path.
 
+## Status: GUEST BOOT -1 FIX — canonical paths + pre-flight + RTLD_GLOBAL — LOCAL BUILD c360a14, verified
+
+Device evidence (2026-11-25 11:31 IST, build 5f307ff): the
+extraction fix PROVED on device — all 12 parts downloaded and
+verified (11:31:52–11:37:23), footprint steady 16–24 MiB;
+extraction 10% → 100% in 14 s (11:37:26–11:37:40), footprint flat
+22–24 MiB through the whole 4.16 GiB write and the verify;
+"Install complete — guest image ready" 11:37:44, "State:
+Installed, guest stopped". Then auto-start: "Kernarium runtime
+loaded", "Guest executor installed (Kernarium console)", "Guest
+boot started", "Guest boot started (Kernarium, Debian 13)" — then
+in the same second: "Guest run failed (-1)", "Guest boot failed:
+Guest run failed (-1)", "State: Engine error". No guest output at
+all; guest.log not present yet.
+
+### Diagnosis — what the -1 is (from the runtime source, not guessed)
+
+- -1 is -UML_EMULATOR_INVALID_ARGUMENT
+  (`darwin/api/include/uml/emulator.h:36`, value 1). In
+  `runtimeRun` (`KernariumRuntime.mm:2298`) the only -1 that fires
+  before ANY guest output, with the values this app passes, is the
+  path gate at :2506-2510: `!usableFile(rootfs) ||
+  !immutableExt4Rootfs(rootfs) || !usableFile(overlay)` → stderr
+  "Kernarium: invalid rootfs or overlay path" → return -1. The
+  other early -1s are ruled out from the code: view non-null,
+  struct_size = sizeof, width/height from a full-screen Metal view
+  (1179×2556), dpi 160, 2 vCPUs ≤ host, 1024 MiB ≥ 512 MiB minimum,
+  session path non-empty and short, use_jit = 0. The ubd-path check
+  (:2513) is also ruled out: the paths carry no space, quote,
+  comma or colon. The runtime's refusal goes to stderr, which the
+  app never sees — hence the silent log.
+- The gate's checks: usableFile =
+  `std::filesystem::is_regular_file`; immutableExt4Rootfs = a
+  .ext4 file must carry NO write bits (the install chmods 0444,
+  and OC's own `guestInstalledAt:` stat check passed, so the file
+  is read-only — the failure is not the bits, it is the path
+  form).
+- TermX hit the IDENTICAL -1 and fixed it with canonical paths
+  (termx 2682d24): /var is a symlink to /private/var, so the app's
+  paths start /var/mobile/... while the framework resolves
+  /private/var/mobile/...; realpath() on all boot paths fixed it
+  and the guest booted (the 05:41 run on 2682d24 got 30 s in).
+  TermX's next failure, fixed in the same round (ba05bc4), was
+  RTLD_LOCAL: the kernel's ELF loader resolves Darwin imports via
+  dlsym(RTLD_DEFAULT), so the guest died 30 s in with unresolved
+  darwin_uml_guest_shutdown and exit 126. OpenCode still used
+  RTLD_LOCAL, so it would have hit that next.
+
+### What changed (commit c360a14, 2 files, +174/-7, src/KernGlue.m + verify-local.py)
+
+1. Canonical boot paths (`OCCanonicalizePath`, realpath + parent
+   fallback, TermX 2682d24 shape): rootfs + session record
+   canonicalized in `bootWithCompletion` before `_boot` is filled
+   (logged when it changes anything: "Canonicalized boot paths:
+   ..."); overlay canonicalized at creation in
+   `createOverlayWithError`. `engineDirectory` untouched, so the
+   install fingerprint (keyed by the /var path string) still
+   matches — no one-time re-hash on first launch.
+2. Boot pre-flight (`preflightBootPathsWithReason:`): repeats the
+   runtime's own gate on the boot struct's C strings with POSIX
+   stat — rootfs regular file, .ext4 read-only (no write bits),
+   overlay regular file, both usable on the kernel command line,
+   session path non-empty and < PATH_MAX — each logged ("Boot
+   paths: ..." + "Boot pre-flight: ..."). A failure refuses the
+   boot with the NAMED cause (GlueError 9) instead of a bare -1.
+3. strdup'd boot C strings (TermX 2682d24): the three paths are
+   copied into buffers this boot owns, freed after run() returns.
+4. RTLD_GLOBAL (TermX ba05bc4): dlopen in `loadRuntime` changed
+   from RTLD_LOCAL to RTLD_GLOBAL, so the kernel loader can
+   resolve the framework's Darwin symbols.
+5. Failure line now points at the evidence: "Guest run failed
+   (%d) — see Boot paths above for the paths passed".
+
+KEPT: extraction/download code untouched (proven working),
+Desktop UI only (no CLI, no mode choice), TermX startup styling
+untouched. Swizzle path NOT restored. Nothing about LiveContainer
+was asked (standing rule).
+
+### Host verification (verify-local.py)
+
+Local build 28 s, build id `c360a14`. IPA:
+`mac-ipas/OpenCode-Inbuilt-kernarium-c360a14.ipa`, 25,189,702
+bytes, SHA-256
+`651c8c6f2f82ed77e2c299758a6eb84de1bd094c3429ca7cf6aa6ed9e1b3fd24`.
+Same SHA in `build-local/`, `mac-ipas/`, and
+`~/workspace/goals/opencode-for-ios/files/`. **ALL PASS** — arm64,
+MH_EXECUTE, 5 segments, LC_MAIN entryoff 0x4000, MinOS 15.0.0,
+SDK 26.5.0, zero Kernarium load commands, code signature 162/162
+SHA-256 page hashes valid, all four frameworks embedded, all
+markers incl. build id `c360a14`, both guest hashes + chunk part
+names, no TODO-FILL, no BUILD-NOTE, no "Stop engine"/"Start
+engine" strings, new strings present ("Canonicalized boot
+paths", "Boot paths:", "Boot pre-flight:"). GitHub release:
+[opencode-c360a14](https://github.com/spyboi-dev/opencode-ios/releases/tag/opencode-c360a14).
+Tag-only release, as the last four (tag points at main head
+bed1f27; the asset is the build).
+
+### Device test steps (NO fresh install — do NOT delete the app)
+
+1. Install over the 5f307ff app (do NOT delete it — the guest
+   image is already installed and verified; deleting wipes it and
+   forces a 1.16 GB re-download). Open the app; auto-start retries
+   the boot by itself.
+2. The log must now show "Canonicalized boot paths: rootfs
+   /var/... -> /private/var/..." (proof the fix fired), "Boot
+   paths: ..." and "Boot pre-flight: rootfs OK (regular,
+   read-only), overlay OK (regular), kernel command line OK", then
+   "Guest up (login prompt seen)" and the tabs.
+3. Then: /api/info, a chat with a real tool call, `docker run
+   hello-world`, app.py on port 8000, "Show desktop" from the
+   Engine tab.
+4. If it fails again, send engine.log AND BOOT.txt AND the guest
+   log. If it still says "Guest run failed (-1)", the "Boot
+   paths" lines now name the exact paths passed; if it gets past
+   boot and dies ~30 s in, that is a new failure (the RTLD_GLOBAL
+   fix should have covered the known one).
+
 ## Status: EXTRACTION CRASH FIX + DESKTOP UI ONLY + TERMX STARTUP RESTYLE — LOCAL BUILD 5f307ff, verified
 
 User report 2026-11-25 09:22 IST, build a29614b: "still crashing",
