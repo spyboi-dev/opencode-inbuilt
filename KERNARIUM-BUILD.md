@@ -8,6 +8,156 @@ launch-path hypothesis is closed. The scene investigation (why UIKit
 never called the scene method in the 07:57 run) continues on that
 settled basis.
 
+## Status: BLACK DESKTOP — TWO-PHASE BOOTSTRAP, SYSTEMCTL HANG REMOVED, DIAGNOSTICS THAT SURVIVE — LOCAL BUILD df597d2, verified
+
+User test of 977334d, 2026-11-25 15:32 IST: desktop STILL black.
+This time he sent all three logs, and they name the root cause
+the last three builds could not. Files:
+`engine-f76988b9.log` (521 lines), `guest-87c76c69.log` (3965
+lines), `display-activity-c68aadba.log` (302 lines), all in
+`~/workspace/user/files/`, plus the 15:32 screenshot (console
+with "termx login:" repeated dozens of times, iOS keyboard open,
+no red).
+
+### What the 977334d logs prove (verified from the files)
+
+1. The self-test NEVER RAN — and the screen proves it either
+way. No "SELFTEST fb0 red" in the engine log, no self-test
+line in the guest log, no /tmp/selftest.log tail anywhere, and
+no red on the 15:32 screenshot. Whether write() to /dev/fb0
+transfers is therefore still UNPROVEN: the test never got its
+chance. The fix must make the self-test actually run, not
+argue about what red would mean.
+2. The shell never got past `sudo systemctl stop
+opencode-desktop`. Engine log, 977334d run pid 25139
+(15:29:55–15:31:41, 106 s): "Serve launch started" 15:30:05,
+"Server probe: /api/info 200" 15:30:11, "Server healthy"
+15:30:11, then nothing from the guest console ever again — no
+"Server listening (from guest console)" (present in the 4c60469
+and 165c227 runs), no "Desktop ready", no SELFTEST, no XORG
+RUNNING/DEAD, no DESKTOP STATE, no DIAG lines. The guest log
+shows the bootstrap's desktop section in two passes (the app's
+typed input, then the shell's execution echo with
+bracketed-paste markers): the execution echo gets through
+`ss -ltn` ("Server on 4096 confirmed") and PROGRESS 95, then
+the `sudo systemctl stop opencode-desktop` line, and after
+that NO further shell output appears — no SELFTEST, no XORG,
+no DESKTOP READY, no DESKTOP STATE, no DIAG output, no cat
+output. The file ends with a bare prompt. The service is
+DISABLED at boot (rootfs-build) and the boot log shows only
+the vsock-proxy units starting — no opencode-desktop unit — so
+the stop is a no-op that risks hanging on D-Bus/systemd (up to
+the 90 s stop timeout; the run lived 106 s, the bootstrap
+reached the stop at ~15:30:15, so a 90 s hang covers the rest
+of the run). The stop line is the proven hang point and is
+removed; the pkill lines already handle strays.
+3. The bootstrap was typed into a blocked shell, and the tty
+input buffer dropped the middle. `sendConsoleText:`
+(KernGlue.m:526) sends the ENTIRE bootstrap (~5707 chars,
+verified by extraction) in 512-byte chunks with 0.05 s sleeps
+(~0.55 s total), 1.0 s after "Serve launch started". The shell
+executes line by line while the app sends; the curl loop blocks
+the shell ~6 s, so the ~5 KB queues in the 4 KB tty input
+buffer and the middle is dropped/corrupted. Evidence in the
+guest log: the `cp` line in the first pass is spliced (`cp
+/tmp/desktop-diag.txt ~/desktop-diag.txt 2>server listening` —
+the curl loop's "server listening" output interleaved into the
+command), and the heredoc opener is spliced too (typed stream
+ends "cat > /tmp/xorg.conf.d/10-fbdev.con", executed stream
+starts "f <<'EOF'"). The chunking comment claims it prevents
+overflow, but 0.05 s sleeps cannot help when the shell is
+blocked for 6 s (then up to 120 s in the READY loop). The fix
+is to split the bootstrap: phase 1 (~1.4 KB, serve only) at
+boot, phase 2 (~4.5 KB, desktop) only after the first healthy
+/api/info probe, when the shell is idle.
+4. The diagnostics file was never written, because the READY
+loop (60 iterations × 2 s = up to 120 s) runs BEFORE the
+diagnostics block, and the app lived only 106 s. The fetch at
+15:30:21 (16 s after serve start) was too early; the retries
+on the 15:30:25 and 15:30:27 Desktop opens ran silently (miss
+logged once per boot via guestDiagnosticsMissLogged) and the
+file still did not exist. The "10 s after a real DESKTOP
+READY" fetch trigger (OCEngine.m:693) never fired because no
+real DESKTOP READY ever arrived. The server channel itself is
+NOT the failure: the fetch ran and returned FileNotFoundError
+for desktop-diag.txt — the file genuinely did not exist. The
+fix is to write the diagnostics as a script
+(diag-snapshot.sh) run once before the READY loop and
+refreshed every 10 s by diag-loop.sh, so the file exists
+within ~20 s of serve start, and to retry the fetch on a
+timer and log every miss.
+5. Xorg and ai.opencode: UNKNOWN, not dead. No XORG line, no
+DESKTOP STATE, no Xorg log tail, no ai-opencode log tail in
+either log — because the shell never reached those commands.
+The display log's 977334d section (0.005 s → 104.161 s) has
+ONLY 2D CPU flushes of resource 2 at 1290x2796, ~5/s, with
+bursts to x13–x17 at 88–97 s (the user's keyboard input /
+login-prompt repeats). No virgl scanout, no other resource,
+ever. X never drew because X never started.
+6. The repeated "termx login:" lines in the 15:32 screenshot
+are the guest's own tty1 console, not the TermX app. The
+guest log has only 8 such lines (one per boot, the autologin
+banner on ttyS0). The screenshot's dozens are on tty1 (the
+framebuffer): getty re-prints the prompt on each newline, and
+the iOS keyboard in the Desktop view sends keystrokes to the
+active VT (tty1, since X never took over). The desktop never
+takes over tty1, so the screen stays on the login prompt and
+every keystroke lands there.
+
+### What changed in df597d2
+
+- Two-phase bootstrap (src/OCEngine.m): `consoleBootstrap`
+  (phase 1, serve only, 1439 bytes) is typed at boot;
+  `desktopBootstrap` (phase 2, ~4.5 KB) is sent only after the
+  first healthy /api/info probe, gated on `desktopBootstrapSent`,
+  2 s after the probe so the curl loop has finished breaking.
+  The queue behind every blocking command in phase 2 is now
+  measured and under the 4 KB tty buffer: old-Xorg wait 2444
+  bytes, Xorg socket wait 1541 bytes, READY loop 695 bytes.
+  Both phases are extracted from the ObjC literals and parsed
+  with `bash -n` before building; the python self-test
+  one-liner is compile-checked (unchanged from 977334d).
+- `sudo systemctl stop opencode-desktop` removed (the proven
+  hang point; service disabled at boot; pkill lines already
+  handle strays). verify-local.py asserts the command is
+  absent from the binary.
+- Diagnostics as a script: /tmp/diag-snapshot.sh (the
+  diagnostics block, plus a new "DIAG selftest:" line) is
+  written right after the pkill lines, run once, and re-run
+  every 10 s by /tmp/diag-loop.sh (backgrounded, killed on
+  restart by a new pkill line). The file exists within ~20 s
+  of serve start; the console re-emit after the READY loop is
+  kept as a bonus, not the channel.
+- Fetch retries, visible: fetchGuestDiagnosticsIfNeeded logs
+  EVERY miss with its attempt number and schedules a retry in
+  10 s (max 12 attempts ≈ 2 min), guarded so only one retry
+  is pending. The once-per-boot miss suppression
+  (guestDiagnosticsMissLogged) is removed.
+- verify-local.py: new-string checks for `desktopBootstrap`,
+  `Desktop launch started`, `diag-snapshot.sh`,
+  `diag-loop.sh`, `DIAG selftest:`, the attempt-logged miss
+  line; absence check for the systemctl command.
+  ALL PASS (134 checks).
+
+Build df597d2, local, 2026-11-25 ~10:17 IST. IPA
+`mac-ipas/OpenCode-iOS-df597d2.ipa`, 25,196,776 bytes, SHA-256
+7be6e387760d7a10bd2f6b11190ac9b4a68e33f89cd86d9d247fa8c227efacce.
+GitHub release opencode-df597d2. Staged in
+`~/workspace/goals/opencode-for-ios/files/OpenCode-iOS-df597d2.ipa`.
+
+### Device test (df597d2)
+
+Install over 977334d, do NOT delete the app — the guest image
+is already installed. Tap + on Threads, then send a screenshot
+AND engine.log. What to look for: "Desktop launch started" in
+the engine log ~2 s after "Server healthy"; "Guest diagnostics
+(via server)" with Active VT, window count, Xorg errors, app
+log tail and self-test result (arrives within ~20 s of serve
+start now, retries logged with attempt numbers if it misses);
+"SELFTEST fb0 red" and red on screen if the write path works;
+"XORG RUNNING"/"XORG DEAD" and "DESKTOP STATE" naming whether
+Xorg lived and whether ai.opencode mapped a window.
+
 ## Status: BLACK DESKTOP — RED-FILL SELF-TEST, XORG LIVENESS, DIAGNOSTICS VIA SERVER — LOCAL BUILD 977334d, verified
 
 User test of 165c227, 2026-11-25 15:16 IST: desktop STILL black.
