@@ -540,6 +540,19 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
     return text;
 }
 
+// Last N lines of a file, or the whole file when it is short. The
+// display activity log can hold a line a second while the desktop
+// runs, so the pasted log carries its tail, not its whole history.
++ (nullable NSString *)tailOfFile:(NSString *)path maxLines:(NSUInteger)maxLines label:(NSString *)label {
+    NSString *text = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+    if (!text) return [NSString stringWithFormat:@"(%@ not present yet)\n", label];
+    if (!text.length) return [NSString stringWithFormat:@"(%@ is empty)\n", label];
+    NSArray *lines = [text componentsSeparatedByString:@"\n"];
+    if (lines.count <= (NSInteger)maxLines + 1) return text;
+    NSArray *tail = [lines subarrayWithRange:NSMakeRange(lines.count - maxLines, maxLines)];
+    return [[NSString stringWithFormat:@"(... %lu earlier lines omitted)\n", (unsigned long)(lines.count - maxLines)] stringByAppendingString:[tail componentsJoinedByString:@"\n"]];
+}
+
 - (NSString *)fullLogText {
     NSMutableString *out = [NSMutableString string];
     [out appendString:@"=== Engine log ===\n"];
@@ -559,6 +572,10 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
         [out appendString:@"(Log from a previous run: the engine is stopped now, so this is not live.)\n"];
     }
     [out appendString:guest];
+    [out appendString:@"\n=== Display log (runtime) ===\n"];
+    [out appendString:@"(The runtime's own record of guest scanouts: presented, dropped, or refused and why. Written only when the runtime logs it; absent means no scanout was recorded.)\n"];
+    NSString *displayLog = [[self engineDirectory] stringByAppendingPathComponent:@"display-activity.log"];
+    [out appendString:[OCEngine tailOfFile:displayLog maxLines:100 label:@"display-activity.log"]];
     return out;
 }
 
@@ -576,6 +593,14 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
 // PROGRESS / ERROR lines and the definitive start signals.
 - (void)handleGuestConsoleLine:(NSString *)line {
     if (!line.length) return;
+    if ([line hasPrefix:@"DIAG "]) {
+        // The bootstrap's compact desktop summary: it belongs in
+        // the engine log too, so the pasted log names the VT, the
+        // mapped window and the Xorg/app failures without needing
+        // the whole guest console. The full block stays in guest.log.
+        [self appendEngineLogSync:line];
+        return;
+    }
     if ([line containsString:@"server listening"]) {
         // The bootstrap's curl probe to /api/info succeeded in the
         // guest. Record it and log it; it does NOT mark the engine
@@ -957,8 +982,16 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
     // pgrep pattern (opencode-desktop) matched the session script
     // itself, so DESKTOP READY fired 2 s after the service
     // started, before the app existed. Gate on the app process.
-    [b appendString:@"for i in $(seq 1 60); do if pgrep -f ai.opencode >/dev/null 2>&1 && [ -S /tmp/.X11-unix/X0 ]; then echo \"DESKTOP READY\"; break; fi; sleep 2; done\n"];
+    // And on the window actually being mapped on :0: the process +
+    // socket gate fired while the screen was still black, because a
+    // running Electron process with no mapped window draws nothing.
+    // xwininfo -root -tree lists the root's children as lines
+    // starting with a window id; zero such lines means nothing is
+    // mapped. If the process is up but no window ever maps, say so
+    // and do not claim ready.
+    [b appendString:@"for i in $(seq 1 60); do if pgrep -f ai.opencode >/dev/null 2>&1 && [ -S /tmp/.X11-unix/X0 ] && [ $(DISPLAY=:0 xwininfo -root -tree 2>/dev/null | grep -c '^ *0x') -gt 0 ]; then echo \"DESKTOP READY\"; break; fi; sleep 2; done\n"];
     [b appendString:@"pgrep -f ai.opencode >/dev/null 2>&1 || echo \"ERROR Desktop did not start (see above)\"\n"];
+    [b appendString:@"pgrep -f ai.opencode >/dev/null 2>&1 && [ $(DISPLAY=:0 xwininfo -root -tree 2>/dev/null | grep -c '^ *0x') -eq 0 ] && echo \"ERROR Desktop window did not appear (ai.opencode is running but no window is mapped on :0)\"\n"];
     // Diagnostics for the next device log: prove the window is
     // mapped on the display the framebuffer shows, and which VT
     // is active. xwininfo is in the image; chvt is not, which is
@@ -972,6 +1005,15 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
     // own log file; that reason is only in the stderr redirect.
     // The app log tail shows whether Electron even got going.
     [b appendString:@"echo \"Xorg log:\"; tail -20 /tmp/Xorg.log 2>/dev/null; echo \"Desktop app log:\"; tail -10 /tmp/ai-opencode.log 2>/dev/null; true\n"];
+    // Compact summary, one line each with a DIAG prefix: the console
+    // handler copies these into the engine log, so the pasted log
+    // names the VT, the mapped window and the Xorg/app failures
+    // without needing the whole guest console. The full block above
+    // stays in guest.log.
+    [b appendString:@"echo \"DIAG Active VT: $(cat /sys/class/tty/tty0/active 2>/dev/null || echo unknown)\"\n"];
+    [b appendString:@"echo \"DIAG Windows on :0: $(DISPLAY=:0 xwininfo -root -tree 2>/dev/null | grep -c '^ *0x')\"\n"];
+    [b appendString:@"echo \"DIAG Xorg errors: $(grep -c -F '(EE)' /var/log/Xorg.0.log 2>/dev/null; true)\"\n"];
+    [b appendString:@"echo \"DIAG app log: $(tail -1 /tmp/ai-opencode.log 2>/dev/null | tr -d '\\n' | cut -c1-160)\"\n"];
     [b appendString:@"echo \"--- end desktop diagnostics ---\"\n"];
     return b;
 }

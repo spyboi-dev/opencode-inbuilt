@@ -451,6 +451,18 @@ static BOOL OCPathUsableOnKernelCommandLine(const char *path) {
     _boot.session_record_path = bootSession;
     _running = YES;
     [[OCEngine shared] appendEngineLogSync:@"Guest boot started (Kernarium, Debian 13)"];
+    // The runtime's own display activity log
+    // (UML_GPU_DISPLAY_ACTIVITY_LOG): the only host-side record of
+    // whether a guest scanout was presented, dropped, or refused
+    // and why — the app cannot see it any other way. It is a file,
+    // not stderr, because the emulator's stderr shares the guest
+    // console and loses lines under load. The shipped framework is
+    // built with the plain kernarium-ios-device preset, not the
+    // app-store one, so the log is live in it; if it ever were not,
+    // this is a harmless no-op. Set before run(): the log opens on
+    // first use, and the file is included in the full log text.
+    NSString *displayLogPath = [[[OCEngine shared] engineDirectory] stringByAppendingPathComponent:@"display-activity.log"];
+    setenv("UML_GPU_DISPLAY_ACTIVITY_LOG", displayLogPath.UTF8String, 1);
     // run() blocks until the guest stops, so it owns its own thread.
     // The boot struct lives in an ivar (see above); its C strings
     // are the strdup'd buffers above, freed after run() returns.

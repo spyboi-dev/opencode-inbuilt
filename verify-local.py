@@ -215,10 +215,12 @@ new_strings = ["Retrying in 60s", "Automatic retry: starting engine",
                "ERROR Xorg did not start",
                "Xorg log:",
                "Desktop app log:",
-               # Desktop viewDidAppear fix + Settings iOS card restyle (2026-11-25)
-               "Server connection, agent, providers and app info.",
-               "server.rack",
-               "plug"]
+               # Desktop window-mapped READY gate + display activity log (2026-11-25)
+               "Desktop window did not appear",
+               "DIAG ",
+               "UML_GPU_DISPLAY_ACTIVITY_LOG",
+               "display-activity.log",
+               "Display log (runtime)"]
 for m in new_strings:
     check(f"new string present: {m}", m in blob)
 # Removed controls must be gone as button titles
@@ -236,7 +238,13 @@ for m in ["JITless", "LinuxRunner", "inbuilt",
           "guest workspace",
           "Guest ready",
           "Verifying the image",
-          "Booting guest"]:
+          "Booting guest",
+          # 1bf4c3a Settings card restyle, reverted 2026-11-25: Settings
+          # must match the Integrations page (plain inset grouped
+          # table), no glyph tiles, no header card.
+          "Server connection, agent, providers and app info.",
+          "server.rack",
+          "plug"]:
     check(f"slop gone: {m}", m not in blob)
 # Non-ASCII UI strings live in the binary as UTF-16LE (the blob runs
 # break at the ellipsis), so check the raw bytes directly.
