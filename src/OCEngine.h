@@ -111,7 +111,8 @@ typedef void (^OCGuestExecutor)(NSString *command, NSString *workingDirectory,
 // Guest diagnostics through the server's file API (the console
 // drops post-X output): reads ~/desktop-diag.txt via /api/fs/read
 // and appends it to the engine log. Once per boot; a miss retries
-// on the next call.
+// on the next call and on a 10 s timer, up to 12 attempts, and
+// every miss is logged with its attempt number.
 - (void)fetchGuestDiagnosticsIfNeeded;
 // First-launch setup: downloads the prebuilt system image
 // (Node + OpenCode baked in) and verifies the SHA-256 of the

@@ -165,6 +165,11 @@ for i in range(1, 8):
     check(f"string present: Launch step {i}/7", f"Launch step {i}/7" in blob)
 check("no TODO-FILL", "TODO-FILL" not in blob)
 check("no BUILD-NOTE", "BUILD-NOTE" not in blob)
+# The `systemctl stop opencode-desktop` line is gone: on 977334d
+# the shell never got past it (systemctl can block on D-Bus for
+# up to 90 s), so X never started. Only the source comment may
+# mention it; the binary must not contain the command.
+check("no 'systemctl stop opencode-desktop' command", "systemctl stop opencode-desktop" not in blob)
 # New behaviour in this build
 new_strings = ["Retrying in 60s", "Automatic retry: starting engine",
                "duplicate install ignored",
@@ -239,7 +244,21 @@ new_strings = ["Retrying in 60s", "Automatic retry: starting engine",
                "Self-test log:",
                "desktop-diag.txt",
                "Guest diagnostics (via server)",
-               "fetchGuestDiagnosticsIfNeeded"]
+               "fetchGuestDiagnosticsIfNeeded",
+               # Two-phase bootstrap (2026-11-25): the 977334d logs
+               # prove the whole 5 KB bootstrap typed at once
+               # overflows the tty input buffer while the shell is
+               # blocked in the curl loop, so the middle is dropped
+               # (the shell never got past `systemctl stop`, X never
+               # started, no diagnostics file). Phase 2 goes only
+               # after the server probe first succeeds, and the
+               # diagnostics are a script refreshed every 10 s.
+               "desktopBootstrap",
+               "Desktop launch started",
+               "diag-snapshot.sh",
+               "diag-loop.sh",
+               "DIAG selftest:",
+               "Guest diagnostics not available via server yet (attempt "]
 for m in new_strings:
     check(f"new string present: {m}", m in blob)
 # Removed controls must be gone as button titles
