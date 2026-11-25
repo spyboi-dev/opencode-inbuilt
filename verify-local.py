@@ -258,7 +258,20 @@ new_strings = ["Retrying in 60s", "Automatic retry: starting engine",
                "diag-snapshot.sh",
                "diag-loop.sh",
                "DIAG selftest:",
-               "Guest diagnostics not available via server yet (attempt "]
+               "Guest diagnostics not available via server yet (attempt ",
+               # Server-file delivery of the desktop bootstrap
+               # (df597d2 logs: typing the 4.5 KB script dropped
+               # bytes even into an idle shell — the diag-snapshot
+               # heredoc opener was lost, the fbdev.conf heredoc
+               # was mangled, and the ai.opencode line split
+               # mid-flag so `gpu` exited 127). The script is
+               # written through the server's file API and only
+               # the one-line `sh` is typed; console typing is
+               # the fallback if the write fails.
+               "desktop-bootstrap.sh",
+               "experimental/fs/write",
+               "Desktop bootstrap write failed",
+               "sh /tmp/desktop-bootstrap.sh"]
 for m in new_strings:
     check(f"new string present: {m}", m in blob)
 # Removed controls must be gone as button titles

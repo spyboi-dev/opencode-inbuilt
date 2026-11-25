@@ -80,6 +80,11 @@ static NSString *const kGuestImageInstalled = @"oc.guestImageInstalled";
 // probe first succeeds, so the guest shell is idle. See
 // consoleBootstrap (phase 1) for why the split exists.
 - (NSString *)desktopBootstrap;
+// Writes the desktop script to the guest as a file through the
+// server's file API, then types only the one-line `sh` command
+// to run it. Typing the ~4.5 KB script dropped bytes even into
+// an idle shell (df597d2), so the file is the delivery now.
+- (void)deliverDesktopBootstrap;
 - (void)checkForImageUpdateForLaunch;
 - (void)noteAutoStartFailed:(NSString *)reason;
 @end
@@ -1053,6 +1058,43 @@ static NSString *OCEngineStripANSI(NSString *line) {
 // Xorg socket wait (30 s max) and the READY loop (120 s max),
 // and each has less than 4 KB queued behind it — and the READY
 // loop is last, with nothing after it that needs typing.
+// Phase 2 delivery: the desktop script goes to the guest as a
+// file, not as typed console input. Typing the ~4.5 KB script
+// into the tty dropped bytes even into an idle shell (df597d2
+// logs: the diag-snapshot heredoc opener was lost so the script
+// was never written, the fbdev.conf heredoc was mangled, and the
+// ai.opencode line was split mid-flag — `--disable-gpu` became
+// `--disable-` plus a `gpu` command that exited 127, so the
+// desktop never started). The server is already proven up by
+// the /api/info probe, and its POST /api/experimental/fs/write
+// endpoint writes raw bytes to an absolute path (the desktop
+// app uploads attachments through it; the 2.3.0 server in the
+// guest has it). Only one short line is ever typed:
+// `sh /tmp/desktop-bootstrap.sh`. The script's heredocs are
+// read from the file by sh, not from the tty, so they cannot
+// be split. If the write fails the old console typing is the
+// fallback, so a surprise in the experimental endpoint leaves
+// the desktop delayed rather than unlaunched.
+- (void)deliverDesktopBootstrap {
+    OCSettings *settings = [OCSettings shared];
+    OCServerClient *client = [[OCServerClient alloc] initWithServerURL:settings.serverURL password:[settings serverPassword]];
+    NSData *data = [[self desktopBootstrap] dataUsingEncoding:NSUTF8StringEncoding];
+    __weak typeof(self) weakSelf = self;
+    [client writeFileAtPath:@"/tmp/desktop-bootstrap.sh" content:data completion:^(NSString * _Nullable resolvedPath, NSError * _Nullable error) {
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        if (strongSelf.state == OCEngineStateStopped) return;
+        if (!error && resolvedPath.length) {
+            [strongSelf appendEngineLog:@"Desktop launch started"];
+            [[OCKernGlue shared] sendConsoleText:@"sh /tmp/desktop-bootstrap.sh"];
+            return;
+        }
+        [strongSelf appendEngineLog:[NSString stringWithFormat:@"Desktop bootstrap write failed (%@), falling back to console", error ? error.localizedDescription : @"no path"]];
+        [strongSelf appendEngineLog:@"Desktop launch started"];
+        [[OCKernGlue shared] sendConsoleText:[strongSelf desktopBootstrap]];
+    }];
+}
+
 - (NSString *)desktopBootstrap {
     NSMutableString *b = [NSMutableString string];
     // The desktop session, started here instead of through the
@@ -1322,15 +1364,19 @@ static NSString *OCEngineStripANSI(NSString *line) {
                     [strongSelf setServeProgress:1.0 status:@"Engine running"];
                     [strongSelf appendEngineLog:@"Server healthy at 127.0.0.1:4096"];
                     // Phase 2 of the bootstrap: the desktop section
-                    // goes now, not with the serve launch. The whole
-                    // 5 KB bootstrap typed at once overflows the tty
-                    // input buffer while the shell is blocked in the
-                    // curl loop, and the middle is dropped (977334d:
-                    // the shell never got past `systemctl stop`, X
-                    // never started, no diagnostics file). The server
-                    // answering means the curl loop is done and the
-                    // shell is idle, so the desktop section is typed
-                    // into a ready shell. 2 s later, so the loop has
+                    // goes now, not with the serve launch — and not
+                    // as typed console input. Typing the ~4.5 KB
+                    // script dropped bytes even into a ready shell
+                    // (df597d2: the diag-snapshot heredoc opener
+                    // was lost so the script was never written, the
+                    // fbdev.conf heredoc was mangled, and the
+                    // ai.opencode line split mid-flag so `gpu`
+                    // exited 127 and the desktop never started).
+                    // The server answering means it can receive
+                    // the script as a file, so deliverDesktop-
+                    // Bootstrap writes it through the server's
+                    // file API and types only the one-line `sh`
+                    // command. 2 s later, so the curl loop has
                     // finished breaking.
                     if (!strongSelf.desktopBootstrapSent) {
                         strongSelf.desktopBootstrapSent = YES;
@@ -1339,8 +1385,7 @@ static NSString *OCEngineStripANSI(NSString *line) {
                             OCEngine *engine = weakEngine;
                             if (!engine) return;
                             if (engine.state == OCEngineStateStopped) return;
-                            [engine appendEngineLog:@"Desktop launch started"];
-                            [[OCKernGlue shared] sendConsoleText:[engine desktopBootstrap]];
+                            [engine deliverDesktopBootstrap];
                         });
                     }
                     // Running now means the server answers, not the

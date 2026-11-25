@@ -242,6 +242,52 @@
     [task resume];
 }
 
+- (void)writeFileAtPath:(NSString *)path content:(NSData *)content completion:(void (^)(NSString * _Nullable, NSError * _Nullable))completion {
+    // POST /api/experimental/fs/write — the server writes the raw
+    // request body to the path (absolute, or relative to the
+    // location; unlike read it is not confined to it) and returns
+    // the resolved absolute path in data.path. The desktop app
+    // uploads attachments through this endpoint, and the 2.3.0
+    // server in the guest has it (verified in the pinned source
+    // and the shipped binary). The engine uses it to deliver the
+    // desktop bootstrap script as a file instead of typing it
+    // into the console (see OCEngine deliverDesktopBootstrap).
+    NSString *encoded = [path stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
+    NSString *urlPath = [NSString stringWithFormat:@"/api/experimental/fs/write?path=%@", encoded ?: @""];
+    NSURL *url = [NSURL URLWithString:[self.serverURL stringByAppendingString:urlPath]];
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
+    req.HTTPMethod = @"POST";
+    req.timeoutInterval = 30;
+    NSString *auth = [self authHeader];
+    if (auth.length) [req setValue:auth forHTTPHeaderField:@"Authorization"];
+    [req setValue:@"application/octet-stream" forHTTPHeaderField:@"Content-Type"];
+    req.HTTPBody = content;
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req
+        completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
+        NSString *resolved = nil;
+        NSError *resultError = error;
+        if (!resultError) {
+            NSHTTPURLResponse *http = (NSHTTPURLResponse *)response;
+            if (http.statusCode < 200 || http.statusCode >= 300) {
+                NSString *msg = [NSString stringWithFormat:@"Server returned HTTP %ld", (long)http.statusCode];
+                resultError = [NSError errorWithDomain:@"OCServerClient" code:http.statusCode
+                                              userInfo:@{NSLocalizedDescriptionKey: msg}];
+            } else {
+                if (data.length) {
+                    id json = [OCUtil jsonObjectFromData:data];
+                    if ([json isKindOfClass:[NSDictionary class]] && [json[@"data"] isKindOfClass:[NSDictionary class]]) {
+                        id p = json[@"data"][@"path"];
+                        if ([p isKindOfClass:[NSString class]]) resolved = p;
+                    }
+                }
+                if (!resolved.length) resolved = path;
+            }
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(resolved, resultError); });
+    }];
+    [task resume];
+}
+
 - (void)runShellCommand:(NSString *)command inSession:(NSString *)sessionID
              completion:(void (^)(NSDictionary * _Nullable, NSError * _Nullable))completion {
     NSString *path = [NSString stringWithFormat:@"/api/session/%@/shell", sessionID];

@@ -49,6 +49,8 @@ NS_ASSUME_NONNULL_BEGIN
              completion:(void (^)(NSArray * _Nullable entries, NSError * _Nullable error))completion;
 - (void)readFileAtPath:(NSString *)path
             completion:(void (^)(NSString * _Nullable content, NSError * _Nullable error))completion;
+- (void)writeFileAtPath:(NSString *)path content:(NSData *)content
+             completion:(void (^)(NSString * _Nullable resolvedPath, NSError * _Nullable error))completion;
 - (void)runShellCommand:(NSString *)command inSession:(NSString *)sessionID
              completion:(void (^)(NSDictionary * _Nullable shell, NSError * _Nullable error))completion;
 - (void)shellOutput:(NSString *)shellID
