@@ -24,7 +24,15 @@ static NSString *const kGuestImageInstalled = @"oc.guestImageInstalled";
 // Guest diagnostics fetched through the server's file API
 // (fetchGuestDiagnosticsIfNeeded): the console drops post-X
 // output, so the diagnostics file is read over HTTP instead.
+// The file is rewritten every 10 s by the guest's diag-loop, so
+// fetching is repeated on the same 10 s cadence (not once per
+// boot): the first fetch is always too early — it lands before
+// Xorg starts, as the 25bb172 run proved — and only the later
+// ones name Xorg's fate. Blocks are logged only when their
+// content changed since the last fetch, so the engine log gets
+// the state transitions, not twelve copies of the same block.
 @property (nonatomic, assign) BOOL guestDiagnosticsFetched;
+@property (nonatomic, strong, nullable) NSString *lastGuestDiagnosticsText;
 // Misses are retried on a timer (fetchGuestDiagnosticsIfNeeded):
 // the diagnostics file is written ~20 s after serve starts, so
 // the first fetch usually misses. Attempts cap the retries.
@@ -931,6 +939,7 @@ static NSString *OCEngineStripANSI(NSString *line) {
     self.desktopReady = NO;
     self.serverListening = NO;
     self.guestDiagnosticsFetched = NO;
+    self.lastGuestDiagnosticsText = nil;
     self.guestDiagnosticsFetchAttempts = 0;
     self.guestDiagnosticsRetryPending = NO;
     self.desktopBootstrapSent = NO;
@@ -1087,11 +1096,19 @@ static NSString *OCEngineStripANSI(NSString *line) {
         if (!error && resolvedPath.length) {
             [strongSelf appendEngineLog:@"Desktop launch started"];
             [[OCKernGlue shared] sendConsoleText:@"sh /tmp/desktop-bootstrap.sh"];
+            // Start the diagnostics cadence now, not only when the
+            // user opens the Desktop view: the snapshot file is
+            // rewritten every 10 s, and the fetches name Xorg's
+            // fate as the desktop starts (25bb172: the only fetch
+            // was the too-early first snapshot, because nothing
+            // fetched again).
+            [strongSelf fetchGuestDiagnosticsIfNeeded];
             return;
         }
         [strongSelf appendEngineLog:[NSString stringWithFormat:@"Desktop bootstrap write failed (%@), falling back to console", error ? error.localizedDescription : @"no path"]];
         [strongSelf appendEngineLog:@"Desktop launch started"];
         [[OCKernGlue shared] sendConsoleText:[strongSelf desktopBootstrap]];
+        [strongSelf fetchGuestDiagnosticsIfNeeded];
     }];
 }
 
@@ -1164,6 +1181,14 @@ static NSString *OCEngineStripANSI(NSString *line) {
     [b appendString:@"grep -F \"(EE)\" /var/log/Xorg.0.log 2>/dev/null | tail -5; true\n"];
     [b appendString:@"echo \"Xorg log:\"; tail -20 /tmp/Xorg.log 2>/dev/null; echo \"Desktop app log:\"; tail -10 /tmp/ai-opencode.log 2>/dev/null; true\n"];
     [b appendString:@"echo \"Self-test log:\"; tail -5 /tmp/selftest.log 2>/dev/null; true\n"];
+    // Which framebuffer devices exist at all: the 25bb172
+    // snapshot said "DIAG fb size: unknown" (its cat of
+    // /sys/class/graphics/fb0/virtual_size failed) while the
+    // self-test reads the same path, so if the path is wrong
+    // both fail together — list the directory so a wrong path
+    // is visible instead of a bare "unknown".
+    [b appendString:@"echo \"Graphics: $(ls /sys/class/graphics/ 2>/dev/null | tr '\\n' ' ')\"\n"];
+    [b appendString:@"echo \"DIAG graphics: $(ls /sys/class/graphics/ 2>/dev/null | tr '\\n' ' ')\"\n"];
     [b appendString:@"echo \"DIAG Active VT: $(cat /sys/class/tty/tty0/active 2>/dev/null || echo unknown)\"\n"];
     [b appendString:@"echo \"DIAG Windows on :0: $(DISPLAY=:0 xwininfo -root -tree 2>/dev/null | grep -c '^ *0x')\"\n"];
     [b appendString:@"echo \"DIAG Xorg errors: $(grep -c -F '(EE)' /var/log/Xorg.0.log 2>/dev/null; true)\"\n"];
@@ -1172,7 +1197,13 @@ static NSString *OCEngineStripANSI(NSString *line) {
     [b appendString:@"echo \"DIAG fbdev driver: $(grep -c -F 'FBDEV(0)' /var/log/Xorg.0.log 2>/dev/null; true)\"\n"];
     [b appendString:@"echo \"DIAG fb size: $(cat /sys/class/graphics/fb0/virtual_size 2>/dev/null || echo unknown)\"\n"];
     [b appendString:@"echo \"DIAG fb-flush log: $(tail -1 /tmp/fb-flush.log 2>/dev/null | tr -cd '\\11\\40-\\176' | cut -c1-160)\"\n"];
-    [b appendString:@"echo \"DIAG selftest: $(test -s /tmp/selftest.log && echo FAILED || echo OK)\"\n"];
+    // "DIAG selftest: OK" in 25bb172 only meant /tmp/selftest.log
+    // was empty or missing — the python may never have run, and
+    // the echo "SELFTEST fb0 red" prints regardless (it follows a
+    // `;`). The python now writes a result marker on success, so
+    // the line names the outcome: red WxH, FAILED (traceback in
+    // the log), or NOT-RUN (python never reached the write).
+    [b appendString:@"echo \"DIAG selftest: $(cat /tmp/selftest.result 2>/dev/null || (test -s /tmp/selftest.log && echo FAILED || echo NOT-RUN))\"\n"];
     [b appendString:@"echo \"--- end desktop diagnostics ---\"; } > /tmp/desktop-diag.txt 2>&1\n"];
     [b appendString:@"cp /tmp/desktop-diag.txt ~/desktop-diag.txt 2>/dev/null; cp /tmp/desktop-diag.txt /root/Projects/desktop-diag.txt 2>/dev/null; true\n"];
     [b appendString:@"EOF\n"];
@@ -1234,9 +1265,15 @@ static NSString *OCEngineStripANSI(NSString *line) {
     // size comes from sysfs, the pixel is BGRA red for the 32bpp
     // XRGB framebuffer. A failure prints its traceback to
     // /tmp/selftest.log, tailed in the diagnostics below.
-    [b appendString:@"sudo python3 -c \"s=open('/sys/class/graphics/fb0/virtual_size').read().strip().split(','); w=int(s[0]); h=int(s[1]); open('/dev/fb0','wb').write(b'\\x00\\x00\\xff\\x00'*(w*h))\" 2>/tmp/selftest.log; echo \"SELFTEST fb0 red\"\n"];
+    [b appendString:@"sudo python3 -c \"s=open('/sys/class/graphics/fb0/virtual_size').read().strip().split(','); w=int(s[0]); h=int(s[1]); open('/dev/fb0','wb').write(b'\\x00\\x00\\xff\\x00'*(w*h)); open('/tmp/selftest.result','w').write('red %dx%d' % (w,h))\" 2>/tmp/selftest.log; echo \"SELFTEST fb0 red\"\n"];
     [b appendString:@"sudo nohup Xorg :0 -ac -noreset -nolisten tcp vt01 -configdir /tmp/xorg.conf.d >/tmp/Xorg.log 2>&1 &\n"];
-    [b appendString:@"for _ in $(seq 1 30); do [ -S /tmp/.X11-unix/X0 ] && break; sleep 1; done\n"];
+    // Socket wait with early death detection: the 25bb172 run
+    // spent its whole 24 s after launch inside this silent 30 s
+    // wait (Xorg never created the socket in 21 s) and the app
+    // was closed before the wait ended, so no XORG line ever
+    // printed. If Xorg is gone after a 3 s grace for exec, say
+    // so at once with its log tail instead of burning the wait.
+    [b appendString:@"for i in $(seq 1 30); do [ -S /tmp/.X11-unix/X0 ] && break; if [ $i -gt 3 ] && ! pgrep -x Xorg >/dev/null 2>&1; then echo \"ERROR Xorg died before its socket appeared\"; tail -20 /tmp/Xorg.log 2>/dev/null; break; fi; sleep 1; done\n"];
     // If the socket never appeared, say why: Xorg's own log goes
     // to /var/log/Xorg.0.log, but a failure before it opens that
     // file lands only in /tmp/Xorg.log (the stderr redirect).
@@ -1289,7 +1326,14 @@ static NSString *OCEngineStripANSI(NSString *line) {
     // this loop line, not its output — the parser matched the
     // words inside the typed command. The parser now requires a
     // bare line, so only the loop's own echo (below) counts.
-    [b appendString:@"for i in $(seq 1 60); do if pgrep -f ai.opencode >/dev/null 2>&1 && [ -S /tmp/.X11-unix/X0 ] && [ $(DISPLAY=:0 xwininfo -root -tree 2>/dev/null | grep -c '^ *0x') -gt 0 ]; then echo \"DESKTOP READY\"; break; fi; sleep 2; done\n"];
+    // Early breaks: a dead Xorg or an ai.opencode that never
+    // appeared must not burn the whole 120 s — the 25bb172 run
+    // lived 47 s and the loop was still in its early iterations
+    // when the app was closed, so DESKTOP STATE never printed.
+    // Xorg was verified RUNNING just above, so any later pgrep
+    // failure is real; ai.opencode gets 10 s of exec grace
+    // (it is launched just before the loop).
+    [b appendString:@"for i in $(seq 1 60); do if pgrep -f ai.opencode >/dev/null 2>&1 && [ -S /tmp/.X11-unix/X0 ] && [ $(DISPLAY=:0 xwininfo -root -tree 2>/dev/null | grep -c '^ *0x') -gt 0 ]; then echo \"DESKTOP READY\"; break; fi; if ! pgrep -x Xorg >/dev/null 2>&1; then echo \"ERROR Xorg died while waiting for the desktop\"; break; fi; if [ $i -gt 5 ] && ! pgrep -f ai.opencode >/dev/null 2>&1; then echo \"ERROR Desktop did not start (ai.opencode never appeared)\"; break; fi; sleep 2; done\n"];
     [b appendString:@"pgrep -f ai.opencode >/dev/null 2>&1 || echo \"ERROR Desktop did not start (see above)\"\n"];
     [b appendString:@"pgrep -f ai.opencode >/dev/null 2>&1 && [ $(DISPLAY=:0 xwininfo -root -tree 2>/dev/null | grep -c '^ *0x') -eq 0 ] && echo \"ERROR Desktop window did not appear (ai.opencode is running but no window is mapped on :0)\"\n"];
     // One always-printed state line after the loop: the loop's
@@ -1329,6 +1373,7 @@ static NSString *OCEngineStripANSI(NSString *line) {
     self.desktopReady = NO;
     self.serverListening = NO;
     self.guestDiagnosticsFetched = NO;
+    self.lastGuestDiagnosticsText = nil;
     self.guestDiagnosticsFetchAttempts = 0;
     self.guestDiagnosticsRetryPending = NO;
     self.desktopBootstrapSent = NO;
@@ -1483,7 +1528,19 @@ static NSString *OCEngineStripANSI(NSString *line) {
 // 15:30:21 and the later opens retried silently while the file
 // was never written, because the READY loop had not finished).
 - (void)fetchGuestDiagnosticsIfNeeded {
-    if (self.guestDiagnosticsFetched) return;
+    // Repeated, not once per boot: the guest rewrites
+    // /tmp/desktop-diag.txt every 10 s, and the first fetch
+    // always lands before Xorg starts (25bb172: the only fetched
+    // block showed "no display :0, 0 windows" because it was
+    // taken 4 s after launch). Stop only at the attempt cap
+    // (12 x 10 s ~= 2 min, the READY loop's span) or when the
+    // engine stops. One fetch or retry pending at a time, so
+    // viewDidAppear, the post-READY trigger and the
+    // deliverDesktopBootstrap call below all funnel into one
+    // cadence instead of stacking timers.
+    if (self.guestDiagnosticsFetchAttempts >= 12) return;
+    if (self.guestDiagnosticsRetryPending) return;
+    if (self.state == OCEngineStateStopped) return;
     self.guestDiagnosticsFetchAttempts++;
     NSUInteger attempt = self.guestDiagnosticsFetchAttempts;
     OCSettings *settings = [OCSettings shared];
@@ -1494,12 +1551,20 @@ static NSString *OCEngineStripANSI(NSString *line) {
         if (!strongSelf) return;
         if (text.length) {
             strongSelf.guestDiagnosticsFetched = YES;
-            [strongSelf appendEngineLog:[NSString stringWithFormat:@"Guest diagnostics (via server):\n%@", text]];
-            return;
+            // Log only when the block changed: the state moves as
+            // Xorg starts or dies, so the log gets the
+            // transitions (early / Xorg up / Xorg dead / ready)
+            // instead of twelve copies of the same block.
+            if (![text isEqualToString:strongSelf.lastGuestDiagnosticsText]) {
+                strongSelf.lastGuestDiagnosticsText = text;
+                [strongSelf appendEngineLog:[NSString stringWithFormat:@"Guest diagnostics (via server) [fetch %lu]:\n%@", (unsigned long)attempt, text]];
+            }
+        } else {
+            [strongSelf appendEngineLog:[NSString stringWithFormat:@"Guest diagnostics not available via server yet (attempt %lu/12: %@)", (unsigned long)attempt, error ? error.localizedDescription : @"no file"]];
         }
-        [strongSelf appendEngineLog:[NSString stringWithFormat:@"Guest diagnostics not available via server yet (attempt %lu/12: %@)", (unsigned long)attempt, error ? error.localizedDescription : @"no file"]];
-        // Retry on a timer while the engine is still running and
-        // the cap is not reached. One retry pending at a time.
+        // Re-fetch in 10 s whether this one hit or missed: a hit
+        // is a snapshot, not the final state, and the next one is
+        // the one that names Xorg's fate.
         if (attempt < 12 && !strongSelf.guestDiagnosticsRetryPending) {
             strongSelf.guestDiagnosticsRetryPending = YES;
             __weak typeof(self) weakRetry = strongSelf;
@@ -1507,7 +1572,6 @@ static NSString *OCEngineStripANSI(NSString *line) {
                 typeof(self) retrySelf = weakRetry;
                 if (!retrySelf) return;
                 retrySelf.guestDiagnosticsRetryPending = NO;
-                if (retrySelf.guestDiagnosticsFetched) return;
                 if (retrySelf.state == OCEngineStateStopped) return;
                 [retrySelf fetchGuestDiagnosticsIfNeeded];
             });

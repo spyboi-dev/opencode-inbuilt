@@ -271,7 +271,22 @@ new_strings = ["Retrying in 60s", "Automatic retry: starting engine",
                "desktop-bootstrap.sh",
                "experimental/fs/write",
                "Desktop bootstrap write failed",
-               "sh /tmp/desktop-bootstrap.sh"]
+               "sh /tmp/desktop-bootstrap.sh",
+               # Repeated diagnostics fetching (25bb172 logs: the
+               # only fetched block was the first snapshot, taken
+               # 4 s after launch before Xorg started, and the
+               # later snapshots naming Xorg's fate were never
+               # read). The fetch now repeats every 10 s and logs
+               # a block only when its content changed; the
+               # socket wait and the READY loop break out early
+               # on a dead Xorg instead of burning their full
+               # spans in silence.
+               "lastGuestDiagnosticsText",
+               "Guest diagnostics (via server) [fetch ",
+               "Xorg died before its socket appeared",
+               "Xorg died while waiting for the desktop",
+               "selftest.result",
+               "DIAG graphics:"]
 for m in new_strings:
     check(f"new string present: {m}", m in blob)
 # Removed controls must be gone as button titles
