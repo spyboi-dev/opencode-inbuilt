@@ -310,9 +310,37 @@ new_strings = ["Retrying in 60s", "Automatic retry: starting engine",
                "/home/termux/desktop-diag.txt",
                "retrying with modesetting",
                "XORG RUNNING (modesetting)",
-               "xorg-modesetting.conf.d"]
+               "xorg-modesetting.conf.d",
+               # Fetch fix + maximise + JIT probe (2026-11-25):
+               # the e001c27 "Failed to fetch" error page is the
+               # renderer fetching the desktop's OWN sidecar (its
+               # bundled JS stack proves it: the SDK transport
+               # calls the request-queue fetch, which calls the
+               # preload fetch, which calls the browser fetch to
+               # the sidecar URL from sidecarHttp). A plain serve
+               # writes no service registration, so the desktop
+               # spawned its own sidecar on 49374 and the fetch
+               # failed. Serve now runs in --service mode with
+               # the config pre-written with the Keychain
+               # password, so the desktop adopts our already-up
+               # server on 4096 instead. The window is maximised
+               # with an openbox rule (the app opens 1280x800
+               # by default) plus --start-maximized; the JIT
+               # probe names V8 JIT on/off from the guest.
+               "serve --service",
+               "opencode/service.json",
+               "--hostname 127.0.0.1",
+               "--start-maximized",
+               "<maximized>yes</maximized>",
+               "openbox maximise rule installed",
+               "JIT probe",
+               "--jitless",
+               "DIAG window:"]
 for m in new_strings:
     check(f"new string present: {m}", m in blob)
+# The old plain serve on 0.0.0.0 is gone: it wrote no service
+# registration, so the desktop spawned its own sidecar.
+check("no plain serve on 0.0.0.0", "serve --port 4096 --hostname 0.0.0.0" not in blob)
 # Removed controls must be gone as button titles
 check("no 'Stop engine' string", "Stop engine" not in blob)
 # Slop removal (2026-11-25): the removed UI strings must be gone

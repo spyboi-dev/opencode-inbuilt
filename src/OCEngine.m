@@ -1010,6 +1010,17 @@ static NSString *OCEngineStripANSI(NSString *line) {
     // Tools are baked in too; a missing one is logged, never apt-
     // installed at boot (it would vanish on the next reboot anyway).
     [b appendString:@"command -v git >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v rg >/dev/null 2>&1 && command -v gh >/dev/null 2>&1 && command -v bun >/dev/null 2>&1 && echo \"PROGRESS 89 Tools ready\" || echo \"ERROR A baked-in tool is missing (see above)\"\n"];
+    // JIT probe: the guest is a real Linux 6.18 kernel running
+    // native arm64 code (Node is an AArch64 ELF in the image), so
+    // V8 JIT is available in principle — but iOS denies
+    // executable memory to a process without the JIT
+    // entitlement, and this app is ad-hoc signed with none, so
+    // V8 likely runs JITless (the user's "slow without jit").
+    // Two timed loops name it from the guest itself: if the
+    // times match, JIT is off; if default is much faster, it
+    // is on. ~1 s total, before the server starts.
+    [b appendString:@"node -e \"const t=Date.now(); let s=0; for(let i=0;i<2000000;i++) s+=Math.sqrt(i); console.log('JIT probe default: '+(Date.now()-t)+' ms')\"\n"];
+    [b appendString:@"node --jitless -e \"const t=Date.now(); let s=0; for(let i=0;i<2000000;i++) s+=Math.sqrt(i); console.log('JIT probe jitless: '+(Date.now()-t)+' ms')\"\n"];
     // The vsock proxies: the systemd units are the normal path, but
     // a unit that did not start must not leave the server cut off.
     // A second socat that cannot bind just exits; the first one
@@ -1043,7 +1054,29 @@ static NSString *OCEngineStripANSI(NSString *line) {
     // password reaches curl only as $OPENCODE_SERVER_PASSWORD, so
     // the literal never lands in the console transcript.
     [b appendString:@"echo \"PROGRESS 90 Starting server...\"\n"];
-    [b appendString:@"nohup opencode serve --port 4096 --hostname 0.0.0.0 >/tmp/opencode-serve.log 2>&1 &\n"];
+    // The desktop app finds its server through the service
+    // registration file (~/.local/state/opencode/service.json):
+    // it reads the URL + password there and reuses a healthy
+    // server instead of spawning its own sidecar. A plain
+    // `serve` writes no registration, so the desktop spawned
+    // its own sidecar on 49374 — and the renderer's bootstrap
+    // fetch to that sidecar failed (the e001c27 "Failed to
+    // fetch" error page). Running serve in --service mode
+    // registers OUR server (already proven up by the /api/info
+    // probe below) so the desktop adopts it and the renderer
+    // fetches a server that is already listening. The service
+    // password comes from the service config file, not the
+    // environment, so the config is pre-written here with the
+    // same Keychain password the native UI uses — otherwise
+    // serve --service would generate a random one and lock
+    // the native UI out. Hostname 127.0.0.1: every consumer
+    // (vsock bridge, desktop, curl loop) reaches the server
+    // on loopback, and the registered URL is then unambiguous
+    // (a 0.0.0.0 bind would register an unusable URL).
+    [b appendString:@"mkdir -p /home/termux/.config/opencode\n"];
+    [b appendString:@"printf '{\"password\":\"%s\"}' \"$OPENCODE_SERVER_PASSWORD\" > /home/termux/.config/opencode/service.json\n"];
+    [b appendString:@"chmod 600 /home/termux/.config/opencode/service.json\n"];
+    [b appendString:@"nohup opencode serve --service --port 4096 --hostname 127.0.0.1 >/tmp/opencode-serve.log 2>&1 &\n"];
     [b appendString:@"for i in $(seq 1 60); do if curl -fsS -u \"opencode:$OPENCODE_SERVER_PASSWORD\" http://127.0.0.1:4096/api/info >/dev/null 2>&1; then echo \"server listening\"; break; fi; sleep 2; done\n"];
     [b appendString:@"ss -ltn 2>/dev/null | grep -q ':4096' && echo \"Server on 4096 confirmed\" || echo \"ERROR Server did not start (see /tmp/opencode-serve.log)\"\n"];
     // Phase 1 ends here: the server is up and the shell is about
@@ -1200,6 +1233,7 @@ static NSString *OCEngineStripANSI(NSString *line) {
     [b appendString:@"echo \"DIAG graphics: $(ls /sys/class/graphics/ 2>/dev/null | tr '\\n' ' ')\"\n"];
     [b appendString:@"echo \"DIAG Active VT: $(cat /sys/class/tty/tty0/active 2>/dev/null || echo unknown)\"\n"];
     [b appendString:@"echo \"DIAG Windows on :0: $(DISPLAY=:0 xwininfo -root -tree 2>/dev/null | grep -c '^ *0x')\"\n"];
+    [b appendString:@"echo \"DIAG window: $(DISPLAY=:0 xwininfo -root -tree 2>/dev/null | grep '^ *0x' | head -1 | tr -cd '\\11\\40-\\176' | cut -c1-160)\"\n"];
     [b appendString:@"echo \"DIAG Xorg errors: $(grep -c -F '(EE)' /tmp/Xorg.0.log /tmp/Xorg-modesetting.0.log 2>/dev/null; true)\"\n"];
     [b appendString:@"echo \"DIAG app log: $(tail -1 /tmp/ai-opencode.log 2>/dev/null | tr -cd '\\11\\40-\\176' | cut -c1-160)\"\n"];
     [b appendString:@"echo \"DIAG fb-flush: $(pgrep -f fb-flush.sh >/dev/null 2>&1 && echo running || echo NOT running)\"\n"];
@@ -1382,8 +1416,31 @@ static NSString *OCEngineStripANSI(NSString *line) {
     [b appendString:@"chmod +x /tmp/fb-flush.sh\n"];
     [b appendString:@"sudo nohup sh /tmp/fb-flush.sh >/tmp/fb-flush.log 2>&1 &\n"];
     [b appendString:@"fi\n"];
+    // The app opens at its default 1280x800, centred in the
+    // 1290x2796 screen (the e001c27 screenshot: full width, a
+    // small window, black above and below). Maximise it with
+    // an openbox rule: copy the default rc.xml (known-valid)
+    // and inject one <application> rule matching every window.
+    // The rule is applied at map time, every boot (the overlay
+    // is wiped, so the config is rewritten each start). If the
+    // injection fails the worst case is the default config
+    // (small window, as today) — openbox still starts. The
+    // echo names which way it went. --start-maximized on the
+    // app is belt and braces (Electron honours the Chromium
+    // switch); the openbox rule is the fix that does not
+    // depend on it. (wmctrl/xdotool are not in the image, so
+    // there is no post-launch maximise tool to use instead.)
+    [b appendString:@"mkdir -p /home/termux/.config/openbox\n"];
+    [b appendString:@"cp /etc/xdg/openbox/rc.xml /home/termux/.config/openbox/rc.xml\n"];
+    [b appendString:@"python3 - <<'PYEOF'\n"];
+    [b appendString:@"p='/home/termux/.config/openbox/rc.xml'\n"];
+    [b appendString:@"s=open(p).read()\n"];
+    [b appendString:@"s=s.replace('<applications>','<applications>\\n  <application name=\"*\">\\n    <maximized>yes</maximized>\\n  </application>',1)\n"];
+    [b appendString:@"open(p,'w').write(s)\n"];
+    [b appendString:@"PYEOF\n"];
+    [b appendString:@"grep -q '<maximized>yes</maximized>' /home/termux/.config/openbox/rc.xml && echo \"openbox maximise rule installed\" || echo \"ERROR openbox maximise rule missing\"\n"];
     [b appendString:@"nohup openbox --sm-disable >/tmp/openbox.log 2>&1 &\n"];
-    [b appendString:@"nohup env DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/1000 HOME=/home/termux /opt/OpenCode/ai.opencode --no-sandbox --disable-dev-shm-usage --disable-gpu >/tmp/ai-opencode.log 2>&1 &\n"];
+    [b appendString:@"nohup env DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/1000 HOME=/home/termux /opt/OpenCode/ai.opencode --no-sandbox --disable-dev-shm-usage --disable-gpu --start-maximized >/tmp/ai-opencode.log 2>&1 &\n"];
 
     // The real app binary is /opt/OpenCode/ai.opencode; the old
     // pgrep pattern (opencode-desktop) matched the session script
