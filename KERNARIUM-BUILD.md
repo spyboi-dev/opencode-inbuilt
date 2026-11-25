@@ -8,6 +8,167 @@ launch-path hypothesis is closed. The scene investigation (why UIKit
 never called the scene method in the 07:57 run) continues on that
 settled basis.
 
+## Status: BLACK DESKTOP — RED-FILL SELF-TEST, XORG LIVENESS, DIAGNOSTICS VIA SERVER — LOCAL BUILD 977334d, verified
+
+User test of 165c227, 2026-11-25 15:16 IST: desktop STILL black.
+This time he sent the logs, and they settle what the last three
+builds could not. Files: `engine-c9843878.log`,
+`guest-75f3dafb.log`, `display-activity.log` (all in
+`~/workspace/user/files/`), plus the 15:17 screenshot (console
+sliver at the very top edge, header, floating tab bar over
+black).
+
+### What the 165c227 logs prove (verified from the files)
+
+1. App side EXONERATED, finally and completely. 165c227 run
+pid 24971 (15:15:34): server listening 15:15:50, /api/info 200,
+"Server healthy", "Desktop view shown: guestView frame {{0, 0},
+{430, 932}} superview UIView window yes drawable {1290, 2796}
+booted yes" nine times 15:15:57–15:16:49. The Metal view is in
+a window, has a drawable, and it DOES present the framebuffer:
+the console login text is visible through it at the top edge
+of the screenshot. The screen is not black because the view
+fails — it is black because the framebuffer it presents IS
+black except for the login text at the top.
+2. X never drew. The display log's 165c227 section (0.005 s →
+128.085 s, ending at the 15:17:43 clean shutdown) has ONLY 2D
+CPU flushes of resource 2 at 1290x2796, ~5/s the whole run —
+the fbcon cursor blink on the tty1 console. No virgl scanout,
+no scanout change, no other resource, ever. The desktop never
+reached the framebuffer.
+3. The flush loop added nothing. The rate stayed ~5/s, the same
+as every pre-loop build. The loop was written and started (the
+guest log shows the heredoc and the nohup line), but its dd
+writes produced no extra flushes: either the loop never ran, or
+write() to /dev/fb0 does not mark the framebuffer dirty in
+this kernel. The 165c227 theory (X draws but never flushes) is
+therefore UNVERIFIED and, as the cause of the black screen,
+wrong in the first place: there was nothing to flush, because
+X never drew. The loop stays (it is harmless), but it is not
+the fix.
+4. No DESKTOP READY, no ERROR, no DIAG output — in either log.
+The engine log has ZERO "DIAG" lines in its whole history, and
+the 4c60469 and 165c227 runs have no "Desktop ready" line at
+all. The guest log's diagnostics block was typed (echo lines
+at 3339–3346 and 3402–3409) but its executed output never
+appears, and `cat /tmp/desktop-diag.txt` printed nothing: the
+file was empty or the re-emit was lost. The console channel
+has now lost the post-X diagnostics three runs running
+(873e1ee, 4c60469, 165c227). A typed READY loop line also
+arrives mangled (guest log line 3330: the head of the line is
+missing, `\x1b[?2004l\r-f ai.opencode ...`), so the shell may
+be receiving truncated commands too — the log cannot tell a
+lost echo from a lost input.
+5. Xorg's socket appeared (no "ERROR Xorg did not start"), so
+Xorg at least started — but the socket alone does not prove it
+stayed alive: Xorg creates the socket early and can die on the
+fbdev driver after it, leaving openbox and the app to start
+against a dead server with no reason in the log. Whether Xorg
+died or ai.opencode never started/mapped is still unknown: the
+evidence that would say (Xorg.log tail, ai-opencode.log tail,
+ps, xwininfo) is exactly what the console lost.
+
+### Reference app — what GuestHost does differently
+
+Read from `~/workspace/kernarium/GuestHost` (read-only):
+`GuestDisplay.swift` makes the MTKView the view controller's
+ROOT view (`loadView`: `view = metalView`) and never reparents
+it; it sets `autoResizeDrawable = false` and drives the
+drawable size explicitly from layout (`reportLayout`), with
+`layer.contentsGravity = .resizeAspect` and a black layer
+background; resizes go through GuestResizeHold notifications
+the runtime listens to. Our app reparents the view (parked in
+the key window ↔ moved into the Desktop screen) and never
+sets the drawable size after creation. None of that is the
+cause: the runtime's `attachView` (`native_display_ios.mm`)
+already sets `autoResizeDrawable = NO` on our view, so its
+drawable stays at the boot size (1290x2796), no resize ever
+reaches the guest, and the console sliver proves the
+reparented view presents. The reference app's guests draw;
+ours does not. The fix is guest-side, plus a diagnostics
+channel that survives.
+
+### What changed (commit 977334d, 4 files, +102/-1)
+
+- `src/OCEngine.m` `consoleBootstrap` — red-fill self-test:
+before Xorg starts, `sudo python3` fills /dev/fb0 solid red
+through write() (size from
+`/sys/class/graphics/fb0/virtual_size`, BGRA red for the 32bpp
+XRGB framebuffer; root via sudo, since the termux user cannot
+open /dev/fb0) and echoes `SELFTEST fb0 red`. The result is
+visible in a screenshot, no log needed: RED means the write
+path reaches the screen and X never drew; BLACK means write()
+never transfers (the flush-loop theory is dead); the desktop
+means it works. A failure prints its traceback to
+`/tmp/selftest.log`, tailed in the diagnostics.
+- `src/OCEngine.m` `consoleBootstrap` — Xorg liveness: after
+the socket check, `pgrep -x Xorg` echoes `XORG RUNNING` or
+`XORG DEAD`, one short line. A always-printed `DESKTOP STATE`
+line follows the READY loop (`app=yes/no windows=N vt=ttyN`),
+because the loop's echo and the ERROR lines are all
+conditional and a run where the echo is lost leaves no trace.
+- `src/OCEngine.m` `consoleBootstrap` diagnostics — the block
+gains a `Self-test log:` tail, and the file is copied to
+`~/desktop-diag.txt` and `/root/Projects/desktop-diag.txt`
+after the cat, so the server can read it.
+- `src/OCEngine.m` + `src/OCEngine.h` — `fetchGuestDiagnostics-
+IfNeeded`: reads `desktop-diag.txt` through the server's file
+API (`OCServerClient readFileAtPath:`, the /api/fs/read channel
+the /api/info probe already proves) and appends it to the
+engine log as `Guest diagnostics (via server):`. Once per
+boot; a miss means the file is not written yet, so the flag
+stays clear and the next Desktop open retries (a miss is
+logged once per boot). Called from `OCDesktopViewController
+viewDidAppear` and 10 s after a real DESKTOP READY.
+- `src/OCDesktopViewController.m` — calls the fetch in
+`viewDidAppear`, after the `Desktop view shown` line.
+- `verify-local.py` — asserts the new strings (`SELFTEST fb0
+red`, `XORG RUNNING`, `DESKTOP STATE`, `Self-test log:`,
+`desktop-diag.txt`, `Guest diagnostics (via server)`,
+`fetchGuestDiagnosticsIfNeeded`).
+
+Server bootstrap, chat-opens-desktop navigation,
+runtime/framework, Settings untouched. Nothing merged to main.
+`kernarium-desktop` and termx untouched. The new bootstrap
+shell lines were extracted from the ObjC literals and parsed
+with `bash -n` before building; the python self-test one-liner
+was compile-checked separately.
+
+### Host verification (verify-local.py)
+
+Local build 26 s, build id `977334d`. IPA:
+`mac-ipas/OpenCode-iOS-977334d.ipa`, 25,195,965 bytes, SHA-256
+`8188dfc3b240d25aa730ce9b6d312f8bf039610a4e9fa0ba9f815781c6aad357`.
+Same SHA in `build-local/`, `mac-ipas/`, and
+`~/workspace/goals/opencode-for-ios/files/`. **ALL PASS** (127
+checks) — arm64, MH_EXECUTE, 5 segments, LC_MAIN entryoff 0x4000,
+MinOS 15.0.0, SDK 26.5.0, zero Kernarium load commands, code
+signature page hashes valid, all four frameworks embedded, all
+markers incl. build id `977334d`, both guest hashes + chunk part
+names, no TODO-FILL, no BUILD-NOTE, no "Stop engine"/"Start
+engine" strings, slop strings still absent, plus the seven new
+checks above. GitHub release:
+[opencode-977334d](https://github.com/spyboi-dev/opencode-ios/releases/tag/opencode-977334d).
+Tag-only release, as the last twelve.
+
+### Device test steps (install over 165c227 — do NOT delete the app)
+
+Install over the current app (do NOT delete it — the guest image
+is already installed). Tap + on Threads and look at the screen,
+then send a screenshot AND engine.log:
+
+- **RED screen** (red with the login text at the top): the
+write path works and X never drew. The fix then is X itself.
+- **BLACK screen**: write() never transfers — the flush-loop
+theory is dead, and the 2D path only carries fbcon writes.
+- **The OpenCode desktop**: fixed.
+
+The engine log should now carry `SELFTEST fb0 red`, `XORG
+RUNNING` (or `XORG DEAD`), a `DESKTOP STATE` line, and a
+`Guest diagnostics (via server):` block with the Active VT,
+window tree, Xorg errors and app log tail — the state that the
+console kept losing.
+
 ## Status: BLACK DESKTOP — FRAMEBUFFER FLUSH LOOP, X's MMAP WRITES NEVER REACH THE HOST — LOCAL BUILD 165c227, verified
 
 User test of 4c60469, 2026-11-25 14:52 IST: desktop STILL black.
