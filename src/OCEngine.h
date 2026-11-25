@@ -25,7 +25,7 @@ typedef NS_ENUM(NSInteger, OCEngineState) {
     OCEngineStateInstalling,   // downloading/verifying the image
     OCEngineStateInstalled,    // image ready, not started
     OCEngineStateStarting,     // booting / server launching
-    OCEngineStateRunning,      // desktop up, server answering on 4096
+    OCEngineStateRunning,      // server answering on 4096 (desktop view available as a tab)
     OCEngineStateStopped,      // stopped (app killed, iOS suspend)
     OCEngineStateCorePending,  // engine not linked in this build
     OCEngineStateError

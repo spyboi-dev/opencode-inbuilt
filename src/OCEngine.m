@@ -591,40 +591,105 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
 
 // One complete guest console line, on the main queue. Applies
 // PROGRESS / ERROR lines and the definitive start signals.
+// Strip ANSI escape sequences (CSI, OSC, and single-char escapes)
+// from a console line. The guest console wraps output in bracketed
+// paste markers (ESC[?2004l / ESC[?2004h) and the shell prompt adds
+// color codes, so a bare marker line like "DESKTOP READY" arrives
+// with a prefix that defeats hasPrefix/isEqualToString. Stripping
+// lets the marker match on the bare output line only.
+static NSString *OCEngineStripANSI(NSString *line) {
+    NSMutableString *out = [NSMutableString stringWithCapacity:line.length];
+    NSUInteger i = 0, n = line.length;
+    while (i < n) {
+        unichar c = [line characterAtIndex:i];
+        if (c == 0x1B) {
+            // ESC [ ... final byte: CSI sequence.
+            if (i + 1 < n && [line characterAtIndex:i + 1] == '[') {
+                i += 2;
+                while (i < n) {
+                    unichar d = [line characterAtIndex:i];
+                    i++;
+                    if (d >= 0x40 && d <= 0x7E) break;
+                }
+                continue;
+            }
+            // ESC ] ... BEL or ESC \: OSC sequence.
+            if (i + 1 < n && [line characterAtIndex:i + 1] == ']') {
+                i += 2;
+                while (i < n) {
+                    unichar d = [line characterAtIndex:i];
+                    if (d == 0x07) { i++; break; }
+                    if (d == 0x1B && i + 1 < n && [line characterAtIndex:i + 1] == '\\') { i += 2; break; }
+                    i++;
+                }
+                continue;
+            }
+            // Any other ESC sequence: drop ESC and the next char.
+            i += (i + 1 < n) ? 2 : 1;
+            continue;
+        }
+        [out appendFormat:@"%C", c];
+        i++;
+    }
+    return out;
+}
+
 - (void)handleGuestConsoleLine:(NSString *)line {
     if (!line.length) return;
-    if ([line hasPrefix:@"DIAG "]) {
+    // Clean the line first: strip ANSI escapes, then trim. The
+    // bare marker lines arrive with a bracketed-paste prefix
+    // (ESC[?2004l), so the prefix checks below must run on the
+    // cleaned line or they never match.
+    NSString *clean = [OCEngineStripANSI(line) stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (!clean.length) return;
+    if ([clean hasPrefix:@"DIAG "]) {
         // The bootstrap's compact desktop summary: it belongs in
         // the engine log too, so the pasted log names the VT, the
         // mapped window and the Xorg/app failures without needing
         // the whole guest console. The full block stays in guest.log.
-        [self appendEngineLogSync:line];
+        [self appendEngineLogSync:clean];
         return;
     }
-    if ([line containsString:@"server listening"]) {
+    if ([clean isEqualToString:@"server listening"]) {
         // The bootstrap's curl probe to /api/info succeeded in the
-        // guest. Record it and log it; it does NOT mark the engine
-        // Running — the desktop is the completion signal, and the
-        // native UI's own path is proven separately by the health
-        // probe through the vsock bridge.
+        // guest. Record it and log it. This must be an exact match:
+        // the typed curl loop line itself contains the words
+        // `echo "server listening"`, so containsString fired on the
+        // echo of the script ~1 s after serve launch, before the
+        // server existed. The bare output line is the only true
+        // signal. (The server is also proven independently by the
+        // health probe through the vsock bridge.)
         if (!self.serverListening) {
             self.serverListening = YES;
             [self appendEngineLogSync:@"Server listening (from guest console)"];
         }
         return;
     }
-    if ([line containsString:@"DESKTOP READY"]) {
-        if (!self.serveProgressDone) {
+    if ([clean isEqualToString:@"DESKTOP READY"]) {
+        // Exact match only. The typed READY loop line itself
+        // contains `echo "DESKTOP READY"`, so containsString fired
+        // on the echo of the script 1-2 s after "Serve launch
+        // started" in every run from c360a14 through 873e1ee,
+        // before X or Electron existed — the engine claimed
+        // "Desktop ready" and "Engine running" while the screen
+        // was still black, and the 873e1ee "window mapped on :0"
+        // conclusion was void: no bare DESKTOP READY line ever
+        // reached the log. Record a real one even if the server
+        // probe already marked the engine running, so the log
+        // names a genuine mapped window.
+        if (!self.desktopReady) {
             self.desktopReady = YES;
+            [self appendEngineLogSync:@"Desktop ready (from guest console)"];
+        }
+        if (!self.serveProgressDone) {
             self.serveProgressDone = YES;
             [self setServeProgress:1.0 status:@"Engine running"];
-            [self appendEngineLogSync:@"Desktop ready (from guest console)"];
             if (self.state != OCEngineStateRunning) [self setState:OCEngineStateRunning];
         }
         return;
     }
-    if ([line hasPrefix:@"PROGRESS "]) {
-        NSArray<NSString *> *parts = [line componentsSeparatedByString:@" "];
+    if ([clean hasPrefix:@"PROGRESS "]) {
+        NSArray<NSString *> *parts = [clean componentsSeparatedByString:@" "];
         if (parts.count >= 3) {
             double pct = [parts[1] doubleValue] / 100.0;
             // Progress only moves forward: a stale PROGRESS 90 line
@@ -636,8 +701,8 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
         }
         return;
     }
-    if ([line hasPrefix:@"ERROR "]) {
-        [self setServeProgress:self.serveProgressValue status:line];
+    if ([clean hasPrefix:@"ERROR "]) {
+        [self setServeProgress:self.serveProgressValue status:clean];
         return;
     }
 }
@@ -951,6 +1016,22 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
     // passwordless sudo, so Xorg runs via sudo as root and openbox
     // + the app run as termux, exactly as the service did.
     // Leftovers are killed first so a restart is clean.
+    // fbdev, not modesetting/virgl: the 873e1ee display log
+    // (Engine/display-activity.log) has ONLY 2D CPU flushes of
+    // resource 2 — the virtio-gpu console framebuffer, 1290x2796
+    // — repeated ~5/s through 37 s, and NO virgl/GPU scanout
+    // ever. X's modesetting driver never produces a scanout the
+    // runtime presents, so the desktop can never show through
+    // the GPU path. fbdev draws straight into /dev/fb0, which
+    // IS the presented framebuffer (fb0: virtio_gpudrmfb, and
+    // the runtime already flushes it on the CPU path), so the
+    // desktop rides the path that is proven to reach the screen.
+    // The config is written to /tmp (writable overlay) and
+    // passed with -configdir; Xorg runs as root, so an absolute
+    // configdir path is allowed. Electron is forced to software
+    // rendering (--disable-gpu): with X on fbdev there is no
+    // DRI, so the GPU process would only spin up and fall back
+    // anyway — make it deterministic from the start.
     [b appendString:@"echo \"PROGRESS 95 Starting desktop...\"\n"];
     [b appendString:@"sudo systemctl stop opencode-desktop 2>/dev/null; true\n"];
     [b appendString:@"sudo pkill -f ai.opencode 2>/dev/null; true\n"];
@@ -968,7 +1049,26 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
     [b appendString:@"rm -f /tmp/.X0-lock /tmp/.X11-unix/X0\n"];
     [b appendString:@"sudo mkdir -p /run/user/1000; sudo chown termux:termux /run/user/1000 2>/dev/null; true\n"];
     [b appendString:@"export DISPLAY=:0; export XDG_RUNTIME_DIR=/run/user/1000\n"];
-    [b appendString:@"sudo nohup Xorg :0 -ac -noreset -nolisten tcp vt01 >/tmp/Xorg.log 2>&1 &\n"];
+    // Force X onto fbdev (see the comment above): the config lives
+    // in /tmp so no root write is needed to create it, and Xorg
+    // (root, via sudo) takes the absolute -configdir path.
+    [b appendString:@"mkdir -p /tmp/xorg.conf.d\n"];
+    [b appendString:@"cat > /tmp/xorg.conf.d/10-fbdev.conf <<'EOF'\n"];
+    [b appendString:@"Section \"Device\"\n"];
+    [b appendString:@"    Identifier \"Card0\"\n"];
+    [b appendString:@"    Driver \"fbdev\"\n"];
+    [b appendString:@"    Option \"fbdev\" \"/dev/fb0\"\n"];
+    [b appendString:@"EndSection\n"];
+    [b appendString:@"Section \"Screen\"\n"];
+    [b appendString:@"    Identifier \"Screen0\"\n"];
+    [b appendString:@"    Device \"Card0\"\n"];
+    [b appendString:@"EndSection\n"];
+    [b appendString:@"Section \"ServerLayout\"\n"];
+    [b appendString:@"    Identifier \"Layout0\"\n"];
+    [b appendString:@"    Screen \"Screen0\"\n"];
+    [b appendString:@"EndSection\n"];
+    [b appendString:@"EOF\n"];
+    [b appendString:@"sudo nohup Xorg :0 -ac -noreset -nolisten tcp vt01 -configdir /tmp/xorg.conf.d >/tmp/Xorg.log 2>&1 &\n"];
     [b appendString:@"for _ in $(seq 1 30); do [ -S /tmp/.X11-unix/X0 ] && break; sleep 1; done\n"];
     // If the socket never appeared, say why: Xorg's own log goes
     // to /var/log/Xorg.0.log, but a failure before it opens that
@@ -977,18 +1077,21 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
     // loop's ERROR line names no cause.
     [b appendString:@"[ -S /tmp/.X11-unix/X0 ] || { echo \"ERROR Xorg did not start\"; tail -20 /tmp/Xorg.log 2>/dev/null; }\n"];
     [b appendString:@"nohup openbox --sm-disable >/tmp/openbox.log 2>&1 &\n"];
-    [b appendString:@"nohup env DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/1000 HOME=/home/termux /opt/OpenCode/ai.opencode --no-sandbox --disable-dev-shm-usage >/tmp/ai-opencode.log 2>&1 &\n"];
+    [b appendString:@"nohup env DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/1000 HOME=/home/termux /opt/OpenCode/ai.opencode --no-sandbox --disable-dev-shm-usage --disable-gpu >/tmp/ai-opencode.log 2>&1 &\n"];
     // The real app binary is /opt/OpenCode/ai.opencode; the old
     // pgrep pattern (opencode-desktop) matched the session script
-    // itself, so DESKTOP READY fired 2 s after the service
-    // started, before the app existed. Gate on the app process.
-    // And on the window actually being mapped on :0: the process +
-    // socket gate fired while the screen was still black, because a
-    // running Electron process with no mapped window draws nothing.
-    // xwininfo -root -tree lists the root's children as lines
-    // starting with a window id; zero such lines means nothing is
-    // mapped. If the process is up but no window ever maps, say so
-    // and do not claim ready.
+    // itself. Gate on the app process, and on the window actually
+    // being mapped on :0: the process + socket gate fired while
+    // the screen was still black, because a running Electron
+    // process with no mapped window draws nothing. xwininfo
+    // -root -tree lists the root's children as lines starting
+    // with a window id; zero such lines means nothing is mapped.
+    // If the process is up but no window ever maps, say so and
+    // do not claim ready. NOTE: the "DESKTOP READY" the engine
+    // logged 1 s after serve launch in every run was the ECHO of
+    // this loop line, not its output — the parser matched the
+    // words inside the typed command. The parser now requires a
+    // bare line, so only the loop's own echo (below) counts.
     [b appendString:@"for i in $(seq 1 60); do if pgrep -f ai.opencode >/dev/null 2>&1 && [ -S /tmp/.X11-unix/X0 ] && [ $(DISPLAY=:0 xwininfo -root -tree 2>/dev/null | grep -c '^ *0x') -gt 0 ]; then echo \"DESKTOP READY\"; break; fi; sleep 2; done\n"];
     [b appendString:@"pgrep -f ai.opencode >/dev/null 2>&1 || echo \"ERROR Desktop did not start (see above)\"\n"];
     [b appendString:@"pgrep -f ai.opencode >/dev/null 2>&1 && [ $(DISPLAY=:0 xwininfo -root -tree 2>/dev/null | grep -c '^ *0x') -eq 0 ] && echo \"ERROR Desktop window did not appear (ai.opencode is running but no window is mapped on :0)\"\n"];
@@ -996,7 +1099,28 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
     // mapped on the display the framebuffer shows, and which VT
     // is active. xwininfo is in the image; chvt is not, which is
     // why X starts on vt01 above instead of being switched.
-    [b appendString:@"echo \"--- desktop diagnostics ---\"\n"];
+    // The block runs inside a brace group redirected to
+    // /tmp/desktop-diag.txt, then sleeps 5 s and cats the file
+    // back to the console. Two reasons. First, on 873e1ee the
+    // diagnostics' executed output never reached guest.log or the
+    // engine log at all, even though the script ran to completion
+    // (the prompt returned): the console channel drops lines
+    // under the load of X + Electron starting (the runtime's own
+    // note: the console "loses lines under load"). Emitting the
+    // block after the burst has settled gives it a far better
+    // chance of arriving. Second, the file is the durable copy:
+    // if the re-emit still does not arrive, the next step is to
+    // fetch it through the vsock bridge instead of the console.
+    // The DIAG app-log line strips every non-printable byte
+    // (tr -cd tab + printable ASCII): Electron's log can carry
+    // binary bytes, and one bad byte poisons the whole console
+    // chunk the app's UTF-8 decode reads, dropping the
+    // DESKTOP READY and DIAG lines with it. Compact summary, one
+    // line each with a DIAG prefix: the console handler copies
+    // these into the engine log, so the pasted log names the VT,
+    // the mapped window and the Xorg/app failures without needing
+    // the whole guest console.
+    [b appendString:@"{ echo \"--- desktop diagnostics ---\"\n"];
     [b appendString:@"echo \"Active VT: $(cat /sys/class/tty/tty0/active 2>/dev/null || echo unknown)\"\n"];
     [b appendString:@"ps aux | grep -E \"Xorg|ai.opencode|openbox\" | grep -v grep\n"];
     [b appendString:@"DISPLAY=:0 xwininfo -root -tree 2>&1 | head -20\n"];
@@ -1005,16 +1129,13 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
     // own log file; that reason is only in the stderr redirect.
     // The app log tail shows whether Electron even got going.
     [b appendString:@"echo \"Xorg log:\"; tail -20 /tmp/Xorg.log 2>/dev/null; echo \"Desktop app log:\"; tail -10 /tmp/ai-opencode.log 2>/dev/null; true\n"];
-    // Compact summary, one line each with a DIAG prefix: the console
-    // handler copies these into the engine log, so the pasted log
-    // names the VT, the mapped window and the Xorg/app failures
-    // without needing the whole guest console. The full block above
-    // stays in guest.log.
     [b appendString:@"echo \"DIAG Active VT: $(cat /sys/class/tty/tty0/active 2>/dev/null || echo unknown)\"\n"];
     [b appendString:@"echo \"DIAG Windows on :0: $(DISPLAY=:0 xwininfo -root -tree 2>/dev/null | grep -c '^ *0x')\"\n"];
     [b appendString:@"echo \"DIAG Xorg errors: $(grep -c -F '(EE)' /var/log/Xorg.0.log 2>/dev/null; true)\"\n"];
-    [b appendString:@"echo \"DIAG app log: $(tail -1 /tmp/ai-opencode.log 2>/dev/null | tr -d '\\n' | cut -c1-160)\"\n"];
-    [b appendString:@"echo \"--- end desktop diagnostics ---\"\n"];
+    [b appendString:@"echo \"DIAG app log: $(tail -1 /tmp/ai-opencode.log 2>/dev/null | tr -cd '\\11\\40-\\176' | cut -c1-160)\"\n"];
+    [b appendString:@"echo \"--- end desktop diagnostics ---\"; } > /tmp/desktop-diag.txt 2>&1\n"];
+    [b appendString:@"sleep 5\n"];
+    [b appendString:@"cat /tmp/desktop-diag.txt\n"];
     return b;
 }
 
@@ -1062,6 +1183,14 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
                     strongSelf.serveProgressDone = YES;
                     [strongSelf setServeProgress:1.0 status:@"Engine running"];
                     [strongSelf appendEngineLog:@"Server healthy at 127.0.0.1:4096"];
+                    // Running now means the server answers, not the
+                    // desktop marker: the marker is a console line
+                    // and the console drops post-X output, so the
+                    // state must not wait on it — otherwise the
+                    // startup screen never presents the tabs
+                    // (maybePresentTabs gates on Running) and the
+                    // user is stuck on "Starting…".
+                    if (strongSelf.state != OCEngineStateRunning) [strongSelf setState:OCEngineStateRunning];
                 }
                 return;
             }
@@ -1082,17 +1211,24 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
 }
 
 - (void)checkHealthWithCompletion:(void (^)(BOOL, NSDictionary * _Nullable))completion {
-    // Healthy means the guest is up, the desktop reported ready,
-    // AND the server answers /api/info through the same vsock
-    // bridge the native UI uses. The old desktopReady && booted
-    // check lied on c360a14: the desktop was up, the server was
-    // never started, and the engine claimed to be running while
-    // Threads could not load chats. The probe is one small HTTP
-    // request; at most one is in flight, and while one runs the
-    // last result answers, so a slow probe cannot pile up on the
-    // 5 s health timer. Probe failures log on transition only.
+    // Healthy means the guest is up AND the server answers /api/info
+    // through the same vsock bridge the native UI uses. The
+    // desktopReady flag is deliberately NOT a gate here: it is a
+    // console marker, and the console proved unreliable twice — the
+    // echo of the typed READY loop fired it 1 s after serve launch
+    // (containsString), and the post-X console output that would
+    // carry a real READY is dropped (873e1ee: no bare DESKTOP READY
+    // line ever reached the log). Gating health on it would restart
+    // the engine every 5 minutes whenever the console drops the
+    // marker. The server probe is the honest health signal; the
+    // desktop view is available as a tab regardless, and a real
+    // DESKTOP READY still lands in the engine log when it arrives.
+    // The probe is one small HTTP request; at most one is in flight,
+    // and while one runs the last result answers, so a slow probe
+    // cannot pile up on the 5 s health timer. Probe failures log on
+    // transition only.
 #ifdef OC_KERNARIUM_LINKED
-    if (!self.desktopReady || ![[OCKernGlue shared] booted]) { completion(NO, nil); return; }
+    if (![[OCKernGlue shared] booted]) { completion(NO, nil); return; }
     if (self.healthProbeInFlight) { completion(self.lastProbeOK, nil); return; }
     self.healthProbeInFlight = YES;
     OCSettings *settings = [OCSettings shared];
