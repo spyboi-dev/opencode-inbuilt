@@ -286,7 +286,31 @@ new_strings = ["Retrying in 60s", "Automatic retry: starting engine",
                "Xorg died before its socket appeared",
                "Xorg died while waiting for the desktop",
                "selftest.result",
-               "DIAG graphics:"]
+               "DIAG graphics:",
+               # Modesetting retry + Xorg probe log + diagnostics
+               # freshness (2026-11-25): the 16f1cc2 logs prove the
+               # fbdev Xorg dies at once with "no screens found"
+               # and the detailed probe log is unreadable at
+               # /var/log/Xorg.0.log, so Xorg now writes it to
+               # /tmp with -logfile and the snapshot prints the
+               # driver/module/error lines; the diag-loop runs as
+               # root, so its `~` copy landed in /root while the
+               # server reads the termux copy — the snapshot now
+               # copies to the absolute /home/termux path, so the
+               # 10 s fetches see fresh content; and a dead fbdev
+               # Xorg retries with modesetting, the driver that
+               # demonstrably started in the c360a14 era.
+               "logfile /tmp/Xorg.0.log",
+               "Xorg probe (fbdev):",
+               "Xorg probe (modesetting):",
+               "DIAG modesetting driver:",
+               "DIAG fb0 node:",
+               "DIAG dri:",
+               "DIAG loop:",
+               "/home/termux/desktop-diag.txt",
+               "retrying with modesetting",
+               "XORG RUNNING (modesetting)",
+               "xorg-modesetting.conf.d"]
 for m in new_strings:
     check(f"new string present: {m}", m in blob)
 # Removed controls must be gone as button titles

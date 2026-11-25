@@ -1178,8 +1178,17 @@ static NSString *OCEngineStripANSI(NSString *line) {
     [b appendString:@"echo \"Active VT: $(cat /sys/class/tty/tty0/active 2>/dev/null || echo unknown)\"\n"];
     [b appendString:@"ps aux | grep -E \"Xorg|ai.opencode|openbox\" | grep -v grep\n"];
     [b appendString:@"DISPLAY=:0 xwininfo -root -tree 2>&1 | head -20\n"];
-    [b appendString:@"grep -F \"(EE)\" /var/log/Xorg.0.log 2>/dev/null | tail -5; true\n"];
+    [b appendString:@"grep -F \"(EE)\" /tmp/Xorg.0.log 2>/dev/null | tail -5; grep -F \"(EE)\" /tmp/Xorg-modesetting.0.log 2>/dev/null | tail -5; true\n"];
     [b appendString:@"echo \"Xorg log:\"; tail -20 /tmp/Xorg.log 2>/dev/null; echo \"Desktop app log:\"; tail -10 /tmp/ai-opencode.log 2>/dev/null; true\n"];
+    // The Xorg probe log is the evidence that names why Xorg died:
+    // the 16f1cc2 stderr tail only says "no screens found", and the
+    // default detailed log (/var/log/Xorg.0.log) is root-owned and
+    // unreadable by the termux snapshot, so every grep of it came
+    // back empty. Xorg now writes it to /tmp with -logfile (below),
+    // and the snapshot prints the driver/module/error lines from
+    // both the fbdev and the modesetting logs.
+    [b appendString:@"echo \"Xorg probe (fbdev):\"; grep -F -e \"FBDEV\" -e \"modesetting\" -e \"LoadModule\" -e \"(EE)\" -e \"no screens\" /tmp/Xorg.0.log 2>/dev/null | head -30; true\n"];
+    [b appendString:@"echo \"Xorg probe (modesetting):\"; grep -F -e \"modesetting\" -e \"LoadModule\" -e \"(EE)\" -e \"no screens\" /tmp/Xorg-modesetting.0.log 2>/dev/null | head -30; true\n"];
     [b appendString:@"echo \"Self-test log:\"; tail -5 /tmp/selftest.log 2>/dev/null; true\n"];
     // Which framebuffer devices exist at all: the 25bb172
     // snapshot said "DIAG fb size: unknown" (its cat of
@@ -1191,11 +1200,23 @@ static NSString *OCEngineStripANSI(NSString *line) {
     [b appendString:@"echo \"DIAG graphics: $(ls /sys/class/graphics/ 2>/dev/null | tr '\\n' ' ')\"\n"];
     [b appendString:@"echo \"DIAG Active VT: $(cat /sys/class/tty/tty0/active 2>/dev/null || echo unknown)\"\n"];
     [b appendString:@"echo \"DIAG Windows on :0: $(DISPLAY=:0 xwininfo -root -tree 2>/dev/null | grep -c '^ *0x')\"\n"];
-    [b appendString:@"echo \"DIAG Xorg errors: $(grep -c -F '(EE)' /var/log/Xorg.0.log 2>/dev/null; true)\"\n"];
+    [b appendString:@"echo \"DIAG Xorg errors: $(grep -c -F '(EE)' /tmp/Xorg.0.log /tmp/Xorg-modesetting.0.log 2>/dev/null; true)\"\n"];
     [b appendString:@"echo \"DIAG app log: $(tail -1 /tmp/ai-opencode.log 2>/dev/null | tr -cd '\\11\\40-\\176' | cut -c1-160)\"\n"];
     [b appendString:@"echo \"DIAG fb-flush: $(pgrep -f fb-flush.sh >/dev/null 2>&1 && echo running || echo NOT running)\"\n"];
-    [b appendString:@"echo \"DIAG fbdev driver: $(grep -c -F 'FBDEV(0)' /var/log/Xorg.0.log 2>/dev/null; true)\"\n"];
+    [b appendString:@"echo \"DIAG fbdev driver: $(grep -c -F 'FBDEV(0)' /tmp/Xorg.0.log 2>/dev/null; true)\"\n"];
+    [b appendString:@"echo \"DIAG modesetting driver: $(grep -c -F 'modesetting(0)' /tmp/Xorg-modesetting.0.log 2>/dev/null; true)\"\n"];
     [b appendString:@"echo \"DIAG fb size: $(cat /sys/class/graphics/fb0/virtual_size 2>/dev/null || echo unknown)\"\n"];
+    // Does the framebuffer device node exist at all, and does the
+    // DRM device exist for the modesetting retry: the 16f1cc2
+    // snapshot said "DIAG fb size: unknown" and "DIAG graphics:
+    // fbcon", which names a missing sysfs path, not a missing
+    // device — the node and the DRM listing answer it directly.
+    [b appendString:@"echo \"DIAG fb0 node: $(ls -l /dev/fb0 2>&1 | tr -cd '\\11\\40-\\176' | cut -c1-120)\"\n"];
+    [b appendString:@"echo \"DIAG dri: $(ls /dev/dri/ 2>/dev/null | tr '\\n' ' ')\"\n"];
+    // Loop heartbeat: the 16f1cc2 fetches all returned the first
+    // snapshot, so whether diag-loop.sh is alive or dead was
+    // never visible. The next run's snapshot names it.
+    [b appendString:@"echo \"DIAG loop: $(pgrep -f diag-loop.sh >/dev/null 2>&1 && echo running || echo DEAD)\"\n"];
     [b appendString:@"echo \"DIAG fb-flush log: $(tail -1 /tmp/fb-flush.log 2>/dev/null | tr -cd '\\11\\40-\\176' | cut -c1-160)\"\n"];
     // "DIAG selftest: OK" in 25bb172 only meant /tmp/selftest.log
     // was empty or missing — the python may never have run, and
@@ -1205,7 +1226,13 @@ static NSString *OCEngineStripANSI(NSString *line) {
     // the log), or NOT-RUN (python never reached the write).
     [b appendString:@"echo \"DIAG selftest: $(cat /tmp/selftest.result 2>/dev/null || (test -s /tmp/selftest.log && echo FAILED || echo NOT-RUN))\"\n"];
     [b appendString:@"echo \"--- end desktop diagnostics ---\"; } > /tmp/desktop-diag.txt 2>&1\n"];
-    [b appendString:@"cp /tmp/desktop-diag.txt ~/desktop-diag.txt 2>/dev/null; cp /tmp/desktop-diag.txt /root/Projects/desktop-diag.txt 2>/dev/null; true\n"];
+    // Absolute home path, not `~`: the loop runs this script as
+    // root, so `~` expands to /root and the copy lands in
+    // /root/desktop-diag.txt while the server reads
+    // /home/termux/desktop-diag.txt — that is why every 16f1cc2
+    // fetch returned the first snapshot. chmod so the termux
+    // server can read the root-written copy.
+    [b appendString:@"cp /tmp/desktop-diag.txt /home/termux/desktop-diag.txt 2>/dev/null; chmod 644 /home/termux/desktop-diag.txt 2>/dev/null; cp /tmp/desktop-diag.txt /root/Projects/desktop-diag.txt 2>/dev/null; true\n"];
     [b appendString:@"EOF\n"];
     [b appendString:@"chmod +x /tmp/diag-snapshot.sh\n"];
     [b appendString:@"sh /tmp/diag-snapshot.sh\n"];
@@ -1266,26 +1293,68 @@ static NSString *OCEngineStripANSI(NSString *line) {
     // XRGB framebuffer. A failure prints its traceback to
     // /tmp/selftest.log, tailed in the diagnostics below.
     [b appendString:@"sudo python3 -c \"s=open('/sys/class/graphics/fb0/virtual_size').read().strip().split(','); w=int(s[0]); h=int(s[1]); open('/dev/fb0','wb').write(b'\\x00\\x00\\xff\\x00'*(w*h)); open('/tmp/selftest.result','w').write('red %dx%d' % (w,h))\" 2>/tmp/selftest.log; echo \"SELFTEST fb0 red\"\n"];
-    [b appendString:@"sudo nohup Xorg :0 -ac -noreset -nolisten tcp vt01 -configdir /tmp/xorg.conf.d >/tmp/Xorg.log 2>&1 &\n"];
+    // -logfile /tmp/Xorg.0.log: the default detailed log is
+    // /var/log/Xorg.0.log, root-owned and unreadable by the
+    // termux snapshot, so the 16f1cc2 run's "no screens found"
+    // came with no probe lines at all. In /tmp the log is
+    // readable by the snapshot and the fetch, so the next run
+    // names which driver Xorg tried and why it refused.
+    [b appendString:@"XDRIVER=fbdev\n"];
+    [b appendString:@"sudo nohup Xorg :0 -ac -noreset -nolisten tcp vt01 -configdir /tmp/xorg.conf.d -logfile /tmp/Xorg.0.log >/tmp/Xorg.log 2>&1 &\n"];
     // Socket wait with early death detection: the 25bb172 run
     // spent its whole 24 s after launch inside this silent 30 s
     // wait (Xorg never created the socket in 21 s) and the app
     // was closed before the wait ended, so no XORG line ever
     // printed. If Xorg is gone after a 3 s grace for exec, say
     // so at once with its log tail instead of burning the wait.
-    [b appendString:@"for i in $(seq 1 30); do [ -S /tmp/.X11-unix/X0 ] && break; if [ $i -gt 3 ] && ! pgrep -x Xorg >/dev/null 2>&1; then echo \"ERROR Xorg died before its socket appeared\"; tail -20 /tmp/Xorg.log 2>/dev/null; break; fi; sleep 1; done\n"];
+    [b appendString:@"for i in $(seq 1 30); do [ -S /tmp/.X11-unix/X0 ] && break; if [ $i -gt 3 ] && ! pgrep -x Xorg >/dev/null 2>&1; then echo \"ERROR Xorg died before its socket appeared\"; tail -20 /tmp/Xorg.log 2>/dev/null; echo \"Xorg probe:\"; grep -F -e \"FBDEV\" -e \"modesetting\" -e \"LoadModule\" -e \"(EE)\" -e \"no screens\" /tmp/Xorg.0.log 2>/dev/null | head -30; break; fi; sleep 1; done\n"];
     // If the socket never appeared, say why: Xorg's own log goes
-    // to /var/log/Xorg.0.log, but a failure before it opens that
-    // file lands only in /tmp/Xorg.log (the stderr redirect).
-    // Without this the desktop just stays black and the READY
-    // loop's ERROR line names no cause.
-    [b appendString:@"[ -S /tmp/.X11-unix/X0 ] || { echo \"ERROR Xorg did not start\"; tail -20 /tmp/Xorg.log 2>/dev/null; }\n"];
+    // to /tmp/Xorg.0.log now (-logfile above), but a failure
+    // before it opens that file lands only in /tmp/Xorg.log
+    // (the stderr redirect). Without this the desktop just stays
+    // black and the READY loop's ERROR line names no cause.
+    [b appendString:@"[ -S /tmp/.X11-unix/X0 ] || { echo \"ERROR Xorg did not start\"; tail -20 /tmp/Xorg.log 2>/dev/null; echo \"Xorg probe:\"; grep -F -e \"FBDEV\" -e \"modesetting\" -e \"LoadModule\" -e \"(EE)\" -e \"no screens\" /tmp/Xorg.0.log 2>/dev/null | head -30; }\n"];
     // The socket alone does not prove Xorg is alive: it creates
     // the socket early and can die on the fbdev driver after it,
     // leaving openbox and the app to start against a dead server
     // with no reason in the log (165c227: socket present, no
     // desktop, no error). Check the process, one short line.
     [b appendString:@"pgrep -x Xorg >/dev/null 2>&1 && echo \"XORG RUNNING\" || echo \"XORG DEAD\"\n"];
+    // fbdev died, retry with modesetting (DRM). Modesetting ran
+    // in the c360a14/c9493ce era (socket appeared, Xorg up);
+    // fbdev dies at once with "no screens found" in every run
+    // since 4c60469, and the fbdev probe log (now captured with
+    // -logfile) names the reason. If modesetting runs and
+    // ai.opencode maps a window, the desktop may appear through
+    // the DRM scanout the 2D path carries. If both die, the two
+    // probe logs name both causes. The retry uses its own
+    // configdir and logfile so nothing from the fbdev attempt
+    // leaks into it.
+    [b appendString:@"if ! pgrep -x Xorg >/dev/null 2>&1; then\n"];
+    [b appendString:@"echo \"FBDEV Xorg died, retrying with modesetting\"\n"];
+    [b appendString:@"mkdir -p /tmp/xorg-modesetting.conf.d\n"];
+    [b appendString:@"cat > /tmp/xorg-modesetting.conf.d/10-modesetting.conf <<'EOF'\n"];
+    [b appendString:@"Section \"Device\"\n"];
+    [b appendString:@"    Identifier \"Card0\"\n"];
+    [b appendString:@"    Driver \"modesetting\"\n"];
+    [b appendString:@"EndSection\n"];
+    [b appendString:@"Section \"Screen\"\n"];
+    [b appendString:@"    Identifier \"Screen0\"\n"];
+    [b appendString:@"    Device \"Card0\"\n"];
+    [b appendString:@"EndSection\n"];
+    [b appendString:@"Section \"ServerLayout\"\n"];
+    [b appendString:@"    Identifier \"Layout0\"\n"];
+    [b appendString:@"    Screen \"Screen0\"\n"];
+    [b appendString:@"EndSection\n"];
+    [b appendString:@"EOF\n"];
+    [b appendString:@"for _ in $(seq 1 10); do pgrep -x Xorg >/dev/null 2>&1 || break; sleep 1; done\n"];
+    [b appendString:@"rm -f /tmp/.X0-lock /tmp/.X11-unix/X0\n"];
+    [b appendString:@"sudo nohup Xorg :0 -ac -noreset -nolisten tcp vt01 -configdir /tmp/xorg-modesetting.conf.d -logfile /tmp/Xorg-modesetting.0.log >/tmp/Xorg-modesetting.log 2>&1 &\n"];
+    [b appendString:@"for i in $(seq 1 30); do [ -S /tmp/.X11-unix/X0 ] && break; if [ $i -gt 3 ] && ! pgrep -x Xorg >/dev/null 2>&1; then echo \"ERROR modesetting Xorg died before its socket appeared\"; tail -20 /tmp/Xorg-modesetting.log 2>/dev/null; echo \"Xorg probe (modesetting):\"; grep -F -e \"modesetting\" -e \"LoadModule\" -e \"(EE)\" -e \"no screens\" /tmp/Xorg-modesetting.0.log 2>/dev/null | head -30; break; fi; sleep 1; done\n"];
+    [b appendString:@"[ -S /tmp/.X11-unix/X0 ] || { echo \"ERROR modesetting Xorg did not start\"; tail -20 /tmp/Xorg-modesetting.log 2>/dev/null; echo \"Xorg probe (modesetting):\"; grep -F -e \"modesetting\" -e \"LoadModule\" -e \"(EE)\" -e \"no screens\" /tmp/Xorg-modesetting.0.log 2>/dev/null | head -30; }\n"];
+    [b appendString:@"pgrep -x Xorg >/dev/null 2>&1 && echo \"XORG RUNNING (modesetting)\" || echo \"XORG DEAD (modesetting)\"\n"];
+    [b appendString:@"pgrep -x Xorg >/dev/null 2>&1 && XDRIVER=modesetting\n"];
+    [b appendString:@"fi\n"];
     // Framebuffer flush loop — this is what actually puts the
     // desktop on the screen. The runtime only shows the guest
     // framebuffer when the guest kernel issues transfer_to_host_2d
@@ -1299,7 +1368,10 @@ static NSString *OCEngineStripANSI(NSString *line) {
     // drm_fb_helper_sys_write, which marks the range dirty, and
     // the kernel then transfers it. One 16M write per pass is one
     // flush per pass (one full-texture upload on the host), 5
-    // passes a second.
+    // passes a second. Only for fbdev: under modesetting X draws
+    // into DRM buffers, not /dev/fb0, so the loop would only
+    // re-upload the console framebuffer 5 times a second.
+    [b appendString:@"if pgrep -x Xorg >/dev/null 2>&1 && [ \"$XDRIVER\" = fbdev ]; then\n"];
     [b appendString:@"cat > /tmp/fb-flush.sh <<'EOF'\n"];
     [b appendString:@"#!/bin/sh\n"];
     [b appendString:@"while true; do\n"];
@@ -1309,6 +1381,7 @@ static NSString *OCEngineStripANSI(NSString *line) {
     [b appendString:@"EOF\n"];
     [b appendString:@"chmod +x /tmp/fb-flush.sh\n"];
     [b appendString:@"sudo nohup sh /tmp/fb-flush.sh >/tmp/fb-flush.log 2>&1 &\n"];
+    [b appendString:@"fi\n"];
     [b appendString:@"nohup openbox --sm-disable >/tmp/openbox.log 2>&1 &\n"];
     [b appendString:@"nohup env DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/1000 HOME=/home/termux /opt/OpenCode/ai.opencode --no-sandbox --disable-dev-shm-usage --disable-gpu >/tmp/ai-opencode.log 2>&1 &\n"];
 
@@ -1354,8 +1427,9 @@ static NSString *OCEngineStripANSI(NSString *line) {
     // server's file API instead (fetchGuestDiagnosticsIfNeeded).
     // The server runs from the termux home directory, so a copy
     // there is inside its project; /root/Projects is the second
-    // copy in case the file API roots there.
-    [b appendString:@"cp /tmp/desktop-diag.txt ~/desktop-diag.txt 2>/dev/null; cp /tmp/desktop-diag.txt /root/Projects/desktop-diag.txt 2>/dev/null; true\n"];
+    // copy in case the file API roots there. Absolute path (same
+    // `~` reason as the snapshot's copy above).
+    [b appendString:@"cp /tmp/desktop-diag.txt /home/termux/desktop-diag.txt 2>/dev/null; chmod 644 /home/termux/desktop-diag.txt 2>/dev/null; cp /tmp/desktop-diag.txt /root/Projects/desktop-diag.txt 2>/dev/null; true\n"];
     return b;
 }
 
