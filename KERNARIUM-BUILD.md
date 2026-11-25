@@ -245,6 +245,167 @@ engine log now carries the DIAG lines and the display log tail,
 which name the cause: no scanout at all, scanouts refused and why,
 or frames presenting while the window stays black).
 
+## Status: BLACK DESKTOP — fbdev + SOFTWARE RENDERING, HONEST READY MARKER, DIAGNOSTICS THAT SURVIVE — LOCAL BUILD 4c60469, verified
+
+User test of 873e1ee, 2026-11-25 14:17 IST: desktop STILL black.
+This time he sent the logs, and they narrow the cause to the guest
+display path — and they also expose that the 873e1ee "window mapped
+on :0" conclusion was void. Files: `engine-095d263e.log`,
+`guest-87c12029.log`, `Pasted_text-91be7d2b.txt` (combined, with the
+display-activity tail).
+
+### What the 873e1ee logs prove (verified from the files)
+
+1. App side confirmed good. 873e1ee run pid 24473 (14:16:32):
+"Desktop ready (from guest console)" 14:16:44, "Server probe:
+/api/info 200" 14:16:49, "Desktop view shown: guestView frame
+{{0, 0}, {430, 932}} superview UIView window yes drawable
+{1290, 2796} booted yes" at 14:16:49, 14:17:13, and 14:18:17.
+The view IS in a window, HAS a drawable, guest booted. Still
+black. Stop fixing the view hierarchy.
+2. The READY marker was a false positive. "Desktop ready" fires
+1-2 s after "Serve launch started" in EVERY run (c360a14
+12:27:05→12:27:07, c9493ce 12:41:37→12:41:38, e608dc6
+13:31:44→13:31:45, 1bf4c3a 13:59:16→13:59:17, 873e1ee
+14:16:43→14:16:44). A real READY loop cannot complete in 1 s
+(Xorg + Electron + window map). The cause: `handleGuestConsoleLine`
+used `containsString:@"DESKTOP READY"`, and the typed loop line
+itself contains `echo "DESKTOP READY"`, so the console ECHO of the
+script fired it. The guest log has NO bare "DESKTOP READY" line
+(all 10 occurrences are inside the typed for-loop lines, verified
+byte-level). The engine has therefore NEVER observed a real
+DESKTOP READY, and the 873e1ee "window mapped" conclusion is void.
+Same flaw for "server listening" (the curl loop line contains it),
+but the server is independently proven by /api/info 200.
+3. Display log is the smoking gun. The display-activity tail has
+ONLY 2D CPU flushes of resource=2 at 1290x2796 — the console
+framebuffer — from 0.005 s through at least 73.106 s ("uml-display
+0.005 scanout set kind=2d resource=2 source=1290x2796",
+"flush kind=2d resource=2 damage=1290x2796+0+0 path=cpu", then
+"repeated x30/x16/x5" flushes ~5/s). NO GPU scanout, NO virgl
+scanout, ever. The guest's X desktop never posts a scanout.
+4. Diagnostics executed output is missing from the guest log. The
+diagnostics commands appear only as typed script lines; their
+output — Active VT, ps, xwininfo tree, Xorg (EE) lines, Xorg/app
+log tails, DIAG lines — is absent, and no DIAG lines were copied
+into the engine log either. The script ran to completion (the
+prompt returns at the end of the file), so the output was lost in
+the console channel. Two mechanisms, both now addressed: the
+console "loses lines under load" (runtime's own note in
+`display_activity_log.hpp`) under the X + Electron start burst,
+and the parser's `hasPrefix` checks fail on lines that arrive
+with a bracketed-paste prefix (a bare "server listening" line
+arrives as `\x1b[?2004l\rserver listening\r\n`, so `hasPrefix:
+@"DIAG "` never matches). A third suspect, the DIAG app-log line
+(`tail -1 /tmp/ai-opencode.log`) carrying binary bytes that
+poison a whole console chunk's UTF-8 decode, is also neutralised.
+
+### Root cause — the trace, from the runtime source
+
+Read from `~/workspace/kernarium` (read-only):
+`virtio_gpu_device.cpp` resourceFlush: a 2D flush of the scanout
+resource goes `UML_GPU_DISPLAY.update(...)` → `NativeDisplay::
+update` → framebuffer.update + `publishCpuFrame`, and
+`metal_presentation.mm` `draw()` with a CPU frame uploads the
+framebuffer into the fallback texture and presents it — so the
+CPU 2D framebuffer IS presented when published. `native_display_
+ios.mm` / `native_display_common.cpp`: `NativeDisplay::update` →
+`publishCpuFrame`; `clear()` → `publishCpuFrame`. The console
+framebuffer (resource 2) is therefore the one path proven to
+reach the screen. X's modesetting/virgl path never produces a
+scanout at all (no blob, no new 2D scanout set), so the desktop
+can never show through the GPU. The fix is to put the desktop on
+the path that IS presented: X with the fbdev driver draws
+straight into /dev/fb0, which is the virtio-gpu framebuffer
+(kernel log: "fb0: virtio_gpudrmfb frame buffer device",
+1290x2796). fbdev_drv.so is in the image
+(`/usr/lib/xorg/modules/drivers/fbdev_drv.so`, 68,536 bytes) and
+Xorg supports `-configdir` ("only root can use absolute" — Xorg
+runs as root via sudo). With X on fbdev there is no DRI, so
+Electron is forced to software rendering (`--disable-gpu`) rather
+than letting its GPU process spin up and fall back on its own.
+
+### What changed (commit 4c60469, 2 files, +180/-44)
+
+- `src/OCEngine.m` `consoleBootstrap` — fbdev: writes
+`/tmp/xorg.conf.d/10-fbdev.conf` (Device fbdev on /dev/fb0,
+plus Screen + ServerLayout) and starts X with `-configdir
+/tmp/xorg.conf.d`. `ai.opencode` gains `--disable-gpu`.
+- `src/OCEngine.m` `handleGuestConsoleLine` — new
+`OCEngineStripANSI` helper (CSI/OSC/single-char escapes); the
+line is ANSI-stripped and trimmed before matching, so the
+bracketed-paste prefix no longer defeats the `DIAG `/`PROGRESS
+`/`ERROR ` prefix checks. "server listening" and "DESKTOP
+READY" are now exact-match (`isEqualToString`) on the cleaned
+line: the echo of the typed loop can no longer fire them, only
+the loop's own bare output counts. A real DESKTOP READY is
+recorded even if the server probe already marked the engine
+running.
+- `src/OCEngine.m` `checkHealthWithCompletion` — no longer gates
+on `desktopReady`: the console marker is unreliable twice over
+(echo false positive, post-X output dropped), and gating health
+on it would restart the engine every 5 minutes whenever the
+console drops the marker. Health is the server probe alone.
+- `src/OCEngine.m` health timer healthy branch — sets state
+Running when the server first answers, so the startup screen
+still auto-presents the tabs (`maybePresentTabs` gates on
+Running); the state must not wait on the console marker or the
+user is stuck on "Starting…".
+- `src/OCEngine.h` — `OCEngineStateRunning` comment now reads
+"server answering on 4096 (desktop view available as a tab)".
+- `src/OCEngine.m` `consoleBootstrap` diagnostics — the block
+runs inside a brace group redirected to
+`/tmp/desktop-diag.txt`, then `sleep 5` and `cat` it back to
+the console, so it is emitted after the X-start load burst that
+dropped it on 873e1ee (the file is also the durable copy if the
+re-emit still does not arrive — next step then is fetching it
+through the vsock bridge instead of the console). The DIAG
+app-log line strips every non-printable byte (`tr -cd '\11\40-
+\176'`, tab + printable ASCII) so a binary byte in Electron's
+log cannot poison a console chunk's UTF-8 decode.
+
+Server bootstrap (except the READY/health changes above),
+chat-opens-desktop navigation, runtime/framework, Settings
+untouched. Nothing merged to main. `kernarium-desktop` and
+termx untouched.
+
+### Host verification (verify-local.py)
+
+Local build 28 s, build id `4c60469`. IPA:
+`mac-ipas/OpenCode-iOS-4c60469.ipa`, 25,194,571 bytes, SHA-256
+`e29a53d6f52ff2266e55a4e6861039f13e6180c623f0a4f9285c146e9b5df23c`.
+Same SHA in `build-local/`, `mac-ipas/`, and
+`~/workspace/goals/opencode-for-ios/files/`. **ALL PASS** (116
+checks) — arm64, MH_EXECUTE, 5 segments, LC_MAIN entryoff 0x4000,
+MinOS 15.0.0, SDK 26.5.0, zero Kernarium load commands, code
+signature 167/167 SHA-256 page hashes valid, all four frameworks embedded, all markers incl. build id
+`4c60469`, both guest hashes + chunk part names, no TODO-FILL, no
+BUILD-NOTE, no "Stop engine"/"Start engine" strings, slop strings
+still absent. The new bootstrap shell lines (fbdev heredoc,
+`-configdir`, `--disable-gpu`, diagnostics brace group +
+re-emit) were extracted from the ObjC literals and parsed with
+`bash -n` before building. Binary byte-checked for `fbdev`,
+`configdir`, `disable-gpu`, `desktop-diag`, `DESKTOP READY`.
+GitHub release:
+[opencode-4c60469](https://github.com/spyboi-dev/opencode-ios/releases/tag/opencode-4c60469).
+Tag-only release, as the last ten.
+
+### Device test steps (install over 873e1ee — do NOT delete the app)
+
+Install over the current app (do NOT delete it — the guest image
+is already installed). Tap + on Threads — the real OpenCode
+desktop must open AND show the OpenCode window, not black. The
+engine log should now read "Server healthy at 127.0.0.1:4096"
+when the server answers (state Running comes from the probe,
+not the console echo), and a real "Desktop ready (from guest
+console)" only if a bare DESKTOP READY line arrives. If the
+desktop is still black, send engine.log AND the FULL guest log
+AND the display log section: the engine log must now carry the
+DIAG lines (Active VT, windows on :0, Xorg errors, app log) and
+the guest log must carry the re-emitted diagnostics block, so
+the next read can tell whether X is on fbdev, whether the
+window mapped, and whether the framebuffer is still the console.
+
 ## Status: DESKTOP VIEW APPEARS IN A WINDOW + SETTINGS iOS CARD RESTYLE — LOCAL BUILD 1bf4c3a, verified
 
 User test of e608dc6, 2026-11-25 13:31 IST: server fix PROVEN
