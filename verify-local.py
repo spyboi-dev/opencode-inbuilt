@@ -220,7 +220,14 @@ new_strings = ["Retrying in 60s", "Automatic retry: starting engine",
                "DIAG ",
                "UML_GPU_DISPLAY_ACTIVITY_LOG",
                "display-activity.log",
-               "Display log (runtime)"]
+               "Display log (runtime)",
+               # Framebuffer flush loop (2026-11-25): X's mmap writes
+               # never flush, so the loop writes the framebuffer back
+               # through write() to force the transfer.
+               "fb-flush.sh",
+               "DIAG fb-flush:",
+               "DIAG fbdev driver:",
+               "DIAG fb size:"]
 for m in new_strings:
     check(f"new string present: {m}", m in blob)
 # Removed controls must be gone as button titles

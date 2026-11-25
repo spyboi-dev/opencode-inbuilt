@@ -1036,6 +1036,9 @@ static NSString *OCEngineStripANSI(NSString *line) {
     [b appendString:@"sudo systemctl stop opencode-desktop 2>/dev/null; true\n"];
     [b appendString:@"sudo pkill -f ai.opencode 2>/dev/null; true\n"];
     [b appendString:@"sudo pkill -x Xorg 2>/dev/null; true\n"];
+    // Kill a stale framebuffer-flush loop from a previous boot, or
+    // two loops would write the same framebuffer forever.
+    [b appendString:@"sudo pkill -f fb-flush.sh 2>/dev/null; true\n"];
     // Wait for the old Xorg to actually die, then clear its lock
     // and socket. A fixed `sleep 1` was a race on engine restart:
     // a still-dying Xorg leaves /tmp/.X0-lock behind, the new Xorg
@@ -1076,6 +1079,29 @@ static NSString *OCEngineStripANSI(NSString *line) {
     // Without this the desktop just stays black and the READY
     // loop's ERROR line names no cause.
     [b appendString:@"[ -S /tmp/.X11-unix/X0 ] || { echo \"ERROR Xorg did not start\"; tail -20 /tmp/Xorg.log 2>/dev/null; }\n"];
+    // Framebuffer flush loop — this is what actually puts the
+    // desktop on the screen. The runtime only shows the guest
+    // framebuffer when the guest kernel issues transfer_to_host_2d
+    // + resource_flush on the 2D scanout resource (the console
+    // proves that path: its fbcon writes reach the Metal view).
+    // X on fbdev draws by mmap into /dev/fb0; mmap writes mark
+    // nothing dirty, so no transfer ever fires and the host
+    // framebuffer keeps whatever the console last flushed — black
+    // once X clears the screen at startup. Writing the
+    // framebuffer back onto itself through write() goes through
+    // drm_fb_helper_sys_write, which marks the range dirty, and
+    // the kernel then transfers it. One 16M write per pass is one
+    // flush per pass (one full-texture upload on the host), 5
+    // passes a second.
+    [b appendString:@"cat > /tmp/fb-flush.sh <<'EOF'\n"];
+    [b appendString:@"#!/bin/sh\n"];
+    [b appendString:@"while true; do\n"];
+    [b appendString:@"  dd if=/dev/fb0 of=/dev/fb0 bs=16M status=none 2>/dev/null\n"];
+    [b appendString:@"  sleep 0.2\n"];
+    [b appendString:@"done\n"];
+    [b appendString:@"EOF\n"];
+    [b appendString:@"chmod +x /tmp/fb-flush.sh\n"];
+    [b appendString:@"sudo nohup sh /tmp/fb-flush.sh >/tmp/fb-flush.log 2>&1 &\n"];
     [b appendString:@"nohup openbox --sm-disable >/tmp/openbox.log 2>&1 &\n"];
     [b appendString:@"nohup env DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/1000 HOME=/home/termux /opt/OpenCode/ai.opencode --no-sandbox --disable-dev-shm-usage --disable-gpu >/tmp/ai-opencode.log 2>&1 &\n"];
     // The real app binary is /opt/OpenCode/ai.opencode; the old
@@ -1133,6 +1159,13 @@ static NSString *OCEngineStripANSI(NSString *line) {
     [b appendString:@"echo \"DIAG Windows on :0: $(DISPLAY=:0 xwininfo -root -tree 2>/dev/null | grep -c '^ *0x')\"\n"];
     [b appendString:@"echo \"DIAG Xorg errors: $(grep -c -F '(EE)' /var/log/Xorg.0.log 2>/dev/null; true)\"\n"];
     [b appendString:@"echo \"DIAG app log: $(tail -1 /tmp/ai-opencode.log 2>/dev/null | tr -cd '\\11\\40-\\176' | cut -c1-160)\"\n"];
+    // Flush-loop state: if the loop is not running the desktop
+    // cannot appear (X's mmap writes never flush), and the fb
+    // size confirms the framebuffer the loop is writing back.
+    [b appendString:@"echo \"DIAG fb-flush: $(pgrep -f fb-flush.sh >/dev/null 2>&1 && echo running || echo NOT running)\"\n"];
+    [b appendString:@"echo \"DIAG fbdev driver: $(grep -c -F 'FBDEV(0)' /var/log/Xorg.0.log 2>/dev/null; true)\"\n"];
+    [b appendString:@"echo \"DIAG fb size: $(cat /sys/class/graphics/fb0/virtual_size 2>/dev/null || echo unknown)\"\n"];
+    [b appendString:@"echo \"DIAG fb-flush log: $(tail -1 /tmp/fb-flush.log 2>/dev/null | tr -cd '\\11\\40-\\176' | cut -c1-160)\"\n"];
     [b appendString:@"echo \"--- end desktop diagnostics ---\"; } > /tmp/desktop-diag.txt 2>&1\n"];
     [b appendString:@"sleep 5\n"];
     [b appendString:@"cat /tmp/desktop-diag.txt\n"];
