@@ -214,7 +214,11 @@ new_strings = ["Retrying in 60s", "Automatic retry: starting engine",
                "Desktop view shown:",
                "ERROR Xorg did not start",
                "Xorg log:",
-               "Desktop app log:"]
+               "Desktop app log:",
+               # Desktop viewDidAppear fix + Settings iOS card restyle (2026-11-25)
+               "Server connection, agent, providers and app info.",
+               "server.rack",
+               "plug"]
 for m in new_strings:
     check(f"new string present: {m}", m in blob)
 # Removed controls must be gone as button titles
