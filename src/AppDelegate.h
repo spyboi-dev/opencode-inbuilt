@@ -4,8 +4,8 @@
 // No network work happens at launch beyond the engine health check.
 //
 // Background: the app asks for Always location so iOS keeps it
-// running in the background, and with it the in-process guest
-// engine. Location is only used to keep the app alive; it is never
+// running in the background, and with it the in-process engine.
+// Location is only used to keep the app alive; it is never
 // stored or sent anywhere. See KERNARIUM-ENGINE.md, "Background".
 #import <UIKit/UIKit.h>
 #import <CoreLocation/CoreLocation.h>

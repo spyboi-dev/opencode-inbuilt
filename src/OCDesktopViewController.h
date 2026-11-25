@@ -1,8 +1,8 @@
 // OCDesktopViewController - the desktop screen.
 //
-// Shows the guest's display (the same MTKView run() renders into)
-// full-screen, with touch and keyboard input forwarded to the guest.
-// The guest runs the real OpenCode Linux desktop app; this screen is
+// Shows the engine's display (the same MTKView run() renders into)
+// full-screen, with touch and keyboard input forwarded to it.
+// The engine runs the real OpenCode desktop app; this screen is
 // its window on the phone.
 //
 // Input, first version: one finger taps and drags (touch slot 0,

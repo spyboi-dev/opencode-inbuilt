@@ -1,4 +1,4 @@
-// OCEngine - the in-app engine host (Kernarium engine).
+// OCEngine - the in-app engine host.
 #import "OCEngine.h"
 #import "OCServerClient.h"
 #import "OCSettings.h"
@@ -387,8 +387,8 @@ static NSString *const kGuestImageInstalled = @"oc.guestImageInstalled";
 - (NSString *)stateDescription {
     switch (self.state) {
         case OCEngineStateNotInstalled: return @"Not installed";
-        case OCEngineStateInstalling: return @"Installing guest image";
-        case OCEngineStateInstalled: return @"Installed, guest stopped";
+        case OCEngineStateInstalling: return @"Installing";
+        case OCEngineStateInstalled: return @"Installed, stopped";
         case OCEngineStateStarting: return @"Starting engine";
         case OCEngineStateRunning: return @"Engine running";
         case OCEngineStateStopped: return @"Engine stopped";
@@ -774,7 +774,7 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
     // behaviour is unchanged.
     if (![OCKernGlue shared].booted) {
         [self setState:OCEngineStateStarting];
-        [self setServeProgress:0.05 status:@"Booting guest..."];
+        [self setServeProgress:0.05 status:@"Starting…"];
         [self appendEngineLogSync:@"Guest boot started"];
         __weak typeof(self) weakSelf = self;
         [[OCKernGlue shared] bootWithCompletion:^(BOOL ok, NSError * _Nullable error) {

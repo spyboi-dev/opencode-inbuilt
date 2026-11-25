@@ -170,7 +170,7 @@ new_strings = ["Retrying in 60s", "Automatic retry: starting engine",
                "duplicate install ignored",
                "Auto-start: retrying after a failed start",
                "it tries again by itself",
-               "Guest image not installed yet",
+               "Not installed yet",
                "Show desktop",
                # TermX auto-start/update port (2026-11-23)
                "Update available",
@@ -189,7 +189,6 @@ new_strings = ["Retrying in 60s", "Automatic retry: starting engine",
                "Download verified",
                # Extraction crash fix (2026-11-25)
                "Archive already downloaded and verified",
-               "Extracting the image",
                "Extraction:",
                "Extraction finished",
                "Background time expired during install",
@@ -220,6 +219,31 @@ for m in new_strings:
     check(f"new string present: {m}", m in blob)
 # Removed controls must be gone as button titles
 check("no 'Stop engine' string", "Stop engine" not in blob)
+# Slop removal (2026-11-25): the removed UI strings must be gone
+for m in ["JITless", "LinuxRunner", "inbuilt",
+          "Real OpenCode 2.3.0, inside this app",
+          "Guest image not installed yet",
+          "Downloading guest image part",
+          "Guest core linked",
+          "Debian 13 guest",
+          "The engine cannot start in this build",
+          "Not ready in this build",
+          "inside the guest",
+          "guest workspace",
+          "Guest ready",
+          "Verifying the image",
+          "Booting guest"]:
+    check(f"slop gone: {m}", m not in blob)
+# Non-ASCII UI strings live in the binary as UTF-16LE (the blob runs
+# break at the ellipsis), so check the raw bytes directly.
+for m in ["Extracting…", "Verifying…", "Starting…"]:
+    check(f"utf16 string present: {m}", m.encode("utf-16-le") in binary)
+check("slop gone: Extracting the image…",
+      "Extracting the image…".encode("utf-16-le") not in binary)
+# Location prompts (Info.plist, not the binary): no implementation names
+usage = (info.get('NSLocationWhenInUseUsageDescription') or '') + \
+        (info.get('NSLocationAlwaysAndWhenInUseUsageDescription') or '')
+check("no 'Linux engine' in location prompts", "Linux engine" not in usage)
 print(f"'Start engine' present: {'Start engine' in blob} "
       f"(expected absent; stateDescription uses other wording)")
 

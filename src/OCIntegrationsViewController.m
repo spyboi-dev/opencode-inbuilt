@@ -91,7 +91,7 @@
     cell.textLabel.textColor = [UIColor labelColor];
     if (indexPath.section == 0) {
         OCEngine *engine = [OCEngine shared];
-        cell.textLabel.text = @"OpenCode engine";
+        cell.textLabel.text = @"Engine";
         cell.detailTextLabel.text = engine.stateDescription ?: @"";
         cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         return cell;

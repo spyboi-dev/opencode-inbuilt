@@ -240,20 +240,20 @@
     // and the recovery is automatic (foreground return / retry
     // timer) — never a button.
     if (engine.state == OCEngineStateNotInstalled) {
-        self.detailLabel.text = @"Guest image not installed yet. Install it from the startup screen — the engine starts by itself after that.";
+        self.detailLabel.text = @"Not installed yet. Install it from the startup screen — the engine starts by itself after that.";
     } else if (engine.state == OCEngineStateInstalling) {
-        self.detailLabel.text = @"Downloading the guest image… the engine starts by itself when it finishes.";
+        self.detailLabel.text = @"Downloading… the engine starts by itself when it finishes.";
     } else if (engine.state == OCEngineStateError) {
         self.detailLabel.text = @"The engine stopped with an error. See the log below — it tries again by itself.";
     } else if (engine.guestCoreLinked) {
-        self.detailLabel.text = @"Guest core linked. Debian 13 guest with the OpenCode desktop app. Open the desktop from below once it is running.";
+        self.detailLabel.text = @"Engine ready. Open the desktop from below once it is running.";
     } else if (engine.guestCoreLoadable) {
         // Runtime not loaded yet — it loads as part of the
         // automatic start, never at launch, so a framework that
         // dies while loading cannot kill the launch.
-        self.detailLabel.text = @"Guest runtime loads automatically when the engine starts. Debian 13 guest with the OpenCode desktop app.";
+        self.detailLabel.text = @"Engine ready.";
     } else {
-        self.detailLabel.text = @"Engine not ready yet. Setup downloads the guest image first. The engine cannot start in this build.";
+        self.detailLabel.text = @"Engine not ready yet.";
     }
     // The desktop screen only makes sense once the desktop app is
     // up (or starting).

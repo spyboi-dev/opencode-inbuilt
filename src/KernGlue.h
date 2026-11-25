@@ -1,5 +1,5 @@
-// OCKernGlue - minimal ObjC boot glue for the embedded Kernarium
-// runtime (KRuntime_6_18_4K), replacing CoreGlue (LinuxRunner).
+// OCKernGlue - minimal ObjC boot glue for the embedded engine
+// runtime (KRuntime_6_18_4K), replacing CoreGlue.
 //
 // This file is compiled into the app by every build on this branch,
 // but the runtime itself is loaded at run time with dlopen, on the

@@ -8,7 +8,7 @@
 // progress bar tight under the title, and one rounded dark card
 // holding checklist rows. Each row is a real boot stage, driven only by
 // what the engine actually reports (OCEngine state and the PROGRESS
-// lines the guest prints over the console): a row flips to a teal
+// lines printed over the console): a row flips to a teal
 // check only when that stage really completed, the current stage
 // shows a spinner, later stages stay dim. Nothing is faked.
 //
@@ -154,7 +154,7 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
     card.layer.masksToBounds = YES;
     card.translatesAutoresizingMaskIntoConstraints = NO;
 
-    NSArray<NSString *> *titles = @[@"Engine core", @"Guest boot", @"Node", @"OpenCode", @"Server"];
+    NSArray<NSString *> *titles = @[@"Engine", @"Boot", @"Node", @"OpenCode", @"Server"];
     UIView *previousRow = nil;
     for (NSInteger i = 0; i < OCStartupRowCount; i++) {
         UIView *row = [self makeRowWithTitle:titles[(NSUInteger)i]];
@@ -630,9 +630,9 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
     // reason here ever points at the Engine tab.
     NSString *reason = nil;
     if (!engine.guestCoreLinked && !engine.guestCoreLoadable) {
-        reason = @"The engine is not ready yet in this build. Setup downloads the guest image first, but the engine cannot start here.";
+        reason = @"The engine is not ready yet.";
     } else if (engine.state == OCEngineStateNotInstalled) {
-        reason = @"Guest image 1.16 GB · 12 parts";
+        reason = @"1.16 GB download";
     } else if (engine.state == OCEngineStateInstalling) {
         // The live install step (e.g. "Downloading guest image
         // part 3 of 12…"), or the static line until the first
@@ -648,12 +648,12 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
         }
     } else if (engine.state == OCEngineStateStopped) {
         if (engine.updateAvailable) {
-            reason = @"A newer guest image is available — tap Update to install it, or Start to boot the image you have.";
+            reason = @"A newer version is available — tap Update to install it, or Start to keep the one you have.";
         } else {
             reason = @"The engine stopped. It starts again by itself.";
         }
     } else if (engine.state == OCEngineStateCorePending) {
-        reason = @"The engine runtime did not load. It tries again by itself.";
+        reason = @"The engine did not start. It tries again by itself.";
     }
     self.reasonLabel.hidden = (reason == nil);
     self.reasonLabel.text = reason ?: @"";
@@ -673,19 +673,19 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
     NSString *status = engine.serveStatus ?: @"";
 
     if (engine.guestCoreLinked) {
-        [self setRow:OCStartupRowCore state:OCStartupRowDone detail:@"Linked, ready to boot"];
+        [self setRow:OCStartupRowCore state:OCStartupRowDone detail:@"Ready to start"];
     } else if (engine.guestCoreLoadable) {
-        [self setRow:OCStartupRowCore state:OCStartupRowPending detail:@"Loads automatically at startup"];
+        [self setRow:OCStartupRowCore state:OCStartupRowPending detail:@"Starts automatically"];
     } else {
-        [self setRow:OCStartupRowCore state:OCStartupRowBlocked detail:@"Not ready in this build"];
+        [self setRow:OCStartupRowCore state:OCStartupRowBlocked detail:@"Not ready"];
     }
 
     if (running || p > 0.05) {
-        [self setRow:OCStartupRowBoot state:OCStartupRowDone detail:@"Debian 13 guest"];
+        [self setRow:OCStartupRowBoot state:OCStartupRowDone detail:@"Started"];
     } else if (starting) {
-        [self setRow:OCStartupRowBoot state:OCStartupRowActive detail:@"Booting guest..."];
+        [self setRow:OCStartupRowBoot state:OCStartupRowActive detail:@"Starting…"];
     } else {
-        [self setRow:OCStartupRowBoot state:OCStartupRowPending detail:@"Debian 13 guest"];
+        [self setRow:OCStartupRowBoot state:OCStartupRowPending detail:@"Waiting"];
     }
 
     if (running || p >= 0.55) {

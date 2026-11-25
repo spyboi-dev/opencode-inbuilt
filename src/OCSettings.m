@@ -1,4 +1,4 @@
-// OCSettings - inbuilt-engine app settings.
+// OCSettings - app settings.
 #import "OCSettings.h"
 #import "OCKeychain.h"
 

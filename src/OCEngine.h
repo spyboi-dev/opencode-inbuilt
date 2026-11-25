@@ -1,38 +1,33 @@
 // OCEngine - the in-app engine host.
 //
-// ONE app, real OpenCode inside it. The engine is the Kernarium core:
-// a real Linux 6.18 kernel running a Debian 13 guest in-process, with
-// Node and OpenCode (2.3.0) baked into the guest image. On launch the
-// engine boots the guest and runs the real OpenCode desktop app: the
-// bootstrap starts the server on 4096 first and the desktop app joins
-// that same server (the native iOS UI talks to it at 127.0.0.1:4096
-// through the vsock bridge, see KernGlue) and its window shows through
-// the guest display (Virtio-GPU to a Metal view). The native UI stays
-// available; the desktop window is a second surface. There is no CLI
-// mode any more (removed 2026-11-25): Desktop UI only, always.
+// ONE app, real OpenCode inside it. On launch the engine boots,
+// starts the OpenCode server on 127.0.0.1:4096 (password in the
+// Keychain, Basic auth user `opencode`), and shows the real
+// OpenCode desktop app. The native iOS UI talks to that same
+// server. There is no CLI mode any more (removed 2026-11-25):
+// Desktop UI only, always.
 //
-// Guest boot interface: the embedded core provides a guest executor
-// (a block that types a command at the guest console; see KernGlue).
-// The executor is registered by the linked core on the first Start:
-// the runtime framework is dlopen'd there, never at app launch, so
-// a framework that dies while loading cannot kill the launch. In a
-// build where the runtime framework did not load, the engine reports
-// that state honestly and never pretends the guest is running.
-// Everything else in this class is real and works today:
-// first-launch guest image download (SHA-256 verified), password
-// handling, health checks and auto-restart.
+// Engine interface: the engine provides an executor (a block
+// that types a command at the system console; see KernGlue).
+// The executor is registered on the first Start: the engine
+// framework is loaded there, never at app launch, so a framework
+// that dies while loading cannot kill the launch. In a build
+// where the engine framework did not load, the engine reports
+// that state and never pretends to be running. Everything else
+// in this class works today: first-launch download (SHA-256
+// verified), password handling, health checks and auto-restart.
 #import <Foundation/Foundation.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
 typedef NS_ENUM(NSInteger, OCEngineState) {
     OCEngineStateNotInstalled, // first launch setup not done
-    OCEngineStateInstalling,   // downloading/verifying the guest image
-    OCEngineStateInstalled,    // image ready, guest not started
-    OCEngineStateStarting,     // guest booting / serve launching
+    OCEngineStateInstalling,   // downloading/verifying the image
+    OCEngineStateInstalled,    // image ready, not started
+    OCEngineStateStarting,     // booting / server launching
     OCEngineStateRunning,      // desktop up, server answering on 4096
-    OCEngineStateStopped,      // guest stopped (app killed, iOS suspend)
-    OCEngineStateCorePending,  // guest core library not linked in this build
+    OCEngineStateStopped,      // stopped (app killed, iOS suspend)
+    OCEngineStateCorePending,  // engine not linked in this build
     OCEngineStateError
 };
 
@@ -43,14 +38,14 @@ typedef void (^OCGuestExecutor)(NSString *command, NSString *workingDirectory,
 + (instancetype)shared;
 @property (nonatomic, readonly) OCEngineState state;
 @property (nonatomic, readonly) NSString *stateDescription;
-@property (nonatomic, readonly) BOOL guestCoreLinked; // NO when the runtime framework did not load
-// Kernarium build only: the runtime framework has not been loaded
-// yet, so the executor is not installed — but it CAN load on the
-// first Start (see ensureRuntimeLoaded in KernGlue). NO in builds
-// without the runtime, where Start can never work.
+@property (nonatomic, readonly) BOOL guestCoreLinked; // NO when the engine framework did not load
+// The engine has not been loaded yet, so the executor is not
+// installed — but it CAN load on the first Start (see
+// ensureRuntimeLoaded in KernGlue). NO in builds without the
+// engine, where Start can never work.
 @property (nonatomic, readonly) BOOL guestCoreLoadable;
-// YES when a Start can be attempted: the core is linked, or it can
-// still be loaded on demand (Kernarium build, not loaded yet).
+// YES when a Start can be attempted: the engine is linked, or it
+// can still be loaded on demand (not loaded yet).
 @property (nonatomic, readonly) BOOL engineCanStart;
 @property (nonatomic, copy, nullable) OCGuestExecutor guestExecutor; // set by the linked core
 @property (nonatomic, copy, nullable) void (^stateDidChange)(OCEngineState state);
@@ -73,7 +68,7 @@ typedef void (^OCGuestExecutor)(NSString *command, NSString *workingDirectory,
 // It also waits for the launch update check to settle, and never
 // auto-starts past a pending update (see updateAvailable).
 - (void)maybeAutoStartEngine;
-// YES when the installed guest image is an older release than
+// YES when the installed image is an older release than
 // this build's. A version difference is an update, never a
 // failure: the image boots as-is, and the startup screen offers
 // Update (plus Start to boot as-is) instead of auto-starting
@@ -101,20 +96,20 @@ typedef void (^OCGuestExecutor)(NSString *command, NSString *workingDirectory,
 - (void)appendEngineLogSync:(NSString *)line;
 // Path of the persisted engine log, Documents/Engine/engine.log.
 - (NSString *)engineLogPath;
-// Full diagnostic text: engine log + guest console log. Missing files
+// Full diagnostic text: engine log + console log. Missing files
 // are noted instead of failing.
 - (NSString *)fullLogText;
-// Feed one chunk of guest console output (from KernGlue). Parses
+// Feed one chunk of console output (from KernGlue). Parses
 // PROGRESS / ERROR / `DESKTOP READY` lines and appends the text to
-// the guest console log.
+// the console log.
 - (void)handleGuestConsoleText:(NSString *)text;
 
 - (void)refreshState;
 - (void)startEngineWithCompletion:(void (^)(BOOL started, NSError * _Nullable error))completion;
 - (void)stopEngine;
 - (void)checkHealthWithCompletion:(void (^)(BOOL healthy, NSDictionary * _Nullable info))completion;
-// First-launch setup: downloads the prebuilt Debian guest image
-// (ext4, Node + OpenCode baked in) and verifies the SHA-256 of the
+// First-launch setup: downloads the prebuilt system image
+// (Node + OpenCode baked in) and verifies the SHA-256 of the
 // archive and of the extracted image. Safe to call again; a verified
 // image on disk skips the download.
 - (BOOL)guestImageInstalled;

@@ -1024,7 +1024,7 @@ static NSString *const kOCVerifiedRootfsKey = @"oc.verified-rootfs";
         BOOL chunkOK = NO;
         for (int attempt = 1; attempt <= 3 && !chunkOK; attempt++) {
             NSInteger chunkIndex = i;
-            NSString *step = [NSString stringWithFormat:@"Downloading guest image part %ld of %ld…", (long)(chunkIndex + 1), (long)kOCGuestImageChunkCount];
+            NSString *step = [NSString stringWithFormat:@"Downloading part %ld of %ld…", (long)(chunkIndex + 1), (long)kOCGuestImageChunkCount];
             OCInstallLog([NSString stringWithFormat:@"Downloading part %ld of %ld… (attempt %d)",
                           (long)(chunkIndex + 1), (long)kOCGuestImageChunkCount, attempt]);
             ReportProgress(progress, (double)chunkIndex / (double)kOCGuestImageChunkCount * 0.6, step);
@@ -1072,7 +1072,7 @@ static NSString *const kOCVerifiedRootfsKey = @"oc.verified-rootfs";
         }
         OCInstallLog(@"Download verified — part files removed to free space for extraction");
     }
-    ReportProgress(progress, 0.7, @"Extracting the image…");
+    ReportProgress(progress, 0.7, @"Extracting…");
     // Extract to a side file, not the live image: the installed
     // image keeps booting until the new one is verified, and a
     // failed update leaves it untouched instead of deleting a
@@ -1095,7 +1095,7 @@ static NSString *const kOCVerifiedRootfsKey = @"oc.verified-rootfs";
                           OCFormatBytes(bytesWritten),
                           OCFormatBytes((unsigned long long)kOCGuestImageSize),
                           OCFormatBytes(OCCurrentFootprintBytes())]);
-            ReportProgress(progress, 0.7 + f * 0.25, @"Extracting the image…");
+            ReportProgress(progress, 0.7 + f * 0.25, @"Extracting…");
         }
     } error:&extractError]) {
         finish(NO, extractError);
@@ -1105,7 +1105,7 @@ static NSString *const kOCVerifiedRootfsKey = @"oc.verified-rootfs";
     // The verified .gz is NOT deleted here any more: it stays
     // until the swap below succeeds, so a kill during the verify
     // or the swap costs a re-extraction, never a re-download.
-    ReportProgress(progress, 0.95, @"Verifying the image…");
+    ReportProgress(progress, 0.95, @"Verifying…");
     // The pipeline's own one-time verify, not guestInstalledAt:
     // the just-extracted file still carries write bits until the
     // chmod below, and guestInstalledAt treats that as unverified.
@@ -1137,7 +1137,7 @@ static NSString *const kOCVerifiedRootfsKey = @"oc.verified-rootfs";
     // is the archive redundant: delete it.
     [fm removeItemAtPath:gzPath error:nil];
     OCInstallLog(@"Install complete — guest image ready");
-    ReportProgress(progress, 1.0, @"Guest ready");
+    ReportProgress(progress, 1.0, @"Ready");
     finish(YES, nil);
 }
 

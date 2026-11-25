@@ -1,4 +1,4 @@
-// OCFilesViewController - browse the guest workspace through /api/fs.
+// OCFilesViewController - browse the workspace through /api/fs.
 #import <UIKit/UIKit.h>
 
 NS_ASSUME_NONNULL_BEGIN

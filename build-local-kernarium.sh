@@ -5,7 +5,7 @@
 #
 #   ./build-local-kernarium.sh
 #
-# Produces build-local/OpenCode-Inbuilt-kernarium.ipa, adhoc signed.
+# Produces build-local/OpenCode-iOS.ipa, adhoc signed.
 # -Wall -Wextra, zero warnings required (same rule as build.sh).
 #
 # What it is: the local build.sh compile/link recipe (clang-18 +
@@ -147,8 +147,8 @@ cp -r Frameworks/KosmicKrisp.framework Frameworks/MesaEGL.framework Frameworks/M
 find "$APP/Frameworks" -name _CodeSignature -type d -exec rm -rf {} + 2>/dev/null || true
 
 cd "$OUT"
-rm -f OpenCode-Inbuilt-kernarium.ipa
-zip -qry OpenCode-Inbuilt-kernarium.ipa Payload
-ls -lh OpenCode-Inbuilt-kernarium.ipa
-sha256sum OpenCode-Inbuilt-kernarium.ipa
+rm -f OpenCode-iOS.ipa
+zip -qry OpenCode-iOS.ipa Payload
+ls -lh OpenCode-iOS.ipa
+sha256sum OpenCode-iOS.ipa
 echo "== local build done in $(( $(date +%s) - START ))s (build id $BUILD_ID)"

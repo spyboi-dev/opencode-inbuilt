@@ -1,5 +1,5 @@
-// OCGuestInstall: fetch the prebuilt Debian guest image for the
-// Kernarium engine and place it where the runtime boots it from.
+// OCGuestInstall: fetch the prebuilt system image for the
+// engine and place it where the engine boots it from.
 //
 // The image is a plain ext4 file, built from Debian trixie arm64 with
 // Node 22, OpenCode 2.3.0 and the agent tools baked in (see

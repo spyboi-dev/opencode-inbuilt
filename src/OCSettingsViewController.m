@@ -62,7 +62,7 @@
     if (section == 0) return 2;
     if (section == 1) return 2;
     if (section == 2) return MAX(1, (NSInteger)self.providers.count);
-    return 3;
+    return 2;
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
@@ -117,17 +117,14 @@
             cell.detailTextLabel.text = [parts componentsJoinedByString:@" · "];
         } else {
             cell.textLabel.text = @"No providers yet";
-            cell.detailTextLabel.text = @"Start the engine, then sign in to a provider inside the guest.";
+            cell.detailTextLabel.text = @"Start the engine, then sign in to a provider.";
         }
     } else if (indexPath.section == 3 && indexPath.row == 0) {
-        cell.textLabel.text = @"OpenCode engine";
-        cell.detailTextLabel.text = @"Real OpenCode 2.3.0, inside this app (LinuxRunner interpreter, Debian 13, JITless).";
+        cell.textLabel.text = @"OpenCode";
+        cell.detailTextLabel.text = @"OpenCode 2.3.0";
     } else if (indexPath.section == 3 && indexPath.row == 1) {
         cell.textLabel.text = @"Files";
-        cell.detailTextLabel.text = @"Agent files live in the guest workspace (~/Projects). Nothing leaves the phone except calls to your AI provider.";
-    } else {
-        cell.textLabel.text = @"Limits";
-        cell.detailTextLabel.text = @"If the app is closed, the engine stops. Your files stay saved, and the engine restarts next time.";
+        cell.detailTextLabel.text = @"Agent files live in ~/Projects. Nothing leaves the phone except calls to your AI provider.";
     }
     return cell;
 }

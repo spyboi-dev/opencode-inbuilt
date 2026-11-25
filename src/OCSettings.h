@@ -1,5 +1,5 @@
-// OCSettings - inbuilt-engine app settings.
-// Server URL points at the in-app engine (guest OpenCode on 127.0.0.1:4096).
+// OCSettings - app settings.
+// Server URL points at the in-app engine (OpenCode on 127.0.0.1:4096).
 // The server password lives in the Keychain only, never in a file or a log.
 #import <Foundation/Foundation.h>
 

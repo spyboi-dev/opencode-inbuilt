@@ -1,4 +1,4 @@
-// OCFilesViewController - browse the guest workspace through /api/fs.
+// OCFilesViewController - browse the workspace through /api/fs.
 #import "OCFilesViewController.h"
 #import "OCServerClient.h"
 #import "OCSettings.h"
@@ -131,7 +131,7 @@
             strongSelf.entries = @[];
             [strongSelf.tableView reloadData];
             [strongSelf showEmptyStateWithTitle:@"No files to show"
-                                         detail:@"Could not reach the engine server at 127.0.0.1:4096. Start the engine, then try again."
+                                         detail:@"Could not reach the engine. Start the engine, then try again."
                                       showRetry:YES];
             return;
         }
