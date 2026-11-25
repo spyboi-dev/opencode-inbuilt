@@ -122,6 +122,22 @@ static uint16_t KeyCodeForChar(unichar c, BOOL *shift) {
     if (![OCKernGlue shared].booted) {
         self.hintLabel.text = @"Desktop is not up yet. Start the engine from the Engine tab.";
     }
+    // App-side evidence for the next black-desktop diagnosis: the
+    // Metal view presents whatever the guest scanout shows (the
+    // runtime draws the newest guest frame whenever one arrives),
+    // so a black screen with the tty1 console sliver means the
+    // guest display is still on the tty1 console, not a dead view.
+    // Log the view's geometry and window so a view bug can be
+    // ruled in or out from the log alone. The app cannot know the
+    // guest's surface content; the guest-side VT and window tree
+    // in the diagnostics dump are the other half.
+    MTKView *gv = [OCKernGlue shared].guestView;
+    [[OCEngine shared] appendEngineLog:[NSString stringWithFormat:@"Desktop view shown: guestView frame %@ superview %@ window %@ drawable %@ booted %@",
+        NSStringFromCGRect(gv.frame),
+        gv.superview ? NSStringFromClass([gv.superview class]) : @"nil",
+        gv.window ? @"yes" : @"no",
+        NSStringFromCGSize(gv.drawableSize),
+        [OCKernGlue shared].booted ? @"yes" : @"no"]];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         self.hintLabel.hidden = YES;
     });

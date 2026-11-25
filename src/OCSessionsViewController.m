@@ -1,6 +1,6 @@
 // OCSessionsViewController - list of OpenCode sessions from the in-app engine.
 #import "OCSessionsViewController.h"
-#import "OCChatViewController.h"
+#import "OCDesktopViewController.h"
 #import "OCEngineViewController.h"
 #import "OCServerClient.h"
 #import "OCSettings.h"
@@ -164,8 +164,17 @@ static NSString *OCGreetingForNow(void) {
 }
 
 - (void)openSession:(NSDictionary *)session {
-    OCChatViewController *chat = [[OCChatViewController alloc] initWithSession:session];
-    [self.navigationController pushViewController:chat animated:YES];
+    // User decision (2026-11-25): tapping a chat opens the REAL
+    // OpenCode desktop, not the custom native chat window. The
+    // desktop app joins the same server on 4096, so the session is
+    // there; there is no deep-link to open one specific session
+    // inside the desktop app, so the user picks it inside the
+    // desktop itself. The native OCChatViewController stays in the
+    // codebase as the fallback, but the Threads tab no longer
+    // reaches it.
+    (void)session;
+    OCDesktopViewController *desktop = [[OCDesktopViewController alloc] init];
+    [self.navigationController pushViewController:desktop animated:YES];
 }
 
 #pragma mark - Table

@@ -930,11 +930,27 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
     [b appendString:@"sudo systemctl stop opencode-desktop 2>/dev/null; true\n"];
     [b appendString:@"sudo pkill -f ai.opencode 2>/dev/null; true\n"];
     [b appendString:@"sudo pkill -x Xorg 2>/dev/null; true\n"];
-    [b appendString:@"sleep 1\n"];
+    // Wait for the old Xorg to actually die, then clear its lock
+    // and socket. A fixed `sleep 1` was a race on engine restart:
+    // a still-dying Xorg leaves /tmp/.X0-lock behind, the new Xorg
+    // fails with "Server is already active for display 0", and the
+    // socket wait below breaks at once on the STALE socket — so
+    // openbox and the app start against a dead server and the
+    // desktop stays black with no reason in the log. Removing the
+    // lock/socket first means the wait loop only breaks on a fresh
+    // X server.
+    [b appendString:@"for _ in $(seq 1 10); do pgrep -x Xorg >/dev/null 2>&1 || break; sleep 1; done\n"];
+    [b appendString:@"rm -f /tmp/.X0-lock /tmp/.X11-unix/X0\n"];
     [b appendString:@"sudo mkdir -p /run/user/1000; sudo chown termux:termux /run/user/1000 2>/dev/null; true\n"];
     [b appendString:@"export DISPLAY=:0; export XDG_RUNTIME_DIR=/run/user/1000\n"];
     [b appendString:@"sudo nohup Xorg :0 -ac -noreset -nolisten tcp vt01 >/tmp/Xorg.log 2>&1 &\n"];
     [b appendString:@"for _ in $(seq 1 30); do [ -S /tmp/.X11-unix/X0 ] && break; sleep 1; done\n"];
+    // If the socket never appeared, say why: Xorg's own log goes
+    // to /var/log/Xorg.0.log, but a failure before it opens that
+    // file lands only in /tmp/Xorg.log (the stderr redirect).
+    // Without this the desktop just stays black and the READY
+    // loop's ERROR line names no cause.
+    [b appendString:@"[ -S /tmp/.X11-unix/X0 ] || { echo \"ERROR Xorg did not start\"; tail -20 /tmp/Xorg.log 2>/dev/null; }\n"];
     [b appendString:@"nohup openbox --sm-disable >/tmp/openbox.log 2>&1 &\n"];
     [b appendString:@"nohup env DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/1000 HOME=/home/termux /opt/OpenCode/ai.opencode --no-sandbox --disable-dev-shm-usage >/tmp/ai-opencode.log 2>&1 &\n"];
     // The real app binary is /opt/OpenCode/ai.opencode; the old
@@ -952,6 +968,10 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
     [b appendString:@"ps aux | grep -E \"Xorg|ai.opencode|openbox\" | grep -v grep\n"];
     [b appendString:@"DISPLAY=:0 xwininfo -root -tree 2>&1 | head -20\n"];
     [b appendString:@"grep -F \"(EE)\" /var/log/Xorg.0.log 2>/dev/null | tail -5; true\n"];
+    // The (EE) grep above misses a failure before Xorg opens its
+    // own log file; that reason is only in the stderr redirect.
+    // The app log tail shows whether Electron even got going.
+    [b appendString:@"echo \"Xorg log:\"; tail -20 /tmp/Xorg.log 2>/dev/null; echo \"Desktop app log:\"; tail -10 /tmp/ai-opencode.log 2>/dev/null; true\n"];
     [b appendString:@"echo \"--- end desktop diagnostics ---\"\n"];
     return b;
 }

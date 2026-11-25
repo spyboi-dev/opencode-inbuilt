@@ -210,7 +210,12 @@ new_strings = ["Retrying in 60s", "Automatic retry: starting engine",
                "DESKTOP READY",
                "desktop diagnostics",
                "Active VT:",
-               "Could not load chats"]
+               "Could not load chats",
+               # Chat opens the real desktop + black-desktop hardening (2026-11-25)
+               "Desktop view shown:",
+               "ERROR Xorg did not start",
+               "Xorg log:",
+               "Desktop app log:"]
 for m in new_strings:
     check(f"new string present: {m}", m in blob)
 # Removed controls must be gone as button titles
