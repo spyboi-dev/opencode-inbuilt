@@ -126,6 +126,186 @@ copies those same files, so they are identical by construction.
   proven pipeline, and the next code change goes through the
   local path.
 
+## Status: SERVER-FIRST BOOTSTRAP + DESKTOP VT FIX — LOCAL BUILD c9493ce, verified
+
+Device evidence (2026-11-25 12:26 IST, build c360a14, pid 23692):
+the boot fix PROVED — "Canonicalized boot paths" fired (/var ->
+/private/var), pre-flight OK, "Guest up (login prompt seen)"
+12:27:05, "Serve launch started", "Desktop ready (from guest
+console)" 12:27:07, "State: Engine running". Guest log: Linux
+6.18.60, systemd 257.13, Debian 13 trixie, 2 CPUs, virtio-gpu
+initialized (virgl, fb0), docker socket + containerd started, both
+vsock proxies started. Bootstrap: Node ready, OpenCode ready,
+Tools ready, socat proxies started, "no app.py in guest"
+(expected — /root/Projects does not persist; known unsolved
+persistence issue, NOT this task). Two failures after that:
+
+### Failure B — Threads cannot load chats
+
+Screenshot 2 (12:27): Threads says "Good afternoon. Engine:
+Engine running · Could not load chats. Start the engine, then
+pull to retry." The engine is running but the native UI cannot
+load sessions. The pasted guest bootstrap shows NO `opencode
+serve` command being run — only the desktop app via systemctl.
+
+Diagnosis (from source, not guessed):
+- Current `consoleBootstrap` (`src/OCEngine.m:833-878`) never
+  starts `opencode serve`. 5f307ff deleted the CLI branch that
+  ran it (`opencode serve --port 4096 --hostname 0.0.0.0`, old
+  `OCEngine.m:939`, `consoleBootstrapForDesktop:`). The desktop
+  branch (9ccab19) has the server-first bootstrap; this branch
+  lost it when the CLI mode was removed.
+- The desktop app does NOT start a server the native UI can use:
+  the device guest log has no "server listening" line and no
+  serve process. `OCEngine.h`'s header comment claiming "the
+  desktop app starts its server on 4096" was wrong — contradicted
+  by the device log — and is corrected in this build. The design
+  (DESKTOP-UI.md + guest-additions.sh header) is explicit: the
+  bootstrap starts the CLI server FIRST and the desktop app joins
+  that same server.
+- Consequence: nothing listens on guest TCP 4096, so the bridge
+  (`KernGlue.m:496-502`, 127.0.0.1:4096 → vsock 4096 → guest
+  socat → TCP 127.0.0.1:4096) connects to nothing → connection
+  refused → `OCSessionsViewController reloadSessions` GET
+  /api/session fails → "Could not load chats".
+- Aggravating: `checkHealthWithCompletion:` (`OCEngine.m:937`)
+  was `desktopReady && booted` — no HTTP probe — so "Engine
+  running" was declared without the server ever answering. The
+  state lied. The Threads error text compounded it ("Start the
+  engine" while the engine was running).
+
+### Failure A — Desktop view is black
+
+Screenshot 1 (12:29): Desktop screen shows the header (back
+arrow, "Desktop", "Keyboard") and "Tap to click. Use Keyboard
+to type." but the content area is black, two minutes after
+"Desktop ready". A sliver of "Debian GNU/Linux 13 termx tty1 /
+termx login:" is visible at the very top edge, above the header.
+
+Diagnosis (from source + the screenshot + image inventory):
+- The DESKTOP READY gate is a false positive. The bootstrap
+  polled `pgrep -f opencode-desktop` (`OCEngine.m:875`), but
+  there is no such binary — the real binary is
+  /opt/OpenCode/ai.opencode — and `pgrep -f` matches the full
+  command line, so it matched the SESSION SCRIPT itself
+  (/usr/local/bin/opencode-desktop-session.sh). READY fired 2 s
+  after the service started, before the app existed. The desktop
+  branch fixed the pattern to `pgrep -f ai.opencode` (9ccab19).
+- Xorg never takes over the display. The session script runs
+  `Xorg :0 -ac -noreset -nolisten tcp &` with no VT argument,
+  so X takes a free VT (tty2, getty holds tty1) and the display
+  stays on tty1's text console — exactly what the screenshot's
+  sliver shows: the framebuffer is still the console, not X.
+  The app-side MTKView guestView is live (it shows the console),
+  so the view code is not the problem.
+- The fix cannot be a post-hoc VT switch: `chvt` and
+  `fgconsole` are NOT in the guest image (verified via debugfs
+  on the actual .ext4; `curl`, `xwininfo`, `ss` ARE present),
+  and the session script is baked into the read-only rootfs
+  (erofs), so it cannot be edited. X must start on the VT the
+  display is already on.
+
+### What changed (commit c9493ce, 4 files, +157/-24)
+
+1. **Server first** (`src/OCEngine.m consoleBootstrap`,
+   restored from the desktop branch 9ccab19): backgrounded
+   `nohup opencode serve --port 4096 --hostname 0.0.0.0
+   >/tmp/opencode-serve.log 2>&1 &`, then a curl /api/info wait
+   loop (Basic auth `opencode:$OPENCODE_SERVER_PASSWORD`, the
+   password only ever as the variable, never literal) echoing
+   "server listening", then an `ss -ltn` check ("Server on 4096
+   confirmed" or "ERROR Server did not start"). Only then does
+   the desktop start (PROGRESS 95).
+2. **"server listening" console handler restored**: logs
+   "Server listening (from guest console)", sets a new
+   `serverListening` flag. It does NOT mark the engine Running
+   — the desktop is the completion signal.
+3. **Real health probe** (`checkHealthWithCompletion`): healthy
+   now means guest up + desktop ready + /api/info answers
+   through the vsock bridge via `OCServerClient` (the exact path
+   the native UI uses). At most one probe in flight; while one
+   runs, the last result answers, so a slow probe cannot pile up
+   on the 5 s timer. Failures log on transition only ("Server
+   probe failed: <exact error>"); first success logs "Server
+   probe: /api/info 200 (native UI path works)". Probe state
+   resets in `startServeWithCompletion` and `stopEngine`.
+4. **Desktop session from the bootstrap, X on vt01**: instead
+   of `sudo systemctl start opencode-desktop`, the bootstrap
+   stops the service, kills leftovers (`pkill -f ai.opencode`,
+   `pkill -x Xorg`), makes /run/user/1000, and runs `sudo nohup
+   Xorg :0 -ac -noreset -nolisten tcp vt01`, then openbox and
+   ai.opencode as termux (the bootstrap shell IS the autologin
+   termux shell with passwordless sudo, so the privileges match
+   the service). vt01 puts X on the VT the display is already
+   on. READY gates on `pgrep -f ai.opencode` + the X0 socket.
+5. **Desktop diagnostics dump** into guest.log after READY:
+   active VT, `ps` for Xorg/ai.opencode/openbox, `DISPLAY=:0
+   xwininfo -root -tree` (xwininfo is in the image), Xorg
+   `(EE)` errors. The next device log proves whether the window
+   is mapped and which VT is active.
+6. **Threads error text** (`OCSessionsViewController.m`): names
+   the underlying error — "Could not load chats
+   (<error>). Pull to retry." — instead of the misleading
+   "Start the engine".
+7. **`OCEngine.h` header comment corrected**: the bootstrap
+   starts the server on 4096 first; the desktop app joins it.
+8. **`verify-local.py`**: twelve new strings (server
+   listening, Server probe, Starting server/desktop, DESKTOP
+   READY, desktop diagnostics, Active VT, Could not load
+   chats).
+
+KEPT: extraction/download/boot-path code untouched (all proven
+working), Desktop UI only (no CLI, no mode choice), TermX
+startup styling untouched. Swizzle path NOT restored. Nothing
+about LiveContainer was asked (standing rule). No guest image
+rebuild, no re-download: the bootstrap is injected by the app
+at boot, so these fixes ship in the app build.
+
+### Host verification (verify-local.py)
+
+Local build 27 s, build id `c9493ce`. IPA:
+`mac-ipas/OpenCode-Inbuilt-kernarium-c9493ce.ipa`, 25,192,755
+bytes, SHA-256
+`b515f9ab536ec87cc2c34c2f29be58b0707224356732a91cb86b6c6944341106`.
+Same SHA in `build-local/`, `mac-ipas/`, and
+`~/workspace/goals/opencode-for-ios/files/` (symlinked from
+`~/workspace/your_files/`). **ALL PASS** — arm64,
+MH_EXECUTE, 5 segments, LC_MAIN entryoff 0x4000, MinOS 15.0.0,
+SDK 26.5.0, zero Kernarium load commands, code signature 162/162
+SHA-256 page hashes valid, all four frameworks embedded, all
+markers incl. build id `c9493ce`, both guest hashes + chunk part
+names, no TODO-FILL, no BUILD-NOTE, no "Stop engine"/"Start
+engine" strings, all twelve new strings present. GitHub release:
+[opencode-c9493ce](https://github.com/spyboi-dev/opencode-ios/releases/tag/opencode-c9493ce).
+Tag-only release, as the last five (tag points at main head
+bed1f27; the asset is the build).
+
+### Device test steps (install over c360a14 — do NOT delete the app)
+
+1. Install over the c360a14 app (do NOT delete it — the guest
+   image is already installed and verified; deleting wipes it
+   and forces a 1.16 GB re-download). Open the app; auto-start
+   retries the boot by itself.
+2. The engine log must now show "server listening" and "Server
+   on 4096 confirmed" BEFORE "Desktop ready", then "Server
+   probe: /api/info 200 (native UI path works)". If the probe
+   fails, the log names the exact error instead of a silent
+   "Engine running".
+3. Threads must list chats (empty list says "No sessions yet.
+   Tap + to start one." — that is success, not failure). Tap +
+   and start a chat with a real tool call.
+4. "Show desktop" from the Engine tab: the OpenCode desktop
+   window must be visible (dark Electron UI), not black. The
+   guest log's "--- desktop diagnostics ---" block must show
+   Active VT: 1, the Xorg/ai.opencode/openbox processes, and the
+   ai.opencode window in the xwininfo tree.
+5. Then: `docker run hello-world`, app.py on port 8000 (still
+   "no app.py in guest" until persistence lands — expected).
+6. If chats still fail, send engine.log AND BOOT.txt AND the
+   guest log, and note whether /api/info answers. If the
+   desktop is still black, the diagnostics block names the VT,
+   the window tree, and any Xorg errors.
+
 ## Status: GUEST BOOT -1 FIX — canonical paths + pre-flight + RTLD_GLOBAL — LOCAL BUILD c360a14, verified
 
 Device evidence (2026-11-25 11:31 IST, build 5f307ff): the
