@@ -8,6 +8,174 @@ launch-path hypothesis is closed. The scene investigation (why UIKit
 never called the scene method in the 07:57 run) continues on that
 settled basis.
 
+## Status: BLACK DESKTOP — DESKTOP BOOTSTRAP DELIVERED AS A SERVER FILE, NOT TYPED — LOCAL BUILD 25bb172, verified
+
+User test of df597d2, 2026-11-25 15:50 IST: desktop STILL black.
+This time he sent all three logs, and they name the root cause
+the two-phase split did not. Files:
+`engine-db69e112.log` (565 lines), `guest-cbd807c4.log` (4538
+lines), `display-activity-e788684b.log` (347 lines), all in
+`~/workspace/user/files/`. No screenshot was sent with this run.
+
+### What the df597d2 logs prove (verified from the files)
+
+1. The two-phase split WORKED as far as it went. df597d2 run
+(15:50:34–15:51:18, 44 s): "Server listening (from guest
+console)" 15:50:50, "Server probe: /api/info 200" and "Server
+healthy" 15:50:50, "Desktop launch started" 15:50:52 — phase 2
+was sent 2 s after the probe, into an idle shell. The shell
+was NOT blocked in the curl loop this time.
+2. Typing the script STILL dropped bytes — into the idle
+shell. The 4.5 KB is typed in 512-byte chunks at 0.05 s
+sleeps (~10 KB/s) while the shell executes concurrently, and
+the shell falls behind on the `sudo` lines (each sudo can
+take ~1 s) and the wait loops, so the 4 KB tty input buffer
+overflows and bytes are lost at arbitrary positions. Hard
+execution evidence in the guest log (not log interleave):
+   - The diag-snapshot.sh heredoc opener was lost: its body
+     lines executed as individual commands (`echo "DIAG
+     fb-flush: ..."` ran and printed `DIAG fb-flush: NOT
+     running` — which is how those DIAG lines reached the
+     engine log at 15:50:52), the closing `} > ...` line
+     errored (`syntax error near unexpected token '}'`),
+     the `EOF` terminator ran as a command (`EOF: command
+     not found`), and `chmod +x /tmp/diag-snapshot.sh`
+     failed (`No such file or directory`), as did `sh
+     /tmp/diag-snapshot.sh`. The script was never written,
+     so /tmp/desktop-diag.txt was never written.
+   - The fbdev.conf heredoc was mangled the same way
+     (`Identifier "Lay-bash: EOF: command not found`, the
+     `Layout0"` line split), so the Xorg config is garbled
+     or missing.
+   - The ai.opencode launch line was split mid-flag:
+     `--disable-gpu` became `--disable-` plus a `gpu`
+     command (`gpu >/tmp/ai-opencode.log 2>&1 &`, job [3]
+     362, `[3]+ Exit 127`). **ai.opencode never started.**
+   - The diag-loop.sh heredoc DID work (continuation
+     prompts, job [2] 345) — the loss is random, not
+     deterministic, which is the signature of buffer
+     overflow, not a bad line.
+3. The self-test never ran and Xorg's fate is unknown. No
+"SELFTEST fb0 red" in either log (`DIAG selftest: OK` only
+means /tmp/selftest.log is empty or missing — consistent
+with python never running). No "XORG RUNNING"/"XORG DEAD",
+no "ERROR Xorg did not start", no "DESKTOP STATE", no
+DESKTOP READY in either log: the READY loop was still in
+its early iterations when the run ended (44 s; the loop
+runs up to 120 s). The display log (0–42.166 s) has ONLY
+2D CPU flushes of resource 2 at 1290x2796, ~5/s, no virgl
+scanout ever — X never drew, because X never verifiably
+started.
+4. The server fetch channel itself is NOT the failure. The
+fetch at 15:51:06 correctly returned FileNotFoundError for
+desktop-diag.txt — the file genuinely did not exist,
+because the snapshot script was never written. The retry
+logic worked (attempt logged); the run just ended before
+a file could ever exist.
+5. The run was too short for the READY loop anyway: 44 s
+from launch to CLEAN SHUTDOWN, 26 s from "Desktop launch
+started". The loop needs up to 120 s. Device test steps
+now say to leave the app open at least 2 minutes after
+tapping +.
+
+### Root cause — the delivery channel, not the desktop
+
+Typing a multi-KB script through a 4 KB tty buffer while the
+shell executes concurrently is inherently lossy: the app
+types faster than the shell consumes whenever sudo or a wait
+loop blocks it, and the buffer drops bytes at arbitrary
+positions — heredoc openers, config lines, mid-flag splits.
+The two-phase split fixed the curl-loop block (977334d) but
+not the delivery itself. The fix is to stop typing the
+script: deliver it as a file through a channel that does not
+go through the tty at all.
+
+### The channel — POST /api/experimental/fs/write
+
+Verified three ways before use: (1) the pinned 2.3.0 source
+(`packages/protocol/src/groups/fs.ts:83`) declares
+`HttpApiEndpoint.post("fs.write",
+"/api/experimental/fs/write", ...)` with a raw-bytes payload
+and a `Location.response(FileSystem.Write)` success body;
+(2) the desktop app itself uploads attachments through it
+(`packages/app/src/composer/attachments/destination.ts`:
+POST with `location[directory]` + `path` query params,
+`content-type: application/octet-stream`, Basic auth,
+body = raw file bytes, 200 with `{data: {path}}`);
+(3) the shipped 2.3.0 server binary (from the guest image
+tarball) contains the route string. The endpoint writes the
+raw body to an absolute path — "unlike read, the target is
+not confined to the location" — creating parent directories.
+The server runs as termux and /tmp is world-writable, so an
+absolute /tmp path needs no location param. Note: the
+non-experimental fs API is read-only (find, list, read);
+only the experimental endpoint writes.
+
+### What changed (commit 25bb172, 4 files, +118/-12)
+
+- `src/OCServerClient.h/.m` — new `writeFileAtPath:content:
+completion:`: POST `/api/experimental/fs/write?path=...`
+with the raw bytes as the body, `Content-Type:
+application/octet-stream`, the same Basic auth as the
+reads. 2xx returns the resolved `data.path` (or the
+requested path if the body has none); anything else is an
+NSError with the HTTP status. Follows the `readFileAtPath:`
+pattern (manual request, shared session, main-queue
+completion).
+- `src/OCEngine.m` — new `deliverDesktopBootstrap`: on the
+first healthy /api/info probe (2 s later, as before), the
+desktop script is written to `/tmp/desktop-bootstrap.sh`
+through the server, and on success only one short line is
+typed into the console: `sh /tmp/desktop-bootstrap.sh`
+(28 chars — nothing to split, nothing queued behind it).
+The script's heredocs are read from the file by sh, not
+from the tty, so they cannot be split. The script content
+is byte-identical (same 4536 bytes, bash -n clean). If the
+write fails, the log names it (`Desktop bootstrap write
+failed (...), falling back to console`) and the old
+console typing runs, so a surprise in the experimental
+endpoint leaves the desktop delayed rather than
+unlaunched. The `desktopBootstrapSent` gate and the
+"Desktop launch started" marker are unchanged.
+- `verify-local.py` — new-string checks for
+`desktop-bootstrap.sh`, `experimental/fs/write`, `Desktop
+bootstrap write failed`, `sh /tmp/desktop-bootstrap.sh`.
+ALL PASS (139 checks).
+
+Server bootstrap (phase 1), chat-opens-desktop navigation,
+runtime/framework, Settings untouched. Nothing merged to
+main. `kernarium-desktop` and termx untouched. Both
+bootstrap phases were extracted from the ObjC literals and
+parsed with `bash -n` before building (phase 1: 1439 bytes,
+phase 2: 4536 bytes, one-liner: clean); the python
+self-test one-liner is unchanged from 977334d.
+
+Build 25bb172, local, 2026-11-25 ~10:29 IST. IPA
+`mac-ipas/OpenCode-iOS-25bb172.ipa`, 25,198,811 bytes,
+SHA-256
+ed2a10b2442b191e20441e08084cdaa906994669288e0e3ed8e7213972e29441.
+GitHub release opencode-25bb172. Staged in
+`~/workspace/goals/opencode-for-ios/files/OpenCode-iOS-25bb172.ipa`.
+
+### Device test (25bb172)
+
+Install over df597d2, do NOT delete the app — the guest image
+is already installed. Tap + on Threads, then LEAVE THE APP
+OPEN at least 2 minutes (the READY loop runs up to 120 s;
+the df597d2 run ended after 44 s, before it could finish),
+then send a screenshot AND engine.log. What to look for:
+"Desktop launch started" ~2 s after "Server healthy" (the
+write succeeded — if instead the log says "Desktop bootstrap
+write failed (...), falling back to console", the write
+endpoint is the problem and the old typing ran); "Guest
+diagnostics (via server)" with Active VT, window count, Xorg
+errors, app log tail and self-test result (the file should
+exist now — the snapshot script is written from the file,
+not the tty); "SELFTEST fb0 red" and red on screen if the
+write path works; "XORG RUNNING"/"XORG DEAD" and "DESKTOP
+STATE" naming whether Xorg lived and whether ai.opencode
+mapped a window.
+
 ## Status: BLACK DESKTOP — TWO-PHASE BOOTSTRAP, SYSTEMCTL HANG REMOVED, DIAGNOSTICS THAT SURVIVE — LOCAL BUILD df597d2, verified
 
 User test of 977334d, 2026-11-25 15:32 IST: desktop STILL black.
