@@ -126,6 +126,236 @@ copies those same files, so they are identical by construction.
   proven pipeline, and the next code change goes through the
   local path.
 
+## Status: EXTRACTION CRASH FIX + DESKTOP UI ONLY + TERMX STARTUP RESTYLE — LOCAL BUILD 5f307ff, verified
+
+User report 2026-11-25 09:22 IST, build a29614b: "still crashing",
+with engine.log (`~/workspace/user/files/engine-a2658555.log`). The
+log holds two runs. Old run (084ae47, pid 16691, 2026-11-24
+10:24:20): the known download crash. New run (a29614b, pid 20925,
+2026-11-25 09:20:13): "Previous run ended without shutdown". Clean
+launch, all 7 steps, window attached (willConnect). 09:20:22
+"First-launch setup started (guest image download)", "State:
+Installing guest image", "Kernarium runtime load deferred until
+first Start". 09:20:22 "Install: 21.71 GiB free, 5.74 GiB needed
+for the guest image" — free-space gate passed. 09:20:22–09:20:23
+ALL 12 parts "already downloaded and verified — keeping it" —
+every part was already on disk from earlier attempts and verified
+OK, so no re-download happened. 09:20:31 "Download verified —
+part files removed to free space for extraction". Then NOTHING.
+The log stops dead at 09:20:31, no extraction lines, no error, no
+crash line. The user reported the crash at ~09:22, ~90 s after the
+last line.
+
+### Diagnosis — what the log proves, and what it does not
+
+- The background-session download fix WORKED: the download phase
+  completed with no crash and no re-download. The crash moved to
+  the phase AFTER "Download verified": extraction of the 1.16 GB
+  .gz into the 4.46 GB ext4 (and/or the swap/fingerprint).
+- The .gz was assembled and hash-verified before the parts were
+  deleted, so the .gz on disk should be good; the next Install
+  should resume at extraction, not re-download — but the old code
+  deleted the .gz at the START of the next install, so a kill
+  during extraction forced a full 1.16 GB re-download: the crash
+  loop.
+- The log has NO extraction progress lines — the same diagnostic
+  gap the download had. The extraction is a silent phase, so the
+  log does not say where in it the app died.
+
+### Audit findings (from src/OCGuestInstall.m, read in full)
+
+- Main-thread watchdog RULED OUT: extraction runs on a background
+  queue (`dispatch_get_global_queue` QOS_CLASS_USER_INITIATED),
+  not the main thread.
+- Memory, prime suspect: `SHA256OfFile` and `AssembleChunks` loop
+  `readDataOfLength:1<<20` with NO `@autoreleasepool`. Each call
+  returns an autoreleased 1 MB NSData, and the loop runs inside
+  the install block on a GCD worker thread whose pool only drains
+  when the block returns. The pipeline hashed ~2.4 GB before
+  extraction (12 parts + .gz) in the same block, and the
+  post-extraction verify would hash another 4.46 GB — past the
+  ~4 GB jetsam limit if Foundation's `readDataOfLength:` does not
+  elide the autorelease (not provable statically). The log timing
+  fits: parts + .gz verified by 09:20:31, gunzip has no ObjC
+  objects so the footprint stays flat, then the 4.46 GB verify
+  starts and the footprint explodes → SIGKILL, no crash line.
+- `gunzipFile` itself is clean: 256 KiB heap buffer (never the
+  stack — TermX's SIGBUS lesson), `gzread`/`fwrite` loop, no
+  progress logging, no fsync, no `setvbuf` (default stdio buffer
+  is the 4 KiB APFS block size → ~1.1M `write()` calls for 4.46 GB).
+- Second plausible killer: background suspension. Extraction is
+  in-process under only a ~30 s background-task budget, and the
+  expiration handler was silent with no clean-stop path. The
+  a29614b delivery message told the user locking the phone is
+  fine — true for the download, not for extraction.
+- A kill mid-extraction left a partial `.new` file; the next
+  attempt deleted it up front, so it did not poison the retry —
+  but the `.gz` deletion at install start did (see above).
+
+### What changed (commit 5f307ff, 13 files, +342/-319)
+
+Four changes in one build (all user-directed 2026-11-25 09:31–
+09:32 IST, plus the extraction fix):
+
+1. Extraction fix (`src/OCGuestInstall.m`, `src/OCGuestInstall.h`):
+   - `@autoreleasepool` per chunk in `SHA256OfFile` and
+     `AssembleChunks`.
+   - `gunzipFile` now takes a progress block (bytes written) plus
+     the stop flag; `setvbuf` 1 MiB on the output `FILE*`; caller
+     logs every 10% with bytes + footprint (fsynced `OCInstallLog`)
+     and `ReportProgress` 0.7→0.95. Progress lines read
+     "Extraction: 10% · … written · footprint …" (clean 10/20/30%
+     steps, not 9/19/29%).
+   - Static volatile `s_extractionStopRequested` flag; the
+     background-task expiration handler logs "Background time
+     expired during install — stopping cleanly, the verified
+     archive is kept" and sets it; the gunzip loop checks it per
+     chunk and aborts cleanly with error "Install paused — the
+     verified archive is kept, tap Install to continue"
+     (partial `.new` deleted by gunzipFile's failure path). Flag
+     reset at install start.
+   - Verified `.gz` kept: at install start, if `gzPath` exists
+     with the right size + SHA-256 (`haveVerifiedGz`), the
+     download loop and assembly are skipped (log "Archive already
+     downloaded and verified — skipping download and assembly"),
+     lingering part files deleted; otherwise the stale `.gz` is
+     deleted as before. Free-space gate adjusted (`gzSize` counted
+     only when the archive is not already verified). The `.gz` is
+     deleted only after a successful swap + fingerprint (log
+     "Install complete — guest image ready").
+   - `verify-local.py`: new strings added for all seven new log
+     lines.
+2. CLI mode REMOVED, Desktop UI only (user direction 2026-11-25
+   09:31 IST): the Install-time CLI/Desktop action sheet is
+   gone — Install just installs. `oc.engineMode` deleted
+   (`OCSettings`), `engineMode`/`setEngineMode:`/`serveLaunchCommand`
+   deleted (`OCEngine`), the CLI `opencode serve` bootstrap branch
+   deleted (`consoleBootstrapForDesktop:` → `consoleBootstrap`,
+   desktop body only), the CLI "server listening" console branch
+   deleted (DESKTOP READY is the only completion signal),
+   `checkHealthWithCompletion:` collapsed to the desktop branch
+   (desktopReady && booted, no HTTP poll). The native
+   Threads/Integrations tabs stay and talk to the same server on
+   4096; "Show desktop" stays as the way to view the desktop (now
+   shown whenever Running or Starting, no mode gate). The guest
+   image is the same, so the download does not change. Judgment
+   call, recorded: Desktop UI is a superset (server + desktop app
+   + native UI), so removing CLI means the desktop app always
+   launches. If the user actually wanted the desktop to BE the
+   main screen instead of the tabs, he will say so when he sees
+   this build. `KERNARIUM-ENGINE.md` "Engine modes" section
+   updated with a dated reversal note; the CLI description is kept
+   as history.
+3. Startup screen restyled to TermX's starting window (user
+   direction 2026-11-25 09:32 IST, `src/OCStartupViewController.m`):
+   black background, teal #2AB3A3 accent for the status dot and
+   active states, 36pt bold title, 17pt status row, thin progress
+   bar tight under the title, one rounded dark checklist card
+   (white 0.11), 48pt full-width grey buttons (white 0.22),
+   120pt spacer holding the title low, 28pt stack spacing, teal
+   done checks (was green). All function kept: Install / Update /
+   Start / Continue to app / Log buttons, five checklist rows,
+   live progress, staggered entrance animation (Install first,
+   then rows one by one). The logo is OFF this screen (TermX has
+   none; the title is the brand) — that is what buys the 120pt
+   spacer: the literal TermX values with a logo and 68pt rows
+   measured ~867pt and pushed Install below the fold again, the
+   2026-11-22 09:46 bug. Measured now ~787pt base against ~839pt
+   safe area on iPhone 15 Plus; the stopped-with-update state
+   (+60pt while Start is visible) measures ~847pt and may need a
+   small scroll — the scroll view stays as the fallback for that
+   state only. Rows stay 56pt (not TermX's 68pt) for the same fit
+   reason. The OpenCodeLogo.png asset stays in the bundle (it is
+   the app icon artwork); it is just not shown on this screen.
+4. Repo rename (user direction 2026-11-25 09:31 IST):
+   `spyboi-dev/opencode-inbuilt` → `spyboi-dev/opencode-ios`
+   everywhere it names the GitHub repo: the guest-image chunk
+   base URL in `OCGuestInstall.m` (now
+   `https://github.com/spyboi-dev/opencode-ios/releases/download/rootfs-20261120/`),
+   `rootfs-build/upload-chunks.sh` (`REPO=`), `KERNARIUM-ENGINE.md`,
+   `KERNARIUM-BUILD.md` (run links), and the historical build
+   notes (`MAC-BUILD-RERUN.md`, `AUTO-START-BUILD.md`,
+   `STARTUP-BUILD.md`). The local checkout directory stays
+   `~/workspace/opencode-inbuilt` (a path, not the repo name).
+   README.md has no repo URL to update (verified by grep). Old
+   URLs redirect on GitHub, so the app would still have worked;
+   the app now points at the real name. Verified in the built
+   binary: the new URL string is present (UTF-8), the old slug
+   is absent everywhere. Note: `rootfs-build/upload-chunks.sh`
+   was untracked and got committed as a new file with this
+   commit (it documents the chunk upload); the other
+   rootfs-build scripts stay untracked, as before.
+
+   Also: `clang-18`/`lld-18` were missing from the VM after a
+   restart (apt install wiped); reinstalled via passwordless
+   `sudo apt-get install -y clang-18 lld-18` (~10 min, mostly
+   the download). Same reinstall will be needed after the next
+   VM restart; the tools live in /usr, not ~/workspace.
+
+### Host verification (verify-local.py)
+
+- Local build, 28 s, build id `5f307ff` (commit 5f307ff).
+- IPA: `mac-ipas/OpenCode-Inbuilt-kernarium-5f307ff.ipa`,
+  25,188,606 bytes, SHA-256
+  `2b62deb9f0079a815ce310c6609464c14f49f40c446b9f7322b4547e33310f57`.
+  Same SHA in `build-local/`, `mac-ipas/`, and
+  `~/workspace/goals/opencode-for-ios/files/` (symlinked from
+  `~/workspace/your_files/`).
+- `verify-local.py build-local/OpenCode-Inbuilt-kernarium.ipa
+  5f307ff 26.5.0`: **ALL PASS** — arm64, MH_EXECUTE, 5 segments,
+  LC_MAIN entryoff 0x4000, MinOS 15.0.0, SDK 26.5.0, zero
+  Kernarium load commands, code signature 162/162 SHA-256 page
+  hashes valid, all four frameworks embedded, all markers (DYLD
+  OK, BOOT.txt, Calling UIApplicationMain, AppDelegate
+  +initialize / -init done, Scene config requested, Window
+  attached to scene + (poll), App became active, Continue to app,
+  all 7 launch steps, build id `5f307ff`), both guest hashes +
+  chunk part names, no TODO-FILL, no BUILD-NOTE, all new strings
+  (including all seven extraction strings: "Archive already
+  downloaded and verified", "Extracting the image",
+  "Extraction:", "Extraction finished", "Background time expired
+  during install", "Install paused", "Install complete"), no
+  "Stop engine" / "Start engine" strings. The removed
+  action-sheet strings ("Install OpenCode", "Choose how OpenCode
+  runs") were dropped from the verifier's expected strings and
+  are absent from the binary, as is `oc.engineMode`.
+- GitHub release:
+  [opencode-5f307ff](https://github.com/spyboi-dev/opencode-ios/releases/tag/opencode-5f307ff).
+  Tag-only release, as the last three (tag points at main head
+  bed1f27; the asset is the build). The branch
+  `kernarium-engine` on the remote still sits at ee839b5 (local
+  commits after d6cb75f were never pushed); the release does not
+  depend on that.
+
+### Device test steps (fresh install — delete the old app first)
+
+1. Fresh install (delete the old app first), then the startup
+   screen: black background, teal dot, "OpenCode" title sitting
+   low, five checklist rows in one dark card, Install button
+   visible with no scrolling. NO mode choice any more — tapping
+   Install just installs.
+2. Tap Install. The 12 parts re-download this time (fresh
+   install), then extraction must complete. The log should now
+   show "Extraction: 10% · … · footprint …" lines every 10%,
+   then "Extraction finished — verifying the image…" and
+   "Install complete — guest image ready". The engine boots
+   automatically with no further tap (Desktop UI mode: server on
+   4096 + desktop app), tabs present once the server listens.
+3. Kill and relaunch: engine auto-starts with no tap
+   ("Auto-start: loading Kernarium runtime..." in the log).
+4. Then: /api/info, chat with a real tool call, `docker run
+   hello-world`, app.py on port 8000, "Show desktop" from the
+   Engine tab, Stop → Start → swipe down from the tabs' top strip
+   returns to the startup screen, Continue goes back.
+5. If it crashes again, send engine.log AND BOOT.txt. The log
+   will now name the exact extraction percent and footprint where
+   it died, plus whether the app was foregrounded or backgrounded
+   when it died and how much free space the phone has. If the
+   crash is a background-suspension kill, the next Install must
+   resume at extraction from the kept verified archive — check
+   the log for "Archive already downloaded and verified —
+   skipping download and assembly" and NO re-download.
+
 ## Status: DOWNLOAD CRASH FIX — background session, LOCAL BUILD a29614b, verified
 
 User report 2026-11-24 10:24 IST, build 084ae47: "still crashing
@@ -422,7 +652,7 @@ strings present. Local compile clean (clang-18, zero warnings).
 ## Status: GREEN — no manual engine controls, Install-time mode choice, install race fix + auto-start retry, run 44985933495, verified
 
 Run
-[44985933495](https://github.com/spyboi-dev/opencode-inbuilt/actions/runs/44985933495)
+[44985933495](https://github.com/spyboi-dev/opencode-ios/actions/runs/44985933495)
 ("Build Kernarium engine + IPA", branch `kernarium-engine`, head
 `d6cb75f`) completed 2026-11-22 ~04:54 UTC with conclusion
 **success** in 16m32s, first try. No retries were needed: the
@@ -640,7 +870,7 @@ committing).
 ## Previous build (d86406f) — guest install hash fix + TermX-style startup root + engine auto-start
 
 Run
-[44980528771](https://github.com/spyboi-dev/opencode-inbuilt/actions/runs/44980528771)
+[44980528771](https://github.com/spyboi-dev/opencode-ios/actions/runs/44980528771)
 ("Build Kernarium engine + IPA", branch `kernarium-engine`, head
 `d86406f`) completed 2026-11-22 ~03:46 UTC with conclusion
 **success** in 21m37s, first try. No retries were needed: the
@@ -790,7 +1020,7 @@ Continue to go back to the tabs.
 ## Previous build (bf05c6c) — scene-attach poll + build identity + lifecycle markers
 
 Run
-[44976797609](https://github.com/spyboi-dev/opencode-inbuilt/actions/runs/44976797609)
+[44976797609](https://github.com/spyboi-dev/opencode-ios/actions/runs/44976797609)
 ("Build Kernarium engine + IPA", branch `kernarium-engine`, head
 `bf05c6c`) completed 2026-11-22 ~02:55 UTC with conclusion
 **success** in ~20m, first try. No retries were needed: the patch
@@ -1034,7 +1264,7 @@ verification only.
 ## Status: GREEN — attach window to scene + official OpenCode icon, run 44973502489, verified
 
 Run
-[44973502489](https://github.com/spyboi-dev/opencode-inbuilt/actions/runs/44973502489)
+[44973502489](https://github.com/spyboi-dev/opencode-ios/actions/runs/44973502489)
 ("Build Kernarium engine + IPA", branch `kernarium-engine`, head
 `225ebc5`) completed 2026-11-22 ~02:20 UTC with conclusion
 **success** in ~26m, first try. No retries were needed: the patch
@@ -1302,7 +1532,7 @@ verification only.
 ## Status: GREEN — skip LiveContainer hook_setDelegate swizzles, run 44966004569, verified
 
 Run
-[44966004569](https://github.com/spyboi-dev/opencode-inbuilt/actions/runs/44966004569)
+[44966004569](https://github.com/spyboi-dev/opencode-ios/actions/runs/44966004569)
 ("Build Kernarium engine + IPA", branch `kernarium-engine`, head
 `d15b844`) completed 2026-11-22 ~00:44 UTC with conclusion
 **success** in ~25m, first try. No retries were needed: the patch
@@ -1536,7 +1766,7 @@ verification only.
 ## Status: GREEN — delegate-stage markers inside UIApplicationMain, run 44870795028, verified
 
 Run
-[44870795028](https://github.com/spyboi-dev/opencode-inbuilt/actions/runs/44870795028)
+[44870795028](https://github.com/spyboi-dev/opencode-ios/actions/runs/44870795028)
 ("Build Kernarium engine + IPA", branch `kernarium-engine`, head `6240a51`)
 completed 2026-11-21 ~05:50 UTC with conclusion **success** in
 24m44s, first try. No retries were needed: the patch is pure
@@ -1743,7 +1973,7 @@ LiveContainer — host verification only.
 ## Status: GREEN — buffer-over-read fix + Calling UIApplicationMain marker, run 44862514832, verified
 
 Run
-[44862514832](https://github.com/spyboi-dev/opencode-inbuilt/actions/runs/44862514832)
+[44862514832](https://github.com/spyboi-dev/opencode-ios/actions/runs/44862514832)
 ("Build Kernarium engine + IPA", branch `kernarium-engine`, head `af64d5b`)
 completed 2026-11-21 ~04:02 UTC with conclusion **success** in
 ~19m51s, first try. No retries were needed: the patch was pure
@@ -1918,7 +2148,7 @@ verification only.
 ## Status: GREEN — constructor early-log IPA built, run 44856410040, verified
 
 Run
-[44856410040](https://github.com/spyboi-dev/opencode-inbuilt/actions/runs/44856410040)
+[44856410040](https://github.com/spyboi-dev/opencode-ios/actions/runs/44856410040)
 ("Build Kernarium engine + IPA", branch `kernarium-engine`, head `bac51d4`)
 completed 2026-11-21 ~02:49 UTC with conclusion **success** in
 16m56s, first try. No retries were needed: the patch was pure
@@ -2072,7 +2302,7 @@ verification only.
 ## Status: GREEN — diagnostic MinOS 15.0 IPA built, run 44791971808, verified
 
 Run
-[44791971808](https://github.com/spyboi-dev/opencode-inbuilt/actions/runs/44791971808)
+[44791971808](https://github.com/spyboi-dev/opencode-ios/actions/runs/44791971808)
 ("Build Kernarium engine + IPA", branch `kernarium-engine`, head `86522d0`)
 completed 2026-11-20 ~18:49 UTC with conclusion **success** in
 ~27m, first try. No retries were needed: the patch was a one-line
@@ -2179,7 +2409,7 @@ and in LiveContainer — host verification only.
 ## Status: GREEN — stable Xcode 27.0 + dlopen-only IPA built, run 44783769725, verified
 
 Run
-[44783769725](https://github.com/spyboi-dev/opencode-inbuilt/actions/runs/44783769725)
+[44783769725](https://github.com/spyboi-dev/opencode-ios/actions/runs/44783769725)
 ("Build Kernarium engine + IPA", branch `kernarium-engine`, head `c032ac1`)
 completed 2026-11-20 ~18:04 UTC with conclusion **success** in
 ~35m, first try. No retries were needed: the patch was
@@ -2284,7 +2514,7 @@ and in LiveContainer — host verification only.
 ## Status: GREEN — deferred Metal view + launch markers IPA built, run 44769606331, verified
 
 Run
-[44769606331](https://github.com/spyboi-dev/opencode-inbuilt/actions/runs/44769606331)
+[44769606331](https://github.com/spyboi-dev/opencode-ios/actions/runs/44769606331)
 ("Build Kernarium engine + IPA", branch `kernarium-engine`, head `90b0e9b`)
 completed 2026-11-20 ~16:44 UTC with conclusion **success** in
 34m42s, first try. No retries were needed: the patch was
@@ -2393,7 +2623,7 @@ launch (startup screen presentation or later).
 ## Previous build: lazy-load + hardened crash logging, run 44757224498, verified
 
 Run
-[44757224498](https://github.com/spyboi-dev/opencode-inbuilt/actions/runs/44757224498)
+[44757224498](https://github.com/spyboi-dev/opencode-ios/actions/runs/44757224498)
 ("Build Kernarium engine + IPA", branch `kernarium-engine`, head `9e5e9bb`)
 completed 2026-11-20 ~15:17 UTC with conclusion **success** in ~28m,
 first try. No retries were needed: the patch was syntax-checked locally
@@ -2579,7 +2809,7 @@ engine cannot start, the log says why instead of failing silently.
 ## Status: GREEN — IPA built, run 44724666844, verified (superseded by 44757224498 above)
 
 Run
-[44724666844](https://github.com/spyboi-dev/opencode-inbuilt/actions/runs/44724666844)
+[44724666844](https://github.com/spyboi-dev/opencode-ios/actions/runs/44724666844)
 ("Build Kernarium engine + IPA", branch `kernarium-engine`, head `dd734a5`)
 completed 2026-11-20 ~11:49 UTC with conclusion **success**. The Kernarium
 engine IPA is built, downloaded and host-verified (see below). This is the
