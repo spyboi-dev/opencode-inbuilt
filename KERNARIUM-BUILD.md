@@ -8,6 +8,168 @@ launch-path hypothesis is closed. The scene investigation (why UIKit
 never called the scene method in the 07:57 run) continues on that
 settled basis.
 
+## Status: DESKTOP SHOWED, FETCH ERROR + SMALL WINDOW + SLOW — FIXES IN LOCAL BUILD 77b9a2f, verified
+
+User test of e001c27, 2026-11-25 21:40 IST: the desktop FINALLY
+SHOWED (screenshot
+`4EAA1227-A4E0-4620-BF93-1F1E2948794B-photo-4BF646E4-CB4C-476B-BCDC-EAF0CE543AA5.jpg`,
+`~/workspace/user/files/`). The OpenCode window is visible in the
+middle of the screen, full width, roughly 1100 px tall, centred
+vertically, black above and below. Inside it the app shows the
+error page: "Something went wrong — An error occurred while
+loading the application." with "ClientError: Transport: Failed to
+fetch" at r (oc://renderer/assets/main-CEQaLS28.js:675:72748),
+async a, async oc://renderer/assets/main-CEQaLS28.js:698:101625,
+async Promise.all (index 1). Caused by: TypeError: Failed to
+fetch at fetch (895:47366) at fetch.Object.assign.preconnect
+(698:140499). Buttons: Restart, Export Logs, Report Error, Check
+for updates. "Version: 2.3.0." His words: "finally shawed but it
+slow without jit idk why it take 1 mij to shaw also fix the ui
+resize it for mobile devices" and "also fix the error too". No
+logs were sent with this screenshot.
+
+### Root cause of the fetch error (verified from the bundled app, not guessed)
+
+The renderer JS was extracted from the guest image's app.asar
+(`~/workspace/oc-extract/app.asar`, `main-CEQaLS28.js`,
+3,049,746 bytes; the asar header parsed, the file extracted by
+offset). The stack positions match the shipped bundle exactly:
+
+- 675:72748 is the SDK transport `r`: it builds the request and
+  calls the fetch, and on failure throws `ClientError:
+  Transport` with the cause.
+- 698:140499 is inside the request-queue fetch (`return i(new
+  Request(...))` — the frame name `fetch.Object.assign.preconnect`
+  is V8's inferred name for the `Object.assign`'d fetch; its
+  `preconnect` is a no-op `()=>{}`). The only other `preconnect`
+  in the bundle is a plugin-server rejecting fetch.
+- 895:47366 is the preload bridge `fetch:(e,t)=>fetch(e,t)` —
+  the browser fetch.
+
+So the failing fetch is the renderer's SDK client fetching the
+SIDECAR URL (from `sidecarHttp(data)` → `OpenCode.make({baseUrl})`
+→ the request-queue fetch → the preload fetch → the browser
+fetch). It is NOT our 4096 server. The desktop spawns its own
+sidecar: `Service.ensure` spawns a contender
+(`["opencode","serve","--service"]`) when no healthy registration
+exists; the default service port is 0xc0de = 49374 (channel
+"latest"); the renderer waits up to SIDECAR_TIMEOUT_MS = 300 s
+for it, and ensure's promiseTimeout is 120 s with a 5 s spawn
+delay / 30 s max spawn delay.
+
+Eliminated, with evidence: CORS (packages/server/src/cors.ts
+allows `oc://renderer`, no origin, `localhost:*`); port conflict
+(the sidecar is 49374, not 4096, and the server's listen()
+increments on EADDRINUSE); localhost/IPv6 (the registered URL is
+a literal `http://127.0.0.1:port`); our 4096 server (proven
+healthy by /api/info 200 in every run).
+
+The exact sub-cause (sidecar spawn failed vs died vs stale
+registration) is NOT determinable without the e001c27
+engine/guest log — the sidecar's fate is in /tmp/ai-opencode.log
+(the main process stdout/stderr, tailed as "DIAG app log:" in
+the Guest diagnostics blocks) and the registration file
+~/.local/state/opencode/service.json. The fix is robust to all
+of them: our serve registers itself, so the desktop adopts it
+and never spawns a sidecar.
+
+### What changed (commit 77b9a2f, `src/OCEngine.m` + `verify-local.py`)
+
+- **Serve in --service mode (the fetch fix).** `Service.ensure`
+  reuses a healthy registered service (`decide()` → "reuse"
+  when the version matches + compatible + state "ready");
+  `discover` is read-only (registration + health check +
+  version gate). Our serve now runs `opencode serve --service
+  --port 4096 --hostname 127.0.0.1`, so it registers URL
+  `http://127.0.0.1:4096` + password + pid + version 2.3.0
+  (0600) and the desktop adopts it. The service password comes
+  from the service config file
+  (~/.config/opencode/service.json), NOT the environment, so
+  the config is pre-written here with the same Keychain password
+  the native UI uses — otherwise serve --service would generate
+  a random one and lock the native UI out. Hostname 127.0.0.1
+  (was 0.0.0.0): every consumer reaches the server on loopback
+  (the vsock bridge forwards to guest 127.0.0.1:4096; the
+  desktop is in-guest; the curl loop probes 127.0.0.1), and the
+  registered URL is then unambiguous. The 0.0.0.0 bind was a
+  LinuxRunner-era need. The native UI is unchanged (same
+  password, same URL). On engine restart the new serve finds
+  the incumbent (the old serve answers /api/info on 4096) and
+  exits cleanly; if the old serve died, the new one binds and
+  registers.
+- **Window fills the screen.** The app opens 1280x800 by default
+  (`resolveWindowState(..., {width: 1280, height: 800})` in
+  packages/desktop/src/main/windows/index.ts:138 and
+  early.ts:91; the state file under userData is wiped every
+  boot). The X screen is already 1290x2796 (the framebuffer).
+  Fix: copy the default /etc/xdg/openbox/rc.xml and inject one
+  `<application name="*"><maximized>yes</maximized></application>`
+  rule via a python heredoc, plus `--start-maximized` on
+  ai.opencode. wmctrl/xdotool are NOT in the image, so there is
+  no post-launch maximise tool to use instead. A new `DIAG
+  window:` line prints the mapped window geometry (the xwininfo
+  tree in the snapshot already lists it).
+- **Slowness: the ensure wait is gone, the JIT question is
+  named.** The sidecar ensure (up to 120 s) is removed — the
+  desktop reuses our server with one probe. A JIT probe runs
+  at boot (node default vs --jitless, 2M sqrt iterations, ~1 s)
+  and logs both times: matching times mean JIT is off. Node is
+  a native AArch64 ELF in the image (verified via debugfs +
+  readelf: ELF 64-bit LSB, AArch64, dynamically linked), and the
+  guest is a real Linux 6.18 kernel (UML), NOT an interpreter —
+  but V8 JIT needs host PROT_EXEC, which iOS denies without the
+  JIT entitlement, and this app is ad-hoc signed with NO
+  entitlements (build-local-kernarium.sh uses -adhoc_codesign,
+  no entitlements file). So V8 likely runs JITless in the guest
+  — the user's "slow without jit" is correct in effect. The fix
+  for JIT itself is an entitlement/sideloading change
+  (StikDebug JIT or a developer-signed build), not a code change
+  here. On this VM the probe discriminates (default 49 ms vs
+  jitless 98 ms).
+- **Timing breakdown (evidence).** Guest boot to login prompt
+  ~21 s (c360a14 run 12:26:44→12:27:05); serve launch to
+  /api/info 200 ~6–11 s (c9493ce run); Xorg + openbox a few
+  seconds; Electron cold start + first paint under SwiftShader
+  at 1290x2796 (the fixed cost, tens of seconds on this
+  hardware — the 3 MB renderer bundle parsed and executed under
+  software rendering); the sidecar ensure was the variable piece
+  and is now gone. The socket wait (30 s) and READY loop (120 s)
+  do not gate the window appearing (they run after launch; the
+  loop breaks when a window maps). Resolution cannot be reduced
+  below full-screen (the X screen IS the framebuffer).
+
+Build 77b9a2f, local, 2026-11-25 ~16:31 IST. IPA
+`mac-ipas/OpenCode-iOS-77b9a2f.ipa`, 25,200,382 bytes, SHA-256
+4f90ba1708a63d59c75f9dad1864a11e88581e8a5599811b6673b5be874b307a.
+GitHub release opencode-77b9a2f. Staged in
+`~/workspace/goals/opencode-for-ios/files/OpenCode-iOS-77b9a2f.ipa`.
+verify-local.py ALL PASS (165 checks, including the 9 new
+markers and the "no plain serve on 0.0.0.0" absence check).
+Both bootstrap phases were extracted from the ObjC literals
+and parsed with `bash -n` before building (phase 1: 1998 bytes,
+phase 2: 8612 bytes); the python openbox heredoc was
+compile-checked and run end to end against the extracted
+default rc.xml (valid XML, rule present); the service.json
+printf was verified to produce valid JSON; the JIT probe node
+commands were run on this VM's node. One pre-existing warning
+in the build (OCEngine.m:582 sign-compare in tailOfFile,
+unchanged since 873e1ee, not from this change). Server-file
+delivery, two-phase bootstrap, fbdev config, self-test,
+fb-flush loop, chat-opens-desktop navigation,
+runtime/framework, Settings untouched. Nothing merged to main.
+`kernarium-desktop` and termx untouched.
+
+Device test: install over e001c27, do NOT delete the app. Tap +
+on Threads, leave the app open at least 2 minutes, send a
+screenshot AND engine.log. Look for: the desktop window fills
+the screen; the OpenCode app loads (no "Failed to fetch" error
+page); the engine log's "JIT probe default/jitless" lines; the
+"DIAG window:" line with the geometry; "openbox maximise rule
+installed". If the fetch error persists, the lines that name it
+are the "DIAG app log:" tails and whether
+/tmp/opencode-serve.log says "server listening on
+http://127.0.0.1:4096".
+
 ## Status: BLACK DESKTOP — XORG PROBE LOG CAPTURED, DIAGNOSTICS FRESHNESS FIXED, MODESETTING RETRY — LOCAL BUILD e001c27, verified
 
 User test of 16f1cc2, 2026-11-25 16:22 IST: desktop STILL black.
