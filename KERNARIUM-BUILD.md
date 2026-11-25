@@ -126,6 +126,147 @@ copies those same files, so they are identical by construction.
   proven pipeline, and the next code change goes through the
   local path.
 
+## Status: DESKTOP VIEW APPEARS IN A WINDOW + SETTINGS iOS CARD RESTYLE — LOCAL BUILD 1bf4c3a, verified
+
+User test of e608dc6, 2026-11-25 13:31 IST: server fix PROVEN
+("Server listening", "Desktop ready", "Server probe: /api/info 200"),
+chat-opens-desktop works, but the desktop is still black. The log
+names the cause — and this build's trace shows the 5e258fb
+conclusion ("the app side was exonerated") was wrong, but not in
+the way the first reading of the line suggests. Same build also
+restyles Settings to the iOS card design (user, 13:34–13:35 IST:
+"boxy" screenshot, Integrations screenshot "use ui like this page
+have", iOS Settings General screenshot "tes like ios design").
+
+### Root cause — the trace, from the code
+
+The e608dc6 log line (engine log, 13:31:50) reads:
+"Desktop view shown: guestView frame {{0, 0}, {430, 932}}
+superview UIView window no drawable {1290, 2796} booted yes".
+
+Trace of the guestView's place in the hierarchy:
+
+- `src/KernGlue.m:221-230` — `guestView` creates the MTKView once,
+  frame `[UIScreen mainScreen].bounds`, hidden = NO. The comment
+  there ("even though this app never shows it") is stale: the
+  desktop screen does show it.
+- `src/KernGlue.m:633-641` — `parkGuestView` inserts the view into
+  the key window (fallback: first window) at index 0, frame =
+  window.bounds. `src/KernGlue.m:398` — `bootWithCompletion` parks
+  it before filling the boot struct, so during boot the view lives
+  in the window behind the app.
+- `src/OCDesktopViewController.m` (e608dc6) — `viewWillAppear`
+  moved the view into `self.view` at index 0, then logged the
+  "Desktop view shown" line; `viewWillDisappear` parks it back
+  into the window.
+
+Two things were wrong with that, and the log line proves only the
+first half of the first one:
+
+1. The line ran in `viewWillAppear`, which UIKit calls just before
+   the view joins the hierarchy — so `guestView.window` was nil
+   BY CONSTRUCTION at that moment, not because something had
+   dropped the view. The line could never have said "window yes"
+   where it was. Judging the window from `viewWillAppear` is the
+   wrong place; `viewDidAppear` is where the view is guaranteed
+   to be in a window.
+2. The real defect: nothing ever presented a frame after the view
+   gained a window. The runtime draws only when the guest posts a
+   new frame (paused MTKView, `enableSetNeedsDisplay`, requestRedraw
+   on new frames), and an idle desktop posts none — so the view
+   sat black even though it was windowed. The console showed
+   earlier for the opposite reason: boot prints frames
+   continuously, so draws happened.
+
+The tty1 sliver in the screenshots follows from the same code,
+not a guess: the parked view fills the whole key window at index
+0, behind everything, and the navigation bar is translucent while
+the status-bar area shows content behind it — so the top lines
+of the console framebuffer show through at the very top edge of
+the screen while the desktop screen's opaque black view covers
+the rest. That also proves the view presents fine whenever it has
+a window: the failure was the missing present after the move into
+the desktop screen, not a dead view.
+
+Honest gap in the evidence: the pasted guest log ends mid-bootstrap
+echo, before the "DESKTOP READY" output and the diagnostics values
+(Active VT, ps, xwininfo tree), so the guest side — X on vt01 with
+the ai.opencode window mapped — is still unverified from that log.
+The next test's guest log will confirm it; the app-side fix stands
+on its own. Server bootstrap untouched, chat-opens-desktop
+navigation untouched, runtime/framework untouched.
+
+### What changed (commit 1bf4c3a, 3 files, +328/-103)
+
+- `src/OCDesktopViewController.m` — `viewWillAppear` still moves
+  the guestView into the screen (via a new `attachGuestView`
+  helper, same frame + autoresizing, index 0). New
+  `viewDidAppear`: re-asserts the guestView full-screen behind
+  the header (re-adds it if the hierarchy dropped it), then
+  forces a present of the latest guest frame with `[gv draw]` —
+  the same call the runtime's requestRedraw makes — now that the
+  view has a drawable. The "Desktop view shown:" diagnostic line
+  moves to `viewDidAppear`, same format, so its window field
+  reports the post-appearance state. The stale comment claiming
+  a black screen with the tty1 sliver means the guest display is
+  still on tty1 is removed.
+- `src/OCSettingsViewController.m` — the grouped table is gone;
+  the page is a scroll view of cards now. Header card: 64pt
+  rounded-square gear tile, "Settings" 32pt bold, grey
+  description "Server connection, agent, providers and app info."
+  Cards: 28pt corners, #2e2e2e fill, 16pt side margins, grey
+  section header above each card ("Engine server", "Agent",
+  "Providers (from the engine)", "About"). Rows: 30pt
+  rounded-square glyph tile (server.rack, key.fill, cpu,
+  sparkles, plug, info.circle, folder), title in white with a
+  grey subtitle underneath, thin divider between rows inside a
+  card, chevron where the row opens something (Agent mode, Model
+  only). Same rows, values, section headers and behaviour — shape
+  only, no text changes. The Server URL field is still built once
+  in viewDidLoad and reused; its text is not reset while the user
+  is typing in it. Agent mode and Model sheets, provider fetch,
+  save on disappear/return all unchanged. Bottom spacer clears
+  the floating pill tab bar. The floating pill tab bar itself is
+  untouched.
+- `verify-local.py` — new-string checks for the Settings header
+  description and the "server.rack" / "plug" glyph names, proving
+  the restyle is in the binary.
+
+### Host verification (verify-local.py)
+
+Local build 27 s, build id `1bf4c3a`. IPA:
+`mac-ipas/OpenCode-iOS-1bf4c3a.ipa`, 25,200,225 bytes, SHA-256
+`c877bfe0c6e28b188e1e66be8375d4f60d32e95007828751ec655afdfbf395fe`.
+Same SHA in `build-local/`, `mac-ipas/`, and
+`~/workspace/goals/opencode-for-ios/files/`. **ALL PASS** (112
+checks) — arm64, MH_EXECUTE, 5 segments, LC_MAIN entryoff
+0x4000, MinOS 15.0.0, SDK 26.5.0, zero Kernarium load commands,
+code signature 167/167 SHA-256 page hashes valid, all four
+frameworks embedded, all markers incl. build id `1bf4c3a`, both
+guest hashes + chunk part names, no TODO-FILL, no BUILD-NOTE, no
+"Stop engine"/"Start engine" strings, slop strings still absent,
+plus the new checks: "Server connection, agent, providers and app
+info.", "server.rack", "plug" present. GitHub release:
+[opencode-1bf4c3a](https://github.com/spyboi-dev/opencode-ios/releases/tag/opencode-1bf4c3a).
+Tag-only release, as the last eight.
+
+### Device test steps (install over e608dc6 — do NOT delete the app)
+
+Install over the current app (do NOT delete it — the guest image
+is already installed). Tap + on Threads — the real OpenCode
+desktop must open AND show the OpenCode window, not black. In
+engine.log the "Desktop view shown" line must now say window yes
+(it runs in viewDidAppear now). Also open Settings (Integrations
+tab → Settings row): header card with gear icon, title and
+description on top, then Engine server / Agent / Providers /
+About as large-radius cards with glyph icons and chevrons where
+a row opens something. Tap Agent mode and Model to confirm the
+sheets still open; edit the Server URL to confirm the field still
+works. If the desktop is still black, send engine.log AND BOOT.txt
+AND the guest log (this time the full guest log including the
+"DESKTOP READY" output and the diagnostics block — Active VT,
+ps, xwininfo tree — so the guest side can be judged too).
+
 ## Status: AI SLOP TEXT REMOVED — LOCAL BUILD e608dc6, verified
 
 User direction 2026-11-25 13:23 IST: "why u aded ai slops text
