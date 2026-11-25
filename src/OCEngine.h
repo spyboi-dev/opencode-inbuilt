@@ -108,6 +108,11 @@ typedef void (^OCGuestExecutor)(NSString *command, NSString *workingDirectory,
 - (void)startEngineWithCompletion:(void (^)(BOOL started, NSError * _Nullable error))completion;
 - (void)stopEngine;
 - (void)checkHealthWithCompletion:(void (^)(BOOL healthy, NSDictionary * _Nullable info))completion;
+// Guest diagnostics through the server's file API (the console
+// drops post-X output): reads ~/desktop-diag.txt via /api/fs/read
+// and appends it to the engine log. Once per boot; a miss retries
+// on the next call.
+- (void)fetchGuestDiagnosticsIfNeeded;
 // First-launch setup: downloads the prebuilt system image
 // (Node + OpenCode baked in) and verifies the SHA-256 of the
 // archive and of the extracted image. Safe to call again; a verified

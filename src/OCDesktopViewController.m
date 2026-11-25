@@ -144,6 +144,11 @@ static uint16_t KeyCodeForChar(unichar c, BOOL *shift) {
     [self attachGuestView];
     MTKView *gv = [OCKernGlue shared].guestView;
     if (gv) [gv draw];
+    // Guest diagnostics arrive through the server, not the
+    // console: by the time this screen opens the bootstrap has
+    // had time to write the file, and a miss retries on the next
+    // open (fetchGuestDiagnosticsIfNeeded).
+    [[OCEngine shared] fetchGuestDiagnosticsIfNeeded];
     [[OCEngine shared] appendEngineLog:[NSString stringWithFormat:@"Desktop view shown: guestView frame %@ superview %@ window %@ drawable %@ booted %@",
         NSStringFromCGRect(gv.frame),
         gv.superview ? NSStringFromClass([gv.superview class]) : @"nil",

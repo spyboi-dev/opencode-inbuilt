@@ -21,6 +21,11 @@ static NSString *const kGuestImageInstalled = @"oc.guestImageInstalled";
 @property (nonatomic, assign) double serveProgressValue;
 @property (nonatomic, strong, nullable) NSString *serveStatusValue;
 @property (nonatomic, assign) BOOL serveProgressDone;
+// Guest diagnostics fetched through the server's file API
+// (fetchGuestDiagnosticsIfNeeded): the console drops post-X
+// output, so the diagnostics file is read over HTTP instead.
+@property (nonatomic, assign) BOOL guestDiagnosticsFetched;
+@property (nonatomic, assign) BOOL guestDiagnosticsMissLogged;
 // YES once the desktop app reported ready.
 @property (nonatomic, assign) BOOL desktopReady;
 // YES once the guest console printed "server listening" (the
@@ -680,6 +685,13 @@ static NSString *OCEngineStripANSI(NSString *line) {
         if (!self.desktopReady) {
             self.desktopReady = YES;
             [self appendEngineLogSync:@"Desktop ready (from guest console)"];
+            // The diagnostics run right after the READY loop, so
+            // fetch them through the server in 10 s: the console
+            // drops them, the file API does not.
+            __weak typeof(self) weakSelf = self;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                [weakSelf fetchGuestDiagnosticsIfNeeded];
+            });
         }
         if (!self.serveProgressDone) {
             self.serveProgressDone = YES;
@@ -900,6 +912,8 @@ static NSString *OCEngineStripANSI(NSString *line) {
     self.serveProgressDone = NO;
     self.desktopReady = NO;
     self.serverListening = NO;
+    self.guestDiagnosticsFetched = NO;
+    self.guestDiagnosticsMissLogged = NO;
     self.healthProbeInFlight = NO;
     self.lastProbeOK = NO;
     self.serverProbeEverOK = NO;
@@ -1071,6 +1085,21 @@ static NSString *OCEngineStripANSI(NSString *line) {
     [b appendString:@"    Screen \"Screen0\"\n"];
     [b appendString:@"EndSection\n"];
     [b appendString:@"EOF\n"];
+    // Decisive self-test (2026-11-25, 165c227 logs): the screen
+    // shows the tty1 console and the host only ever flushes the
+    // console framebuffer, so X never drew — but the console
+    // channel lost every post-X diagnostic, so whether Xorg died
+    // or ai.opencode never started is still unknown. Before X
+    // starts, fill /dev/fb0 solid red through write(). The result
+    // is visible in a screenshot, no log needed: red means the
+    // write path reaches the screen and X never drew; black means
+    // write() never transfers (the flush-loop theory is dead);
+    // the desktop means it works. python3 writes the frame as
+    // root (sudo: the termux user cannot open /dev/fb0); the
+    // size comes from sysfs, the pixel is BGRA red for the 32bpp
+    // XRGB framebuffer. A failure prints its traceback to
+    // /tmp/selftest.log, tailed in the diagnostics below.
+    [b appendString:@"sudo python3 -c \"s=open('/sys/class/graphics/fb0/virtual_size').read().strip().split(','); w=int(s[0]); h=int(s[1]); open('/dev/fb0','wb').write(b'\\x00\\x00\\xff\\x00'*(w*h))\" 2>/tmp/selftest.log; echo \"SELFTEST fb0 red\"\n"];
     [b appendString:@"sudo nohup Xorg :0 -ac -noreset -nolisten tcp vt01 -configdir /tmp/xorg.conf.d >/tmp/Xorg.log 2>&1 &\n"];
     [b appendString:@"for _ in $(seq 1 30); do [ -S /tmp/.X11-unix/X0 ] && break; sleep 1; done\n"];
     // If the socket never appeared, say why: Xorg's own log goes
@@ -1079,6 +1108,12 @@ static NSString *OCEngineStripANSI(NSString *line) {
     // Without this the desktop just stays black and the READY
     // loop's ERROR line names no cause.
     [b appendString:@"[ -S /tmp/.X11-unix/X0 ] || { echo \"ERROR Xorg did not start\"; tail -20 /tmp/Xorg.log 2>/dev/null; }\n"];
+    // The socket alone does not prove Xorg is alive: it creates
+    // the socket early and can die on the fbdev driver after it,
+    // leaving openbox and the app to start against a dead server
+    // with no reason in the log (165c227: socket present, no
+    // desktop, no error). Check the process, one short line.
+    [b appendString:@"pgrep -x Xorg >/dev/null 2>&1 && echo \"XORG RUNNING\" || echo \"XORG DEAD\"\n"];
     // Framebuffer flush loop — this is what actually puts the
     // desktop on the screen. The runtime only shows the guest
     // framebuffer when the guest kernel issues transfer_to_host_2d
@@ -1121,6 +1156,11 @@ static NSString *OCEngineStripANSI(NSString *line) {
     [b appendString:@"for i in $(seq 1 60); do if pgrep -f ai.opencode >/dev/null 2>&1 && [ -S /tmp/.X11-unix/X0 ] && [ $(DISPLAY=:0 xwininfo -root -tree 2>/dev/null | grep -c '^ *0x') -gt 0 ]; then echo \"DESKTOP READY\"; break; fi; sleep 2; done\n"];
     [b appendString:@"pgrep -f ai.opencode >/dev/null 2>&1 || echo \"ERROR Desktop did not start (see above)\"\n"];
     [b appendString:@"pgrep -f ai.opencode >/dev/null 2>&1 && [ $(DISPLAY=:0 xwininfo -root -tree 2>/dev/null | grep -c '^ *0x') -eq 0 ] && echo \"ERROR Desktop window did not appear (ai.opencode is running but no window is mapped on :0)\"\n"];
+    // One always-printed state line after the loop: the loop's
+    // own echo and the ERROR lines above are all conditional, so
+    // a run where the loop breaks early on READY but the echo is
+    // lost (165c227) leaves no trace of the state at all.
+    [b appendString:@"echo \"DESKTOP STATE app=$(pgrep -f ai.opencode >/dev/null 2>&1 && echo yes || echo no) windows=$(DISPLAY=:0 xwininfo -root -tree 2>/dev/null | grep -c '^ *0x') vt=$(cat /sys/class/tty/tty0/active 2>/dev/null || echo unknown)\"\n"];
     // Diagnostics for the next device log: prove the window is
     // mapped on the display the framebuffer shows, and which VT
     // is active. xwininfo is in the image; chvt is not, which is
@@ -1155,6 +1195,7 @@ static NSString *OCEngineStripANSI(NSString *line) {
     // own log file; that reason is only in the stderr redirect.
     // The app log tail shows whether Electron even got going.
     [b appendString:@"echo \"Xorg log:\"; tail -20 /tmp/Xorg.log 2>/dev/null; echo \"Desktop app log:\"; tail -10 /tmp/ai-opencode.log 2>/dev/null; true\n"];
+    [b appendString:@"echo \"Self-test log:\"; tail -5 /tmp/selftest.log 2>/dev/null; true\n"];
     [b appendString:@"echo \"DIAG Active VT: $(cat /sys/class/tty/tty0/active 2>/dev/null || echo unknown)\"\n"];
     [b appendString:@"echo \"DIAG Windows on :0: $(DISPLAY=:0 xwininfo -root -tree 2>/dev/null | grep -c '^ *0x')\"\n"];
     [b appendString:@"echo \"DIAG Xorg errors: $(grep -c -F '(EE)' /var/log/Xorg.0.log 2>/dev/null; true)\"\n"];
@@ -1169,6 +1210,14 @@ static NSString *OCEngineStripANSI(NSString *line) {
     [b appendString:@"echo \"--- end desktop diagnostics ---\"; } > /tmp/desktop-diag.txt 2>&1\n"];
     [b appendString:@"sleep 5\n"];
     [b appendString:@"cat /tmp/desktop-diag.txt\n"];
+    // Copy the diagnostics where the server can read them: the
+    // console drops post-X output three runs running (873e1ee,
+    // 4c60469, 165c227), so the app fetches this file through the
+    // server's file API instead (fetchGuestDiagnosticsIfNeeded).
+    // The server runs from the termux home directory, so a copy
+    // there is inside its project; /root/Projects is the second
+    // copy in case the file API roots there.
+    [b appendString:@"cp /tmp/desktop-diag.txt ~/desktop-diag.txt 2>/dev/null; cp /tmp/desktop-diag.txt /root/Projects/desktop-diag.txt 2>/dev/null; true\n"];
     return b;
 }
 
@@ -1185,6 +1234,8 @@ static NSString *OCEngineStripANSI(NSString *line) {
     self.serveProgressDone = NO;
     self.desktopReady = NO;
     self.serverListening = NO;
+    self.guestDiagnosticsFetched = NO;
+    self.guestDiagnosticsMissLogged = NO;
     self.healthProbeInFlight = NO;
     self.lastProbeOK = NO;
     self.serverProbeEverOK = NO;
@@ -1294,6 +1345,34 @@ static NSString *OCEngineStripANSI(NSString *line) {
 #else
     completion(NO, nil);
 #endif
+}
+
+// Guest diagnostics through the server's file API, not the
+// console: the console drops post-X output three runs running
+// (873e1ee, 4c60469, 165c227), so the diagnostics file the
+// bootstrap writes (and copies to ~/desktop-diag.txt) is read
+// over HTTP through the vsock bridge instead — the same channel
+// the /api/info probe proves every run. Runs once per boot: a
+// miss just means the file is not written yet (the diagnostics
+// run ~2 min after serve starts), so the flag stays clear and
+// the next Desktop open retries; a miss is logged once per boot
+// so repeated opens do not spam the log.
+- (void)fetchGuestDiagnosticsIfNeeded {
+    if (self.guestDiagnosticsFetched) return;
+    OCSettings *settings = [OCSettings shared];
+    OCServerClient *client = [[OCServerClient alloc] initWithServerURL:settings.serverURL password:[settings serverPassword]];
+    __weak typeof(self) weakSelf = self;
+    [client readFileAtPath:@"desktop-diag.txt" completion:^(NSString * _Nullable text, NSError * _Nullable error) {
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        if (text.length) {
+            strongSelf.guestDiagnosticsFetched = YES;
+            [strongSelf appendEngineLog:[NSString stringWithFormat:@"Guest diagnostics (via server):\n%@", text]];
+        } else if (!strongSelf.guestDiagnosticsMissLogged) {
+            strongSelf.guestDiagnosticsMissLogged = YES;
+            [strongSelf appendEngineLog:[NSString stringWithFormat:@"Guest diagnostics not available via server yet (%@)", error ? error.localizedDescription : @"no file"]];
+        }
+    }];
 }
 
 @end

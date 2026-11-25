@@ -227,7 +227,19 @@ new_strings = ["Retrying in 60s", "Automatic retry: starting engine",
                "fb-flush.sh",
                "DIAG fb-flush:",
                "DIAG fbdev driver:",
-               "DIAG fb size:"]
+               "DIAG fb size:",
+               # Red-fill self-test + Xorg liveness + server-fetched
+               # diagnostics (2026-11-25): the 165c227 logs prove X
+               # never drew and the console loses every post-X
+               # diagnostic, so the test is visible in a screenshot
+               # and the diagnostics come over HTTP instead.
+               "SELFTEST fb0 red",
+               "XORG RUNNING",
+               "DESKTOP STATE",
+               "Self-test log:",
+               "desktop-diag.txt",
+               "Guest diagnostics (via server)",
+               "fetchGuestDiagnosticsIfNeeded"]
 for m in new_strings:
     check(f"new string present: {m}", m in blob)
 # Removed controls must be gone as button titles
