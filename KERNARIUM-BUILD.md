@@ -126,6 +126,125 @@ copies those same files, so they are identical by construction.
   proven pipeline, and the next code change goes through the
   local path.
 
+## Status: DESKTOP READY WAITS FOR A MAPPED WINDOW + DISPLAY ACTIVITY LOG + SETTINGS MATCHES INTEGRATIONS — LOCAL BUILD 873e1ee, verified
+
+User test of 1bf4c3a, 2026-11-25 14:01 IST: "also fix black screen
+not fixed", and the Integrations screenshot re-sent with "use this
+ui for settings". No log was sent with this report.
+
+### Root cause — the trace, from the code (1bf4c3a did not fix it)
+
+Read from the runtime source (`~/workspace/kernarium`, read-only):
+`native_display_ios.mm` configures the MTKView paused with
+`enableSetNeedsDisplay = YES`; `requestRedraw()` calls `[view draw]`
+whenever the guest posts a new frame. `metal_presentation.mm`
+`draw()` returns immediately when `latestPresentationGeneration <=
+presentedPresentationGeneration` — nothing new to present — or
+while a draw is in flight. So the 1bf4c3a fix (`[gv draw]` in
+`viewDidAppear`) is a no-op unless a new frame is pending at that
+moment: it can present a frame that arrived late, but it cannot
+re-present a frame the layer already showed, and it cannot conjure
+a frame the guest never posted. The app side presents whatever the
+guest publishes; the guest publishing was never verified — the
+pasted guest log ended mid-bootstrap, before DESKTOP READY and the
+diagnostics block, so X on vt01 with the ai.opencode window mapped
+was never confirmed. Two more facts from the same source: a guest
+scanout resize discards the framebuffer pixels
+(`scanout_framebuffer.cpp` `resize()` replaces the storage), so the
+next CPU draw presents a black frame until a GPU scanout arrives;
+and the old DESKTOP READY gate (process + X0 socket) fired while
+the screen was still black, because a running Electron process with
+no mapped window draws nothing.
+
+The decisive evidence already exists in the runtime and was just
+never switched on: `display_activity_log.hpp` — "Only the host can
+say why a guest frame never became a visible pixel" — setting
+`UML_GPU_DISPLAY_ACTIVITY_LOG` to a writable path records every
+scanout, the path and outcome of every flush, why a native texture
+was refused, and the frame counters (guest / presented / dropped /
+cpu-fallback). It is a file, not stderr, because the emulator's
+stderr shares the guest console and loses lines under load. It is
+compiled out only under `UML_APP_STORE_RUNTIME`; the shipped
+framework is built by the Mac workflow with `cmake --preset
+kernarium-ios-device`, not the `-app-store` preset, so the log is
+live in it.
+
+### What changed (commit 873e1ee, 4 files, +157/-302)
+
+- `src/OCEngine.m` `consoleBootstrap` — DESKTOP READY now gates on
+  the app window being mapped on :0 (`xwininfo -root -tree` showing
+  a child window id), not just the process + socket. If the process
+  is up but no window ever maps, the log says "ERROR Desktop window
+  did not appear (ai.opencode is running but no window is mapped on
+  :0)" and the engine does not claim ready. The full diagnostics
+  block is unchanged; a compact `DIAG ` summary is echoed after it
+  (Active VT, windows on :0, Xorg (EE) count, app log tail), and
+  `handleGuestConsoleLine:` copies `DIAG ` lines into the engine
+  log, so the pasted log names the cause without the whole guest
+  console. `fullLogText` gains a third section, the display activity
+  log tail (last 100 lines) via a new `tailOfFile:maxLines:` helper.
+- `src/KernGlue.m` `bootWithCompletion` — sets
+  `UML_GPU_DISPLAY_ACTIVITY_LOG` to
+  `Engine/display-activity.log` before `run()`, so the runtime's
+  record is on disk from the first scanout. Harmless no-op if the
+  framework ever did not have the log.
+- `src/OCDesktopViewController.m` — unchanged: `[gv draw]` in
+  `viewDidAppear` still presents a pending frame; nothing on the
+  app side can force a present of stale content (see the trace
+  above), so no view change was made.
+- `src/OCSettingsViewController.m` — the 1bf4c3a card restyle is
+  reverted. Settings is again a table, now
+  `UITableViewStyleInsetGrouped` — the Integrations page's exact
+  style (same table style, same subtitle cells, same section
+  headers, chevrons only where a row opens something). No glyph
+  tiles, no header card. Same rows, values, section headers and
+  behaviour — shape only, no text changes. The Server URL field is
+  still built once in `viewDidLoad` and reused, and its text is not
+  reset while the user is typing (the 1bf4c3a guard is kept).
+- `verify-local.py` — new-string checks for the window error, the
+  `DIAG ` prefix, the activity-log env var and path, and the "Display
+  log (runtime)" section; the 1bf4c3a Settings strings ("Server
+  connection, agent, providers and app info.", "server.rack",
+  "plug") are now asserted absent.
+
+Server bootstrap (except the READY gate), chat-opens-desktop
+navigation, runtime/framework untouched. Nothing merged to main.
+`kernarium-desktop` and termx untouched.
+
+### Host verification (verify-local.py)
+
+Local build 26 s, build id `873e1ee`. IPA:
+`mac-ipas/OpenCode-iOS-873e1ee.ipa`, 25,193,960 bytes, SHA-256
+`bc9932082cdc39138f5ed06756ea6788b1ec7d96390db24bf4c1eff25822fec5`.
+Same SHA in `build-local/`, `mac-ipas/`, and
+`~/workspace/goals/opencode-for-ios/files/`. **ALL PASS** (116
+checks) — arm64, MH_EXECUTE, 5 segments, LC_MAIN entryoff 0x4000,
+MinOS 15.0.0, SDK 26.5.0, zero Kernarium load commands, code
+signature 167/167 SHA-256 page hashes valid, all four frameworks embedded, all markers incl. build id
+`873e1ee`, both guest hashes + chunk part names, no TODO-FILL, no
+BUILD-NOTE, no "Stop engine"/"Start engine" strings, slop strings
+still absent, plus the new checks above. The new bootstrap shell
+lines were extracted from the ObjC literals and parsed with `bash
+-n` before building. GitHub release:
+[opencode-873e1ee](https://github.com/spyboi-dev/opencode-ios/releases/tag/opencode-873e1ee).
+Tag-only release, as the last nine.
+
+### Device test steps (install over 1bf4c3a — do NOT delete the app)
+
+Install over the current app (do NOT delete it — the guest image
+is already installed). Tap + on Threads — the real OpenCode
+desktop must open AND show the OpenCode window, not black. Open
+Settings (Integrations tab → Settings row): it must look exactly
+like the Integrations page — plain rounded cards, grey section
+headers, title + subtitle, chevron where a row opens something, no
+glyph icons, no header card. Tap Agent mode and Model to confirm
+the sheets still open; edit the Server URL to confirm the field
+still works. If the desktop is still black, send engine.log AND
+BOOT.txt AND the FULL guest log (the whole file this time — the
+engine log now carries the DIAG lines and the display log tail,
+which name the cause: no scanout at all, scanouts refused and why,
+or frames presenting while the window stays black).
+
 ## Status: DESKTOP VIEW APPEARS IN A WINDOW + SETTINGS iOS CARD RESTYLE — LOCAL BUILD 1bf4c3a, verified
 
 User test of e608dc6, 2026-11-25 13:31 IST: server fix PROVEN
