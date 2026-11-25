@@ -133,11 +133,14 @@ static NSString *OCGreetingForNow(void) {
             // No modal for this normal state: the reason stays in
             // the status line, and pull to refresh retries. Clear
             // the list too, or it keeps showing chats from the last
-            // run that can no longer be opened.
+            // run that can no longer be opened. Name the underlying
+            // error: "Start the engine" lied on c360a14, when the
+            // engine was running and the server simply was not
+            // listening on 4096.
             self.listLoadFailed = YES;
             self.sessions = @[];
             [self.tableView reloadData];
-            self.statusLabel.text = [NSString stringWithFormat:@"Engine: %@  ·  Could not load chats. Start the engine, then pull to retry.", engine.stateDescription];
+            self.statusLabel.text = [NSString stringWithFormat:@"Engine: %@  ·  Could not load chats (%@). Pull to retry.", engine.stateDescription, error.localizedDescription ?: @"server not answering"];
             return;
         }
         self.listLoadFailed = NO;

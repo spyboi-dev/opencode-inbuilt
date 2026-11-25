@@ -1,5 +1,6 @@
 // OCEngine - the in-app engine host (Kernarium engine).
 #import "OCEngine.h"
+#import "OCServerClient.h"
 #import "OCSettings.h"
 #import "OCGuestInstall.h"
 
@@ -22,6 +23,20 @@ static NSString *const kGuestImageInstalled = @"oc.guestImageInstalled";
 @property (nonatomic, assign) BOOL serveProgressDone;
 // YES once the desktop app reported ready.
 @property (nonatomic, assign) BOOL desktopReady;
+// YES once the guest console printed "server listening" (the
+// bootstrap's curl probe to /api/info succeeded in the guest).
+@property (nonatomic, assign) BOOL serverListening;
+// /api/info probe through the vsock bridge (the path the native UI
+// uses): at most one in flight, last result remembered so a slow
+// probe cannot pile up on the 5 s health timer. serverProbeEverOK
+// is YES once a probe has ever succeeded; lastProbeLoggedError is
+// the failure text already written to the log, so a dead server
+// logs on transition only instead of every 5 s.
+@property (nonatomic, assign) BOOL healthProbeInFlight;
+@property (nonatomic, assign) BOOL lastProbeOK;
+@property (nonatomic, assign) BOOL serverProbeEverOK;
+@property (nonatomic, strong, nullable) NSString *lastProbeError;
+@property (nonatomic, strong, nullable) NSString *lastProbeLoggedError;
 @property (nonatomic, strong, nullable) NSMutableArray<NSDictionary *> *stateObserverEntries;
 @property (nonatomic, assign) BOOL autoStartAttempted;
 // First-launch setup in flight (2026-11-22 09:54 race): the guard
@@ -561,6 +576,18 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
 // PROGRESS / ERROR lines and the definitive start signals.
 - (void)handleGuestConsoleLine:(NSString *)line {
     if (!line.length) return;
+    if ([line containsString:@"server listening"]) {
+        // The bootstrap's curl probe to /api/info succeeded in the
+        // guest. Record it and log it; it does NOT mark the engine
+        // Running — the desktop is the completion signal, and the
+        // native UI's own path is proven separately by the health
+        // probe through the vsock bridge.
+        if (!self.serverListening) {
+            self.serverListening = YES;
+            [self appendEngineLogSync:@"Server listening (from guest console)"];
+        }
+        return;
+    }
     if ([line containsString:@"DESKTOP READY"]) {
         if (!self.serveProgressDone) {
             self.desktopReady = YES;
@@ -782,6 +809,12 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
     NSUInteger generation = self.serveGeneration;
     self.serveProgressDone = NO;
     self.desktopReady = NO;
+    self.serverListening = NO;
+    self.healthProbeInFlight = NO;
+    self.lastProbeOK = NO;
+    self.serverProbeEverOK = NO;
+    self.lastProbeError = nil;
+    self.lastProbeLoggedError = nil;
     [self setState:OCEngineStateStarting];
     [self setServeProgress:0.05 status:@"Starting desktop..."];
     [self appendEngineLogSync:@"Serve launch started"];
@@ -865,15 +898,61 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
     // is restored at boot; the command is wired and logs which way
     // it went.
     [b appendString:@"if [ -f /root/Projects/app.py ]; then (cd /root/Projects && nohup python3 app.py > server.log 2>&1 &); echo \"app.py started\"; else echo \"no app.py in guest\"; fi\n"];
-    // Stop the desktop session first so a restart is clean, then
-    // start it. The session script brings up X and the OpenCode
-    // desktop app; the bootstrap waits until the window is up and
-    // then prints the marker the app watches for.
+    // The server is the engine: it starts FIRST, backgrounded, and
+    // the desktop app joins that same server on 4096 (its sessions
+    // are the native UI's sessions). 5f307ff deleted this launch
+    // with the CLI mode, so nothing listened on 4096 and Threads
+    // could not load chats while the engine claimed to be running
+    // (2026-11-25, c360a14 device test). Restored from the desktop
+    // branch (9ccab19): the curl wait loop proves the server
+    // answers in the guest before the desktop starts, and the
+    // "server listening" echo keeps the marker in guest.log. The
+    // password reaches curl only as $OPENCODE_SERVER_PASSWORD, so
+    // the literal never lands in the console transcript.
+    [b appendString:@"echo \"PROGRESS 90 Starting server...\"\n"];
+    [b appendString:@"nohup opencode serve --port 4096 --hostname 0.0.0.0 >/tmp/opencode-serve.log 2>&1 &\n"];
+    [b appendString:@"for i in $(seq 1 60); do if curl -fsS -u \"opencode:$OPENCODE_SERVER_PASSWORD\" http://127.0.0.1:4096/api/info >/dev/null 2>&1; then echo \"server listening\"; break; fi; sleep 2; done\n"];
+    [b appendString:@"ss -ltn 2>/dev/null | grep -q ':4096' && echo \"Server on 4096 confirmed\" || echo \"ERROR Server did not start (see /tmp/opencode-serve.log)\"\n"];
+    // The desktop session, started here instead of through the
+    // opencode-desktop systemd service: the service's session
+    // script runs `Xorg :0` with no VT argument, so X takes a
+    // free VT (tty2) and the display stays on tty1's text console
+    // — the black Desktop view on c360a14, with the tty1 login
+    // prompt still visible at the top edge. The session script is
+    // baked into the read-only rootfs, and chvt is not installed,
+    // so the display cannot be switched after the fact: X must
+    // start on the VT the display is already on (vt01). The
+    // bootstrap shell is the autologin termux shell with
+    // passwordless sudo, so Xorg runs via sudo as root and openbox
+    // + the app run as termux, exactly as the service did.
+    // Leftovers are killed first so a restart is clean.
+    [b appendString:@"echo \"PROGRESS 95 Starting desktop...\"\n"];
     [b appendString:@"sudo systemctl stop opencode-desktop 2>/dev/null; true\n"];
-    [b appendString:@"echo \"PROGRESS 90 Starting desktop...\"\n"];
-    [b appendString:@"sudo systemctl start opencode-desktop\n"];
-    [b appendString:@"for i in $(seq 1 60); do if pgrep -f opencode-desktop >/dev/null 2>&1 && [ -S /tmp/.X11-unix/X0 ]; then echo \"DESKTOP READY\"; break; fi; sleep 2; done\n"];
-    [b appendString:@"pgrep -f opencode-desktop >/dev/null 2>&1 || echo \"ERROR Desktop did not start (see above)\"\n"];
+    [b appendString:@"sudo pkill -f ai.opencode 2>/dev/null; true\n"];
+    [b appendString:@"sudo pkill -x Xorg 2>/dev/null; true\n"];
+    [b appendString:@"sleep 1\n"];
+    [b appendString:@"sudo mkdir -p /run/user/1000; sudo chown termux:termux /run/user/1000 2>/dev/null; true\n"];
+    [b appendString:@"export DISPLAY=:0; export XDG_RUNTIME_DIR=/run/user/1000\n"];
+    [b appendString:@"sudo nohup Xorg :0 -ac -noreset -nolisten tcp vt01 >/tmp/Xorg.log 2>&1 &\n"];
+    [b appendString:@"for _ in $(seq 1 30); do [ -S /tmp/.X11-unix/X0 ] && break; sleep 1; done\n"];
+    [b appendString:@"nohup openbox --sm-disable >/tmp/openbox.log 2>&1 &\n"];
+    [b appendString:@"nohup env DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/1000 HOME=/home/termux /opt/OpenCode/ai.opencode --no-sandbox --disable-dev-shm-usage >/tmp/ai-opencode.log 2>&1 &\n"];
+    // The real app binary is /opt/OpenCode/ai.opencode; the old
+    // pgrep pattern (opencode-desktop) matched the session script
+    // itself, so DESKTOP READY fired 2 s after the service
+    // started, before the app existed. Gate on the app process.
+    [b appendString:@"for i in $(seq 1 60); do if pgrep -f ai.opencode >/dev/null 2>&1 && [ -S /tmp/.X11-unix/X0 ]; then echo \"DESKTOP READY\"; break; fi; sleep 2; done\n"];
+    [b appendString:@"pgrep -f ai.opencode >/dev/null 2>&1 || echo \"ERROR Desktop did not start (see above)\"\n"];
+    // Diagnostics for the next device log: prove the window is
+    // mapped on the display the framebuffer shows, and which VT
+    // is active. xwininfo is in the image; chvt is not, which is
+    // why X starts on vt01 above instead of being switched.
+    [b appendString:@"echo \"--- desktop diagnostics ---\"\n"];
+    [b appendString:@"echo \"Active VT: $(cat /sys/class/tty/tty0/active 2>/dev/null || echo unknown)\"\n"];
+    [b appendString:@"ps aux | grep -E \"Xorg|ai.opencode|openbox\" | grep -v grep\n"];
+    [b appendString:@"DISPLAY=:0 xwininfo -root -tree 2>&1 | head -20\n"];
+    [b appendString:@"grep -F \"(EE)\" /var/log/Xorg.0.log 2>/dev/null | tail -5; true\n"];
+    [b appendString:@"echo \"--- end desktop diagnostics ---\"\n"];
     return b;
 }
 
@@ -889,6 +968,12 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
     self.serveGeneration++;
     self.serveProgressDone = NO;
     self.desktopReady = NO;
+    self.serverListening = NO;
+    self.healthProbeInFlight = NO;
+    self.lastProbeOK = NO;
+    self.serverProbeEverOK = NO;
+    self.lastProbeError = nil;
+    self.lastProbeLoggedError = nil;
     [self setServeProgress:0 status:nil];
 #ifdef OC_KERNARIUM_LINKED
     [[OCKernGlue shared] stopGuest];
@@ -935,16 +1020,49 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
 }
 
 - (void)checkHealthWithCompletion:(void (^)(BOOL, NSDictionary * _Nullable))completion {
-    // Healthy is not an HTTP poll: it means the guest is up and
-    // the desktop app reported ready. A desktop that never reports
-    // ready is restarted by the health timer's 3-strike rule like
-    // any other start.
+    // Healthy means the guest is up, the desktop reported ready,
+    // AND the server answers /api/info through the same vsock
+    // bridge the native UI uses. The old desktopReady && booted
+    // check lied on c360a14: the desktop was up, the server was
+    // never started, and the engine claimed to be running while
+    // Threads could not load chats. The probe is one small HTTP
+    // request; at most one is in flight, and while one runs the
+    // last result answers, so a slow probe cannot pile up on the
+    // 5 s health timer. Probe failures log on transition only.
 #ifdef OC_KERNARIUM_LINKED
-    BOOL healthy = self.desktopReady && [OCKernGlue shared].booted;
+    if (!self.desktopReady || ![[OCKernGlue shared] booted]) { completion(NO, nil); return; }
+    if (self.healthProbeInFlight) { completion(self.lastProbeOK, nil); return; }
+    self.healthProbeInFlight = YES;
+    OCSettings *settings = [OCSettings shared];
+    OCServerClient *client = [[OCServerClient alloc] initWithServerURL:settings.serverURL password:[settings serverPassword]];
+    __weak typeof(self) weakSelf = self;
+    [client healthCheckWithCompletion:^(BOOL ok, NSDictionary * _Nullable info, NSError * _Nullable error) {
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) { completion(NO, nil); return; }
+        strongSelf.healthProbeInFlight = NO;
+        strongSelf.lastProbeOK = ok;
+        if (ok) {
+            if (!strongSelf.serverProbeEverOK) {
+                strongSelf.serverProbeEverOK = YES;
+                [strongSelf appendEngineLog:@"Server probe: /api/info 200 (native UI path works)"];
+            } else if (strongSelf.lastProbeLoggedError) {
+                [strongSelf appendEngineLog:@"Server probe: /api/info 200 again"];
+            }
+            strongSelf.lastProbeError = nil;
+            strongSelf.lastProbeLoggedError = nil;
+        } else {
+            NSString *detail = error.localizedDescription ?: @"unknown error";
+            strongSelf.lastProbeError = detail;
+            if (![detail isEqualToString:strongSelf.lastProbeLoggedError ?: @""]) {
+                strongSelf.lastProbeLoggedError = detail;
+                [strongSelf appendEngineLog:[NSString stringWithFormat:@"Server probe failed: %@", detail]];
+            }
+        }
+        completion(ok, info);
+    }];
 #else
-    BOOL healthy = NO;
+    completion(NO, nil);
 #endif
-    completion(healthy, nil);
 }
 
 @end

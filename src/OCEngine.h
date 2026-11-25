@@ -4,12 +4,12 @@
 // a real Linux 6.18 kernel running a Debian 13 guest in-process, with
 // Node and OpenCode (2.3.0) baked into the guest image. On launch the
 // engine boots the guest and runs the real OpenCode desktop app: the
-// desktop app starts its server on 4096 (the native iOS UI talks to
-// that same server at 127.0.0.1:4096 through the vsock bridge, see
-// KernGlue) and its window shows through the guest display
-// (Virtio-GPU to a Metal view). The native UI stays available; the
-// desktop window is a second surface. There is no CLI mode any more
-// (removed 2026-11-25): Desktop UI only, always.
+// bootstrap starts the server on 4096 first and the desktop app joins
+// that same server (the native iOS UI talks to it at 127.0.0.1:4096
+// through the vsock bridge, see KernGlue) and its window shows through
+// the guest display (Virtio-GPU to a Metal view). The native UI stays
+// available; the desktop window is a second surface. There is no CLI
+// mode any more (removed 2026-11-25): Desktop UI only, always.
 //
 // Guest boot interface: the embedded core provides a guest executor
 // (a block that types a command at the guest console; see KernGlue).
