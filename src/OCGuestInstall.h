@@ -13,8 +13,10 @@
 // verified ~100 MiB parts (rootfs-build/CHUNKS-SHA256SUMS): the app
 // downloads each part, verifies its SHA-256, reassembles the .gz and
 // verifies the whole archive hash before extracting. A part that
-// fails verification is re-downloaded, never a corrupt image. See
-// DESKTOP-UI.md.
+// fails verification is re-downloaded, never a corrupt image. A
+// verified archive already on disk is reused: a kill during
+// extraction or verification resumes at extraction, never at the
+// download. See DESKTOP-UI.md.
 //
 // A version difference is an update, not a failure (TermX c2f4ed5,
 // same mechanism here): an installed image from an older release

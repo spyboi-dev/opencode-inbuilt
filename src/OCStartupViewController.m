@@ -1,12 +1,14 @@
-// OCStartupViewController - Andarium-style boot screen, shown on app
-// launch while the engine auto-starts.
+// OCStartupViewController - TermX-style starting window, shown on
+// app launch while the engine auto-starts.
 //
-// Layout copies the Andarium boot screen: a top row with a status
+// Layout matches TermX's starting window (TXStartupViewController):
+// black background, teal #2AB3A3 accent, a top row with a status
 // dot plus "Starting" on the left and a live elapsed timer on the
-// right, a big bold app title, and one rounded card holding
-// checklist rows. Each row is a real boot stage, driven only by
+// right, a 120pt spacer holding the big bold title low, a thin
+// progress bar tight under the title, and one rounded dark card
+// holding checklist rows. Each row is a real boot stage, driven only by
 // what the engine actually reports (OCEngine state and the PROGRESS
-// lines the guest prints over the console): a row flips to a green
+// lines the guest prints over the console): a row flips to a teal
 // check only when that stage really completed, the current stage
 // shows a spinner, later stages stay dim. Nothing is faked.
 //
@@ -21,7 +23,7 @@
 // the honest reason in plain words.
 //
 // One page, no scroll (user direction 2026-11-22): the whole
-// stack measures ~735pt with the reason line showing, against
+// stack measures ~787pt with the reason line hidden, against
 // ~839pt of safe area on iPhone 15 Plus, so Install and Continue
 // to app are both on screen. The entrance is staggered (Install
 // first, then the rows one by one, then Continue and Log), under
@@ -30,43 +32,32 @@
 #import "OCEngine.h"
 #import "OCEngineViewController.h"
 
-// OpenCode's exact dark tokens (same as OCChatViewController):
-// base #242424, layer-01 #2e2e2e, layer-02 #3a3a3a, text #f2f2f2,
-// muted #aeaeae, faint #808080, accent #a2bcff dark / #3b5cf6 light.
+// TermX's visual language, matched as closely as the screen's
+// content allows (2026-11-25): black background, teal #2AB3A3
+// accent for the status dot and active states, white text, grey
+// 48pt buttons. Fixed dark values, not dynamic — TermX's window
+// is black in every mode. The card is white 0.11, the buttons
+// white 0.22, the done check teal.
 static UIColor *OCStartupBase(void) {
-    return [UIColor colorWithDynamicProvider:^UIColor * _Nonnull(UITraitCollection * _Nonnull traits) {
-        return traits.userInterfaceStyle == UIUserInterfaceStyleDark ? [UIColor colorWithRed:0x24/255.0 green:0x24/255.0 blue:0x24/255.0 alpha:1.0] : [UIColor systemBackgroundColor];
-    }];
+    return [UIColor blackColor];
 }
 static UIColor *OCStartupLayer01(void) {
-    return [UIColor colorWithDynamicProvider:^UIColor * _Nonnull(UITraitCollection * _Nonnull traits) {
-        return traits.userInterfaceStyle == UIUserInterfaceStyleDark ? [UIColor colorWithRed:0x2e/255.0 green:0x2e/255.0 blue:0x2e/255.0 alpha:1.0] : [UIColor secondarySystemBackgroundColor];
-    }];
+    return [UIColor colorWithWhite:1.0 alpha:0.11];
 }
 static UIColor *OCStartupLayer02(void) {
-    return [UIColor colorWithDynamicProvider:^UIColor * _Nonnull(UITraitCollection * _Nonnull traits) {
-        return traits.userInterfaceStyle == UIUserInterfaceStyleDark ? [UIColor colorWithRed:0x3a/255.0 green:0x3a/255.0 blue:0x3a/255.0 alpha:1.0] : [UIColor systemGray5Color];
-    }];
+    return [UIColor colorWithWhite:1.0 alpha:0.22];
 }
 static UIColor *OCStartupText(void) {
-    return [UIColor colorWithDynamicProvider:^UIColor * _Nonnull(UITraitCollection * _Nonnull traits) {
-        return traits.userInterfaceStyle == UIUserInterfaceStyleDark ? [UIColor colorWithRed:0xf2/255.0 green:0xf2/255.0 blue:0xf2/255.0 alpha:1.0] : [UIColor labelColor];
-    }];
+    return [UIColor whiteColor];
 }
 static UIColor *OCStartupMuted(void) {
-    return [UIColor colorWithDynamicProvider:^UIColor * _Nonnull(UITraitCollection * _Nonnull traits) {
-        return traits.userInterfaceStyle == UIUserInterfaceStyleDark ? [UIColor colorWithRed:0xae/255.0 green:0xae/255.0 blue:0xae/255.0 alpha:1.0] : [UIColor secondaryLabelColor];
-    }];
+    return [UIColor colorWithWhite:1.0 alpha:0.6];
 }
 static UIColor *OCStartupFaint(void) {
-    return [UIColor colorWithDynamicProvider:^UIColor * _Nonnull(UITraitCollection * _Nonnull traits) {
-        return traits.userInterfaceStyle == UIUserInterfaceStyleDark ? [UIColor colorWithRed:0x80/255.0 green:0x80/255.0 blue:0x80/255.0 alpha:1.0] : [UIColor tertiaryLabelColor];
-    }];
+    return [UIColor colorWithWhite:1.0 alpha:0.5];
 }
 static UIColor *OCStartupAccent(void) {
-    return [UIColor colorWithDynamicProvider:^UIColor * _Nonnull(UITraitCollection * _Nonnull traits) {
-        return traits.userInterfaceStyle == UIUserInterfaceStyleDark ? [UIColor colorWithRed:0xa2/255.0 green:0xbc/255.0 blue:0xff/255.0 alpha:1.0] : [UIColor colorWithRed:0x3b/255.0 green:0x5c/255.0 blue:0xf6/255.0 alpha:1.0];
-    }];
+    return [UIColor colorWithRed:0x2A/255.0 green:0xB3/255.0 blue:0xA3/255.0 alpha:1.0];
 }
 
 typedef NS_ENUM(NSInteger, OCStartupRowState) {
@@ -119,7 +110,7 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
     self.rowDetails = [NSMutableArray array];
     self.rowViews = [NSMutableArray array];
 
-    // Top row: green dot + "Starting" left, elapsed timer right.
+    // Top row: teal dot + "Starting" left, elapsed timer right.
     self.statusDot = [[UIView alloc] init];
     self.statusDot.backgroundColor = OCStartupAccent();
     self.statusDot.layer.cornerRadius = 5;
@@ -223,38 +214,16 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
     buttons.spacing = 12;
     buttons.translatesAutoresizingMaskIntoConstraints = NO;
 
-    // A small spacer keeps the title and card from crowding the
-    // top row. It was 120pt (TermX's value) and that, plus the
-    // 64pt logo and 68pt rows, pushed Install below the fold on
-    // iPhone 15 Plus — the 2026-11-22 09:46 device screenshot.
-    // TermX has four rows and no logo; we have five rows and a
-    // logo, so our spacer has to be far smaller for the same
-    // one-page fit.
+    // A 120pt spacer holds the title low (TermX's value and
+    // rhythm, 2026-11-25): the screen reads as a status window,
+    // not a form. It fits only because this screen has no logo
+    // any more (TermX has none either; the title is the brand)
+    // and the rows stay 56pt — the literal TermX values with a
+    // logo and 68pt rows measured ~867pt and pushed Install
+    // below the fold again, the 2026-11-22 09:46 bug.
     UIView *spacer = [[UIView alloc] init];
     spacer.translatesAutoresizingMaskIntoConstraints = NO;
-    [spacer.heightAnchor constraintEqualToConstant:16].active = YES;
-
-    // The official OpenCode logo (resources/OpenCodeLogo.png, the
-    // square dark 1024px avatar from dev.opencode.ai/brand), small
-    // and centred above the Starting row. Same artwork as the app
-    // icon. The wrap centres it: the stack's Fill alignment would
-    // stretch a bare image view to full width.
-    UIImageView *logoView = [[UIImageView alloc] initWithImage:[UIImage imageNamed:@"OpenCodeLogo"]];
-    logoView.contentMode = UIViewContentModeScaleAspectFit;
-    logoView.layer.cornerRadius = 12;
-    logoView.layer.masksToBounds = YES;
-    logoView.translatesAutoresizingMaskIntoConstraints = NO;
-    [logoView.widthAnchor constraintEqualToConstant:48].active = YES;
-    [logoView.heightAnchor constraintEqualToConstant:48].active = YES;
-
-    UIView *logoWrap = [[UIView alloc] init];
-    logoWrap.translatesAutoresizingMaskIntoConstraints = NO;
-    [logoWrap.heightAnchor constraintEqualToConstant:48].active = YES;
-    [logoWrap addSubview:logoView];
-    [NSLayoutConstraint activateConstraints:@[
-        [logoView.centerXAnchor constraintEqualToAnchor:logoWrap.centerXAnchor],
-        [logoView.centerYAnchor constraintEqualToAnchor:logoWrap.centerYAnchor],
-    ]];
+    [spacer.heightAnchor constraintEqualToConstant:120].active = YES;
 
     // Thin progress bar under the title (TermX-style): real
     // progress only — the install fraction while downloading, the
@@ -265,19 +234,20 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
     self.progressView.progressTintColor = OCStartupAccent();
     self.progressView.progress = 0;
 
-    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[logoWrap, topRow, spacer, titleLabel, self.progressView, card, self.reasonLabel, buttons]];
+    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[topRow, spacer, titleLabel, self.progressView, card, self.reasonLabel, buttons]];
     stack.axis = UILayoutConstraintAxisVertical;
     // One page, no scroll (user direction 2026-11-22): the whole
-    // stack measures ~735pt with the reason line showing, against
+    // stack measures ~787pt with the reason line hidden, against
     // ~839pt of safe area on iPhone 15 Plus, so Install and
-    // Continue to app are both on screen. The default gap is 16,
-    // not 28 — the old 28pt gaps plus the 120pt spacer are what
-    // pushed Install below the fold.
-    stack.spacing = 16;
+    // Continue to app are both on screen. TermX's rhythm — 120pt
+    // spacer, 28pt gaps — with five 56pt rows and no logo. The
+    // stopped-with-update state (+60pt while Start is visible)
+    // measures ~847pt and may need a small scroll; the scroll
+    // view below is the fallback for that state only.
+    stack.spacing = 28;
     // The progress bar sits tight under the title, not a full
     // gap away.
     [stack setCustomSpacing:12 afterView:titleLabel];
-    [stack setCustomSpacing:16 afterView:self.progressView];
     stack.translatesAutoresizingMaskIntoConstraints = NO;
 
     UIScrollView *scroll = [[UIScrollView alloc] init];
@@ -583,43 +553,18 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
     // manual Start.
     if (engine.state == OCEngineStateNotInstalled || engine.state == OCEngineStateError ||
         (engine.state == OCEngineStateStopped && engine.updateAvailable)) {
-        [self presentInstallModeChoice];
+        [self beginInstall];
         return;
     }
 }
 
-// Install-time mode choice (2026-11-22): the Engine tab no
-// longer has a CLI / Desktop UI picker. Tapping Install asks
-// here first, and the choice is saved as oc.engineMode. Both
-// modes download the SAME guest image (it already contains the
-// OpenCode CLI and the desktop app); the mode only decides what
-// the guest boots into, so nothing is ever downloaded twice.
-- (void)presentInstallModeChoice {
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Install OpenCode"
-                                                                   message:@"Choose how OpenCode runs. Both use the same guest image."
-                                                            preferredStyle:UIAlertControllerStyleActionSheet];
-    __weak typeof(self) weakSelf = self;
-    [sheet addAction:[UIAlertAction actionWithTitle:@"CLI" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
-        (void)action;
-        [weakSelf beginInstallWithMode:OCEngineModeCLI];
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"Desktop UI" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
-        (void)action;
-        [weakSelf beginInstallWithMode:OCEngineModeDesktop];
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-    // An action sheet needs a popover anchor on iPad; harmless on iPhone.
-    sheet.popoverPresentationController.sourceView = self.actionButton;
-    sheet.popoverPresentationController.sourceRect = self.actionButton.bounds;
-    [self presentViewController:sheet animated:YES completion:nil];
-}
-
-- (void)beginInstallWithMode:(NSString *)mode {
-    [[OCEngine shared] setEngineMode:mode];
-    // One tap installs; the engine boots itself when the state
-    // flips to Installed (the observer calls
-    // maybeAutoStartEngine), and the tabs open on their own
-    // once the server is listening.
+// One tap installs; the engine boots itself when the state flips
+// to Installed (the observer calls maybeAutoStartEngine), and the
+// tabs open on their own once the server is listening. There is no
+// mode choice any more (2026-11-25): the engine always boots the
+// desktop app, and the image is the same either way, so Install
+// just installs.
+- (void)beginInstall {
     self.installFraction = 0;
     self.installMessage = nil;
     __weak typeof(self) weakSelf = self;
@@ -761,13 +706,12 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
         [self setRow:OCStartupRowOpenCode state:OCStartupRowPending detail:@"OpenCode 2.3.0"];
     }
 
-    BOOL desktop = [[engine engineMode] isEqualToString:OCEngineModeDesktop];
     if (running) {
-        [self setRow:OCStartupRowServer state:OCStartupRowDone detail:desktop ? @"Desktop window ready" : @"Listening on 127.0.0.1:4096"];
+        [self setRow:OCStartupRowServer state:OCStartupRowDone detail:@"Desktop window ready"];
     } else if (starting && p >= 0.85) {
-        [self setRow:OCStartupRowServer state:OCStartupRowActive detail:desktop ? @"Starting desktop..." : @"Starting server..."];
+        [self setRow:OCStartupRowServer state:OCStartupRowActive detail:@"Starting desktop..."];
     } else {
-        [self setRow:OCStartupRowServer state:OCStartupRowPending detail:desktop ? @"Desktop UI" : @"Port 4096"];
+        [self setRow:OCStartupRowServer state:OCStartupRowPending detail:@"Desktop UI"];
     }
 }
 
@@ -780,7 +724,7 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
     detailLabel.text = detail;
     switch (state) {
         case OCStartupRowDone:
-            icon.backgroundColor = [UIColor systemGreenColor];
+            icon.backgroundColor = OCStartupAccent();
             icon.layer.borderWidth = 0;
             check.hidden = NO;
             [spinner stopAnimating];

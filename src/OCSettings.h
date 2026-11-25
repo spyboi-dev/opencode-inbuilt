@@ -11,8 +11,6 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy) NSString *model;     // model id, "" = server default
 @property (nonatomic, copy) NSString *modelProviderID;
 @property (nonatomic, copy) NSString *agent;     // "build" or "plan"
-// Engine mode: @"cli" (default) or @"desktop". See OCEngine.h.
-@property (nonatomic, copy) NSString *engineMode;
 - (nullable NSString *)serverPassword;
 - (void)setServerPassword:(nullable NSString *)password;
 - (NSString *)ensureServerPassword; // generates and stores one if missing

@@ -1,15 +1,11 @@
 // OCEngine - the in-app engine host (Kernarium engine).
 #import "OCEngine.h"
 #import "OCSettings.h"
-#import "OCServerClient.h"
 #import "OCGuestInstall.h"
 
 #ifdef OC_KERNARIUM_LINKED
 #import "KernGlue.h"
 #endif
-
-NSString *const OCEngineModeCLI = @"cli";
-NSString *const OCEngineModeDesktop = @"desktop";
 
 static NSString *const kGuestImageInstalled = @"oc.guestImageInstalled";
 
@@ -24,7 +20,7 @@ static NSString *const kGuestImageInstalled = @"oc.guestImageInstalled";
 @property (nonatomic, assign) double serveProgressValue;
 @property (nonatomic, strong, nullable) NSString *serveStatusValue;
 @property (nonatomic, assign) BOOL serveProgressDone;
-// YES once the desktop app reported ready in Desktop UI mode.
+// YES once the desktop app reported ready.
 @property (nonatomic, assign) BOOL desktopReady;
 @property (nonatomic, strong, nullable) NSMutableArray<NSDictionary *> *stateObserverEntries;
 @property (nonatomic, assign) BOOL autoStartAttempted;
@@ -373,39 +369,6 @@ static NSString *const kGuestImageInstalled = @"oc.guestImageInstalled";
     return [docs stringByAppendingPathComponent:@"Engine"];
 }
 
-- (NSString *)engineMode {
-    NSString *mode = [OCSettings shared].engineMode;
-    if ([mode isEqualToString:OCEngineModeDesktop]) return OCEngineModeDesktop;
-    return OCEngineModeCLI;
-}
-
-- (void)setEngineMode:(NSString *)mode {
-    NSString *next = [mode isEqualToString:OCEngineModeDesktop] ? OCEngineModeDesktop : OCEngineModeCLI;
-    NSString *current = self.engineMode;
-    [OCSettings shared].engineMode = next;
-    [[OCSettings shared] save];
-    if ([next isEqualToString:current]) return;
-    [self appendEngineLog:[NSString stringWithFormat:@"Engine mode set to %@", [next isEqualToString:OCEngineModeDesktop] ? @"Desktop UI" : @"CLI"]];
-    if (self.state != OCEngineStateRunning && self.state != OCEngineStateStarting) {
-        [self appendEngineLog:@"New mode takes effect on the next start"];
-        return;
-    }
-    // Switching modes restarts the engine in the new mode: stop,
-    // then start again. (The mode is only set at install time now
-    // — the Engine tab picker is gone — so the engine is not
-    // running here in practice; this stays as the honest path.)
-    [self appendEngineLog:@"Restarting engine in the new mode"];
-    [self stopEngine];
-    __weak typeof(self) weakSelf = self;
-    [self startEngineWithCompletion:^(BOOL started, NSError * _Nullable error) {
-        typeof(self) strongSelf = weakSelf;
-        if (!strongSelf) return;
-        if (!started) {
-            [strongSelf appendEngineLog:[NSString stringWithFormat:@"Restart in the new mode failed: %@", error.localizedDescription ?: @"unknown"]];
-        }
-    }];
-}
-
 - (NSString *)stateDescription {
     switch (self.state) {
         case OCEngineStateNotInstalled: return @"Not installed";
@@ -454,12 +417,6 @@ static NSString *const kGuestImageInstalled = @"oc.guestImageInstalled";
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
     if (![d boolForKey:kGuestImageInstalled]) { [self setState:OCEngineStateNotInstalled]; return; }
     [self setState:OCEngineStateInstalled];
-}
-
-- (NSString *)serveLaunchCommand {
-    // Password is never put in a log; this string is only handed to the guest.
-    NSString *pw = [[OCSettings shared] ensureServerPassword];
-    return [NSString stringWithFormat:@"OPENCODE_SERVER_PASSWORD=%@ opencode serve --port 4096 --hostname 0.0.0.0", pw];
 }
 
 #pragma mark - Engine log + console feed (in-app diagnostics)
@@ -604,17 +561,8 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
 // PROGRESS / ERROR lines and the definitive start signals.
 - (void)handleGuestConsoleLine:(NSString *)line {
     if (!line.length) return;
-    if ([line containsString:@"server listening"]) {
-        if ([self.engineMode isEqualToString:OCEngineModeCLI] && !self.serveProgressDone) {
-            self.serveProgressDone = YES;
-            [self setServeProgress:1.0 status:@"Engine running"];
-            [self appendEngineLogSync:@"Server listening (from guest console)"];
-            if (self.state != OCEngineStateRunning) [self setState:OCEngineStateRunning];
-        }
-        return;
-    }
     if ([line containsString:@"DESKTOP READY"]) {
-        if ([self.engineMode isEqualToString:OCEngineModeDesktop] && !self.serveProgressDone) {
+        if (!self.serveProgressDone) {
             self.desktopReady = YES;
             self.serveProgressDone = YES;
             [self setServeProgress:1.0 status:@"Engine running"];
@@ -835,10 +783,9 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
     self.serveProgressDone = NO;
     self.desktopReady = NO;
     [self setState:OCEngineStateStarting];
-    [self setServeProgress:0.05 status:@"Starting server..."];
+    [self setServeProgress:0.05 status:@"Starting desktop..."];
     [self appendEngineLogSync:@"Serve launch started"];
-    BOOL desktop = [self.engineMode isEqualToString:OCEngineModeDesktop];
-    NSString *bootstrap = [self consoleBootstrapForDesktop:desktop];
+    NSString *bootstrap = [self consoleBootstrap];
     // The password is typed with echo off (see the bootstrap) and is
     // also the glue's redact string, so it never lands in a log.
     NSString *pw = [[OCSettings shared] ensureServerPassword];
@@ -855,7 +802,7 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
         }
         [[OCKernGlue shared] sendConsoleText:bootstrap];
         [strongSelf setState:OCEngineStateStarting];
-        [strongSelf setServeProgress:0.05 status:desktop ? @"Starting desktop..." : @"Starting server..."];
+        [strongSelf setServeProgress:0.05 status:@"Starting desktop..."];
         // The guest still has to boot its userland and print the
         // ready marker; give the first start 5 minutes before health
         // failures can restart the engine.
@@ -878,12 +825,12 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
 // ERROR line, never a download: the overlay is wiped every boot, so
 // a first-Start download would repeat on every launch). The same
 // block starts the vsock proxies, the user's app.py (guarded on the
-// file existing), and then either the CLI server or the desktop app.
+// file existing), and then the desktop app.
 //
 // Password: typed with echo off (`stty -echo` first), so the tty
 // never echoes it back into the console transcript the app logs.
 // The password is 32 hex chars, so it cannot break the quoting.
-- (NSString *)consoleBootstrapForDesktop:(BOOL)desktop {
+- (NSString *)consoleBootstrap {
     NSString *pw = [[OCSettings shared] ensureServerPassword];
     NSString *quotedPw = [pw stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
     NSMutableString *b = [NSMutableString string];
@@ -918,26 +865,15 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
     // is restored at boot; the command is wired and logs which way
     // it went.
     [b appendString:@"if [ -f /root/Projects/app.py ]; then (cd /root/Projects && nohup python3 app.py > server.log 2>&1 &); echo \"app.py started\"; else echo \"no app.py in guest\"; fi\n"];
-    if (desktop) {
-        // Desktop UI mode: stop any CLI server left over from a mode
-        // switch, then start the desktop session. The session script
-        // brings up X and the OpenCode desktop app; the bootstrap
-        // waits until the window is up and then prints the marker
-        // the app watches for.
-        [b appendString:@"sudo systemctl stop opencode-desktop 2>/dev/null; true\n"];
-        [b appendString:@"echo \"PROGRESS 90 Starting desktop...\"\n"];
-        [b appendString:@"sudo systemctl start opencode-desktop\n"];
-        [b appendString:@"for i in $(seq 1 60); do if pgrep -f opencode-desktop >/dev/null 2>&1 && [ -S /tmp/.X11-unix/X0 ]; then echo \"DESKTOP READY\"; break; fi; sleep 2; done\n"];
-        [b appendString:@"pgrep -f opencode-desktop >/dev/null 2>&1 || echo \"ERROR Desktop did not start (see above)\"\n"];
-    } else {
-        // CLI mode: a desktop session left over from a mode switch
-        // would hold the display and the server port; stop it.
-        [b appendString:@"sudo systemctl stop opencode-desktop 2>/dev/null; true\n"];
-        // A fresh guest has no leftover server (nothing survives a
-        // reboot), so no pkill is needed.
-        [b appendString:@"echo \"PROGRESS 90 Starting server...\"\n"];
-        [b appendString:@"opencode serve --port 4096 --hostname 0.0.0.0\n"];
-    }
+    // Stop the desktop session first so a restart is clean, then
+    // start it. The session script brings up X and the OpenCode
+    // desktop app; the bootstrap waits until the window is up and
+    // then prints the marker the app watches for.
+    [b appendString:@"sudo systemctl stop opencode-desktop 2>/dev/null; true\n"];
+    [b appendString:@"echo \"PROGRESS 90 Starting desktop...\"\n"];
+    [b appendString:@"sudo systemctl start opencode-desktop\n"];
+    [b appendString:@"for i in $(seq 1 60); do if pgrep -f opencode-desktop >/dev/null 2>&1 && [ -S /tmp/.X11-unix/X0 ]; then echo \"DESKTOP READY\"; break; fi; sleep 2; done\n"];
+    [b appendString:@"pgrep -f opencode-desktop >/dev/null 2>&1 || echo \"ERROR Desktop did not start (see above)\"\n"];
     return b;
 }
 
@@ -945,7 +881,7 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
     [self.healthTimer invalidate];
     self.healthTimer = nil;
     // A stop means a start is being driven explicitly (health
-    // restart, mode switch): cancel any pending automatic retry.
+    // restart): cancel any pending automatic retry.
     [self.autoStartRetryTimer invalidate];
     self.autoStartRetryTimer = nil;
     // Bump the serve generation so a start already in flight cannot
@@ -999,26 +935,16 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
 }
 
 - (void)checkHealthWithCompletion:(void (^)(BOOL, NSDictionary * _Nullable))completion {
-    if ([self.engineMode isEqualToString:OCEngineModeDesktop]) {
-        // Desktop UI mode: there is no CLI server for the native UI
-        // to poll. Healthy means the guest is up and the desktop
-        // app reported ready. The HTTP health check does not apply
-        // here, and a desktop that never reports ready is restarted
-        // by the health timer's 3-strike rule like any other start.
+    // Healthy is not an HTTP poll: it means the guest is up and
+    // the desktop app reported ready. A desktop that never reports
+    // ready is restarted by the health timer's 3-strike rule like
+    // any other start.
 #ifdef OC_KERNARIUM_LINKED
-        BOOL healthy = self.desktopReady && [OCKernGlue shared].booted;
+    BOOL healthy = self.desktopReady && [OCKernGlue shared].booted;
 #else
-        BOOL healthy = NO;
+    BOOL healthy = NO;
 #endif
-        completion(healthy, nil);
-        return;
-    }
-    OCSettings *settings = [OCSettings shared];
-    OCServerClient *client = [[OCServerClient alloc] initWithServerURL:settings.serverURL password:[settings serverPassword]];
-    [client healthCheckWithCompletion:^(BOOL ok, NSDictionary * _Nullable info, NSError * _Nullable error) {
-        (void)error;
-        completion(ok, info);
-    }];
+    completion(healthy, nil);
 }
 
 @end

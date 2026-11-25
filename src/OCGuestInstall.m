@@ -54,8 +54,25 @@
 // install pipeline (assemble / gunzip / verify) runs on a background
 // queue: the installed check SHA-256s a 4.46 GB image and must never
 // run on the main thread.
+// Extraction design (2026-11-25, the extraction crash): the
+// download fix worked — the a29614b run verified all 12 parts and
+// reached "Download verified" — but the app still died, now in the
+// silent extraction phase (gunzip 1.16 GB -> 4.46 GB, then a full
+// SHA-256 of the 4.46 GB image), with no log line and no error.
+// Two causes, both fixed here: (1) SHA256OfFile and AssembleChunks
+// loop readDataOfLength:1MB with no @autoreleasepool, so a 4.46 GB
+// hash inside the install block can retain gigabytes of dead
+// NSData past the jetsam limit; every streaming loop now drains
+// per chunk. (2) The extraction had no logging and no resumability
+// — a kill mid-extraction forced a full 1.16 GB re-download (parts
+// deleted, archive deleted at install start). The verified archive
+// is now kept until the swap succeeds, so a kill costs a
+// re-extraction; the extraction logs every 10% with bytes and
+// footprint; and the background-task expiration handler stops the
+// gunzip cleanly instead of being frozen mid-write and killed
+// while suspended.
 NSString *const kOCGuestImageChunkBaseURL =
-    @"https://github.com/spyboi-dev/opencode-inbuilt/releases/download/rootfs-20261120/";
+    @"https://github.com/spyboi-dev/opencode-ios/releases/download/rootfs-20261120/";
 NSString *const kOCGuestImageName = @"opencode-debian-trixie-arm64.ext4";
 NSString *const kOCGuestImageGzSHA256 = @"b1018c9357236ea2355bff488eda32171cc25c450997cccd7052b15992d3a8fa";
 NSString *const kOCGuestImageSHA256 = @"c7511200d3e23e21bcd68e63904e489b4724e24c263464e92c8dd72963a83e1f";
@@ -97,6 +114,14 @@ static const long long kOCGuestImageChunkSizes[] = {
     104857600, 104857600, 104857600, 104857600, 104857600, 5716714,
 };
 
+// Stop flag for the extraction: set by the install pipeline's
+// background-task expiration handler when iOS's ~30 s background
+// budget runs out mid-extraction. The gunzip loop checks it per
+// chunk and stops cleanly instead of being frozen mid-write and
+// killed while suspended. Volatile: set on the main queue
+// (expiration handler), read on the install queue.
+static volatile BOOL s_extractionStopRequested = NO;
+
 static NSString *SHA256OfFile(NSString *path, NSError **outError) {
     NSFileHandle *handle = [NSFileHandle fileHandleForReadingAtPath:path];
     if (!handle) {
@@ -106,9 +131,24 @@ static NSString *SHA256OfFile(NSString *path, NSError **outError) {
     CC_SHA256_CTX ctx;
     CC_SHA256_Init(&ctx);
     while (YES) {
-        NSData *chunk = [handle readDataOfLength:1 << 20];
-        if (chunk.length == 0) break;
-        CC_SHA256_Update(&ctx, chunk.bytes, (CC_LONG)chunk.length);
+        // @autoreleasepool per chunk: readDataOfLength: returns an
+        // autoreleased 1 MB NSData, and this loop runs inside the
+        // install block on a GCD worker thread whose pool only
+        // drains when the block returns. Without the pool, hashing
+        // the 4.46 GB extracted image retains gigabytes of dead
+        // NSData in the pool — on top of the ~2.4 GB already hashed
+        // in this block (12 parts + the .gz) — and iOS SIGKILLs
+        // the app past its jetsam limit with no crash line,
+        // exactly the silent death the 2026-11-25 log shows (log
+        // stops after "Download verified", no extraction lines, no
+        // error). Whether Foundation elides the autorelease here is
+        // not provable statically; the pool makes the footprint
+        // flat either way.
+        @autoreleasepool {
+            NSData *chunk = [handle readDataOfLength:1 << 20];
+            if (chunk.length == 0) break;
+            CC_SHA256_Update(&ctx, chunk.bytes, (CC_LONG)chunk.length);
+        }
     }
     [handle closeFile];
     unsigned char digest[CC_SHA256_DIGEST_LENGTH];
@@ -603,13 +643,19 @@ static BOOL AssembleChunks(NSArray<NSString *> *chunkPaths, NSString *dstPath) {
         NSFileHandle *in = [NSFileHandle fileHandleForReadingAtPath:chunkPath];
         if (!in) { ok = NO; break; }
         while (YES) {
-            NSData *data = [in readDataOfLength:1 << 20];
-            if (data.length == 0) break;
-            @try {
-                [out writeData:data];
-            } @catch (NSException *exception) {
-                ok = NO;
-                break;
+            // @autoreleasepool per chunk, same as SHA256OfFile
+            // above: without it the 1 MB autoreleased NSData from
+            // every read accumulates in the install block's pool
+            // for the whole 1.16 GB assembly.
+            @autoreleasepool {
+                NSData *data = [in readDataOfLength:1 << 20];
+                if (data.length == 0) break;
+                @try {
+                    [out writeData:data];
+                } @catch (NSException *exception) {
+                    ok = NO;
+                    break;
+                }
             }
         }
         [in closeFile];
@@ -769,8 +815,16 @@ static NSString *const kOCVerifiedRootfsKey = @"oc.verified-rootfs";
 }
 
 // Streaming gunzip of src (.gz) to dst. Returns NO with *error set on
-// failure; the caller checks the hashes.
-+ (BOOL)gunzipFile:(NSString *)src to:(NSString *)dst error:(NSString **)error {
+// failure; the caller checks the hashes. progress, when given, is
+// called with the total bytes written so far (throttled by the
+// caller); the extraction logs every 10% with bytes and footprint,
+// so a kill mid-extraction leaves its exact position instead of
+// silence. Stops cleanly when the background budget expires
+// (s_extractionStopRequested, set by the install's expiration
+// handler): a partial dst is deleted, the error says paused, and
+// the verified .gz is kept so the next Install resumes at
+// extraction instead of re-downloading.
++ (BOOL)gunzipFile:(NSString *)src to:(NSString *)dst progress:(void (^)(unsigned long long))progress error:(NSString **)error {
     gzFile gz = gzopen(src.UTF8String, "rb");
     if (!gz) {
         if (error) *error = @"could not open the downloaded archive";
@@ -782,6 +836,10 @@ static NSString *const kOCVerifiedRootfsKey = @"oc.verified-rootfs";
         if (error) *error = @"could not write the guest image";
         return NO;
     }
+    // 1 MiB stdio buffer, set before any I/O on the stream: the
+    // default is the filesystem block size (4 KiB on APFS), which
+    // turns a 4.46 GB extraction into ~1.1 M write() calls.
+    setvbuf(out, NULL, _IOFBF, 1 << 20);
     // Heap buffer, never the stack: TermX's SIGBUS (commit d2b4f2e)
     // was a 1 MiB gunzip buffer on a 512 KiB GCD worker stack, so the
     // first gzread touched the guard page and died. 256 KiB heap.
@@ -795,8 +853,13 @@ static NSString *const kOCVerifiedRootfsKey = @"oc.verified-rootfs";
     }
     int n;
     BOOL ok = YES;
+    BOOL stopped = NO;
+    unsigned long long written = 0;
     while ((n = gzread(gz, buffer, (unsigned)kGunzipBufferSize)) > 0) {
+        if (s_extractionStopRequested) { stopped = YES; ok = NO; break; }
         if (fwrite(buffer, 1, (size_t)n, out) != (size_t)n) { ok = NO; break; }
+        written += (unsigned long long)n;
+        if (progress) progress(written);
     }
     if (n < 0) ok = NO;
     free(buffer);
@@ -804,7 +867,10 @@ static NSString *const kOCVerifiedRootfsKey = @"oc.verified-rootfs";
     gzclose(gz);
     if (!ok) {
         [[NSFileManager defaultManager] removeItemAtPath:dst error:nil];
-        if (error) *error = @"the downloaded archive is corrupt";
+        if (error) {
+            *error = stopped ? @"Install paused — the verified archive is kept, tap Install to continue"
+                             : @"the downloaded archive is corrupt";
+        }
     }
     return ok;
 }
@@ -845,11 +911,23 @@ static NSString *const kOCVerifiedRootfsKey = @"oc.verified-rootfs";
     // a partial image plus a fresh resume blob. Here there is no blob,
     // but verified chunks are still worth keeping: the assertion is
     // ended in finish, the single funnel every exit goes through.
+    // The expiration handler stops the extraction cleanly instead
+    // of leaving the app frozen mid-gunzip: see s_extractionStopRequested.
+    s_extractionStopRequested = NO;
     __block UIBackgroundTaskIdentifier bgTask =
         [[UIApplication sharedApplication] beginBackgroundTaskWithExpirationHandler:^{
-            // Expiration only ends the assertion; the pipeline keeps
-            // its verified chunks and the next Install resumes from
-            // them.
+            // The background budget (~30 s) ran out mid-pipeline.
+            // If the extraction is running, stop it cleanly here
+            // instead of being frozen mid-gunzip and killed while
+            // suspended with no log line: the gunzip loop checks
+            // the flag per chunk, deletes the partial .new, and
+            // the verified archive is kept, so the next Install
+            // resumes at extraction instead of re-downloading.
+            // Expiration only ends the assertion; the pipeline
+            // keeps its verified chunks and the next Install
+            // resumes from them.
+            OCInstallLog(@"Background time expired during install — stopping cleanly, the verified archive is kept");
+            s_extractionStopRequested = YES;
         }];
     void (^finish)(BOOL, NSString *) = ^(BOOL ok, NSString *error) {
         if (bgTask != UIBackgroundTaskInvalid) {
@@ -875,7 +953,32 @@ static NSString *const kOCVerifiedRootfsKey = @"oc.verified-rootfs";
     [fm createDirectoryAtPath:guestDir withIntermediateDirectories:YES attributes:nil error:nil];
     NSString *tmpDir = NSTemporaryDirectory();
     NSString *gzPath = [tmpDir stringByAppendingPathComponent:@"opencode-rootfs.ext4.gz"];
-    [fm removeItemAtPath:gzPath error:nil];
+    unsigned long long gzSize = 0;
+    for (NSInteger i = 0; i < kOCGuestImageChunkCount; i++) gzSize += (unsigned long long)kOCGuestImageChunkSizes[i];
+    NSMutableArray<NSString *> *chunkPaths = [NSMutableArray arrayWithCapacity:(NSUInteger)kOCGuestImageChunkCount];
+    for (NSInteger i = 0; i < kOCGuestImageChunkCount; i++) {
+        [chunkPaths addObject:[tmpDir stringByAppendingPathComponent:kOCGuestImageChunkNames[i]]];
+    }
+    // The assembled .gz, once verified, is the resume point for the
+    // whole install: a kill during extraction or verification must
+    // cost a ~30 s re-extraction, never a 1.16 GB re-download. So
+    // the archive is NOT deleted blindly here. If a verified .gz is
+    // already on disk (a previous attempt got past assembly), the
+    // download and the assembly are both skipped; if it is stale
+    // or damaged it is deleted and the pipeline re-downloads.
+    // (2026-11-25: the old code deleted the archive at install
+    // start and the parts after assembly, so every kill during
+    // extraction forced a full re-download — the crash loop.)
+    BOOL haveVerifiedGz = FileHasSize(gzPath, (long long)gzSize) && FileHasHash(gzPath, kOCGuestImageGzSHA256);
+    if (haveVerifiedGz) {
+        OCInstallLog(@"Archive already downloaded and verified — skipping download and assembly");
+        for (NSString *chunkPath in chunkPaths) {
+            [fm removeItemAtPath:chunkPath error:nil];
+            [fm removeItemAtPath:[chunkPath stringByAppendingString:@".resume"] error:nil];
+        }
+    } else {
+        [fm removeItemAtPath:gzPath error:nil];
+    }
     // The installed image is NOT deleted here: the pipeline
     // extracts to a side file and swaps it in only after the new
     // image is verified, so a failed or cancelled update leaves
@@ -889,9 +992,10 @@ static NSString *const kOCVerifiedRootfsKey = @"oc.verified-rootfs";
     // so they do not add to the extraction peak. Fails cleanly with
     // the real numbers instead of dying mid-extraction.
     unsigned long long freeSpace = OCFreeSpaceAtPath(tmpDir);
-    unsigned long long gzSize = 0;
-    for (NSInteger i = 0; i < kOCGuestImageChunkCount; i++) gzSize += (unsigned long long)kOCGuestImageChunkSizes[i];
-    unsigned long long neededSpace = gzSize + (unsigned long long)kOCGuestImageSize + (512ULL << 20);
+    // The archive only needs downloading when it is not already
+    // verified on disk (see above): its size is already counted
+    // in freeSpace then, so it must not be added to the need.
+    unsigned long long neededSpace = (haveVerifiedGz ? 0 : gzSize) + (unsigned long long)kOCGuestImageSize + (512ULL << 20);
     if ([fm fileExistsAtPath:rootfsPath]) neededSpace += (unsigned long long)kOCGuestImageSize;
     OCInstallLog([NSString stringWithFormat:@"Install: %@ free, %@ needed for the guest image",
                   OCFormatBytes(freeSpace), OCFormatBytes(neededSpace)]);
@@ -903,11 +1007,11 @@ static NSString *const kOCVerifiedRootfsKey = @"oc.verified-rootfs";
 
     // Download each chunk in order. A chunk that is already on disk
     // with the right size and SHA-256 is kept: that is the resume.
-    NSMutableArray<NSString *> *chunkPaths = [NSMutableArray arrayWithCapacity:(NSUInteger)kOCGuestImageChunkCount];
-    for (NSInteger i = 0; i < kOCGuestImageChunkCount; i++) {
-        NSString *name = kOCGuestImageChunkNames[i];
-        NSString *chunkPath = [tmpDir stringByAppendingPathComponent:name];
-        [chunkPaths addObject:chunkPath];
+    // Skipped entirely when a verified archive is already on disk
+    // (haveVerifiedGz above): the loop condition keeps it from
+    // running at all, and the assembly below is guarded the same way.
+    for (NSInteger i = 0; i < kOCGuestImageChunkCount && !haveVerifiedGz; i++) {
+        NSString *chunkPath = chunkPaths[(NSUInteger)i];
         if (FileHasSize(chunkPath, kOCGuestImageChunkSizes[i]) && FileHasHash(chunkPath, kOCGuestImageChunkSHA256[i])) {
             OCInstallLog([NSString stringWithFormat:@"Part %ld of %ld already downloaded and verified — keeping it",
                           (long)(i + 1), (long)kOCGuestImageChunkCount]);
@@ -916,7 +1020,7 @@ static NSString *const kOCVerifiedRootfsKey = @"oc.verified-rootfs";
             continue;
         }
         [fm removeItemAtPath:chunkPath error:nil];
-        NSString *chunkURL = [kOCGuestImageChunkBaseURL stringByAppendingString:name];
+        NSString *chunkURL = [kOCGuestImageChunkBaseURL stringByAppendingString:chunkPath.lastPathComponent];
         BOOL chunkOK = NO;
         for (int attempt = 1; attempt <= 3 && !chunkOK; attempt++) {
             NSInteger chunkIndex = i;
@@ -946,24 +1050,28 @@ static NSString *const kOCVerifiedRootfsKey = @"oc.verified-rootfs";
         }
     }
 
-    ReportProgress(progress, 0.6, @"Verifying the download…");
-    if (!AssembleChunks(chunkPaths, gzPath) || !FileHasHash(gzPath, kOCGuestImageGzSHA256)) {
-        [fm removeItemAtPath:gzPath error:nil];
-        // The parts are kept (each passed its own SHA-256), so the next
-        // Install only re-assembles instead of re-downloading.
-        finish(NO, @"the download is damaged — try again");
-        return;
+    if (haveVerifiedGz) {
+        ReportProgress(progress, 0.6, @"Archive ready…");
+    } else {
+        ReportProgress(progress, 0.6, @"Verifying the download…");
+        if (!AssembleChunks(chunkPaths, gzPath) || !FileHasHash(gzPath, kOCGuestImageGzSHA256)) {
+            [fm removeItemAtPath:gzPath error:nil];
+            // The parts are kept (each passed its own SHA-256), so the next
+            // Install only re-assembles instead of re-downloading.
+            finish(NO, @"the download is damaged — try again");
+            return;
+        }
+        // The .gz is verified: the parts are redundant now (a later
+        // failure is in gunzip, where re-downloading is the correct
+        // recovery anyway), so drop them before the 4.46 GB extraction
+        // — that keeps the extraction peak at .gz + new image + old
+        // image instead of adding 1.16 GB of parts to it.
+        for (NSString *chunkPath in chunkPaths) {
+            [fm removeItemAtPath:chunkPath error:nil];
+            [fm removeItemAtPath:[chunkPath stringByAppendingString:@".resume"] error:nil];
+        }
+        OCInstallLog(@"Download verified — part files removed to free space for extraction");
     }
-    // The .gz is verified: the parts are redundant now (a later
-    // failure is in gunzip, where re-downloading is the correct
-    // recovery anyway), so drop them before the 4.46 GB extraction
-    // — that keeps the extraction peak at .gz + new image + old
-    // image instead of adding 1.16 GB of parts to it.
-    for (NSString *chunkPath in chunkPaths) {
-        [fm removeItemAtPath:chunkPath error:nil];
-        [fm removeItemAtPath:[chunkPath stringByAppendingString:@".resume"] error:nil];
-    }
-    OCInstallLog(@"Download verified — part files removed to free space for extraction");
     ReportProgress(progress, 0.7, @"Extracting the image…");
     // Extract to a side file, not the live image: the installed
     // image keeps booting until the new one is verified, and a
@@ -974,12 +1082,29 @@ static NSString *const kOCVerifiedRootfsKey = @"oc.verified-rootfs";
     // first so a later free-space check stays honest.
     NSString *newPath = [rootfsPath stringByAppendingString:@".new"];
     [fm removeItemAtPath:newPath error:nil];
+    OCInstallLog(@"Extracting the image — 4.46 GB, progress every 10%");
+    __block NSInteger lastExtractLoggedPercent = 0;
     NSString *extractError = nil;
-    if (![self gunzipFile:gzPath to:newPath error:&extractError]) {
+    if (![self gunzipFile:gzPath to:newPath progress:^(unsigned long long bytesWritten) {
+        double f = (double)bytesWritten / (double)kOCGuestImageSize;
+        NSInteger pct = (NSInteger)(f * 100.0);
+        if (pct >= lastExtractLoggedPercent + 10) {
+            lastExtractLoggedPercent = (pct / 10) * 10;
+            OCInstallLog([NSString stringWithFormat:@"Extraction: %ld%% · %@ of %@ written · footprint %@",
+                          (long)pct,
+                          OCFormatBytes(bytesWritten),
+                          OCFormatBytes((unsigned long long)kOCGuestImageSize),
+                          OCFormatBytes(OCCurrentFootprintBytes())]);
+            ReportProgress(progress, 0.7 + f * 0.25, @"Extracting the image…");
+        }
+    } error:&extractError]) {
         finish(NO, extractError);
         return;
     }
-    [fm removeItemAtPath:gzPath error:nil];
+    OCInstallLog(@"Extraction finished — verifying the image…");
+    // The verified .gz is NOT deleted here any more: it stays
+    // until the swap below succeeds, so a kill during the verify
+    // or the swap costs a re-extraction, never a re-download.
     ReportProgress(progress, 0.95, @"Verifying the image…");
     // The pipeline's own one-time verify, not guestInstalledAt:
     // the just-extracted file still carries write bits until the
@@ -1008,6 +1133,10 @@ static NSString *const kOCVerifiedRootfsKey = @"oc.verified-rootfs";
     }
     NSDictionary *finalAttrs = [fm attributesOfItemAtPath:rootfsPath error:nil];
     if (finalAttrs) [self recordVerifiedFingerprintForPath:rootfsPath attrs:finalAttrs hash:kOCGuestImageSHA256];
+    // Only now, with the new image swapped in and fingerprinted,
+    // is the archive redundant: delete it.
+    [fm removeItemAtPath:gzPath error:nil];
+    OCInstallLog(@"Install complete — guest image ready");
     ReportProgress(progress, 1.0, @"Guest ready");
     finish(YES, nil);
 }

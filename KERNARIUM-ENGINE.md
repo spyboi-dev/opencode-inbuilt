@@ -40,9 +40,9 @@ below has run on a device yet.
   `./build.sh` compiles the new glue (the runtime is dlopen'd, so
   the Linux build links without the framework) and reports the
   engine honestly as not ready yet.
-- Engine modes (see "Engine modes" below): CLI (default) and
-  Desktop UI, selectable on the Engine tab, persisted in
-  `OCSettings`, switching restarts the engine.
+- Engine: Desktop UI only since 2026-11-25 (CLI mode removed;
+  see "Engine modes" below). Install has no mode choice; the
+  engine always boots the desktop app (server on 4096 + window).
 - Background location mode (see "Background" below): Always
   location + `UIBackgroundModes` location, plain-words prompt copy.
 - Guest image additions: `rootfs-build/
@@ -545,7 +545,7 @@ port 8000 is guest-local unless a second vsock forward is added
   linked into the app, so the shipped app is a GPL derivative: its
   source must travel with any distribution of the IPA (TermX already
   carries `LICENSE-GPL-2.0` + SPDX headers for this reason). The
-  OpenCode app is currently a private repo (`spyboi-dev/opencode-inbuilt`);
+  OpenCode app is currently a private repo (`spyboi-dev/opencode-ios`);
   distributing the Kernarium IPA without the corresponding source
   (app + the framework build inputs) would breach the licence. The
   NewTerm-modelled UI is Apache-2.0, not an issue here. Decide before
@@ -595,13 +595,13 @@ port 8000 is guest-local unless a second vsock forward is added
    persistence lands); `sudo docker run hello-world`; Stop → Start
    (standalone); kill app → relaunch → auto-start. LiveContainer:
    first-run only, expect no restart-in-place.
-8. Mode + background tests: switch CLI -> Desktop UI on the Engine
-   tab (engine restarts, `DESKTOP READY` completes the startup
-   screen, Show desktop opens the window, a tap clicks, typed text
-   lands); switch back (desktop stops, CLI server answers again);
-   background the app with Always location granted (engine keeps
-   running, location arrow shows, return to foreground resumes);
-   deny location (engine stops with the app, as before).
+8. Desktop + background tests: boot straight into the desktop
+   (`DESKTOP READY` completes the startup screen, Show desktop
+   opens the window, a tap clicks, typed text lands); background
+   the app with Always location granted (engine keeps running,
+   location arrow shows, return to foreground resumes); deny
+   location (engine stops with the app, as before). (No mode
+   switching any more — CLI mode was removed 2026-11-25.)
 
 ## PERSISTENCE-TODO (the biggest product risk, unsolved)
 
@@ -680,6 +680,12 @@ Honest caveats, all still true:
   nags the user again.
 
 ## Engine modes: CLI vs Desktop UI (both in the app, user picks)
+
+UPDATE 2026-11-25: the user removed the CLI mode. Desktop UI
+only now: the engine always boots the desktop app (its server on
+4096 plus the window), Install has no mode choice, and
+`oc.engineMode` is deleted. The CLI-mode description below is
+history, kept for reference.
 
 The user asked for both, not one. The Engine tab has a segmented
 control, "CLI" / "Desktop UI". The choice is persisted in
@@ -776,6 +782,11 @@ desktop-only features if any appear), and do not present the
 desktop app as the engine. First device test for Desktop UI mode:
 the desktop window appears, a tap clicks, typed text lands, and
 `DESKTOP READY` completes the startup screen.
+
+REVERSED 2026-11-25 by the user: CLI mode is removed, Desktop UI
+only. The desktop app is now the engine's surface (server + window
+together); the native Threads/Integrations tabs stay and talk to
+the same server.
 
 ### Restart-in-place is unproven (affects mode switching too)
 

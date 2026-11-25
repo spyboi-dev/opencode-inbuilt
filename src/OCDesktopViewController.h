@@ -1,4 +1,4 @@
-// OCDesktopViewController - the Desktop UI mode screen.
+// OCDesktopViewController - the desktop screen.
 //
 // Shows the guest's display (the same MTKView run() renders into)
 // full-screen, with touch and keyboard input forwarded to the guest.

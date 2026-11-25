@@ -2,11 +2,10 @@
 // (PancakeStore-style dark card, on this screen). No controls:
 // the engine is fully automatic (2026-11-22) — it starts by
 // itself on launch, after install, and again on a foreground
-// return or a retry timer. The mode picker and the Start/Stop
-// buttons are gone; the mode is chosen at Install time on the
-// startup screen. "Show desktop" stays: it is the only way to
-// see the desktop in Desktop UI mode, and it only appears while
-// the desktop is running or starting.
+// return or a retry timer. There are no Start/Stop buttons and no
+// mode picker any more: the engine always boots the desktop app.
+// "Show desktop" stays: it is the only way to see the desktop,
+// and it only appears while the desktop is running or starting.
 #import "OCEngineViewController.h"
 #import "OCEngine.h"
 #import "OCDesktopViewController.h"
@@ -240,7 +239,6 @@
     // what happens next. A failure says so here and in the log,
     // and the recovery is automatic (foreground return / retry
     // timer) — never a button.
-    BOOL desktop = [[engine engineMode] isEqualToString:OCEngineModeDesktop];
     if (engine.state == OCEngineStateNotInstalled) {
         self.detailLabel.text = @"Guest image not installed yet. Install it from the startup screen — the engine starts by itself after that.";
     } else if (engine.state == OCEngineStateInstalling) {
@@ -248,26 +246,18 @@
     } else if (engine.state == OCEngineStateError) {
         self.detailLabel.text = @"The engine stopped with an error. See the log below — it tries again by itself.";
     } else if (engine.guestCoreLinked) {
-        if (desktop) {
-            self.detailLabel.text = @"Guest core linked. Debian 13 guest with the OpenCode desktop app. Open the desktop from below once it is running.";
-        } else {
-            self.detailLabel.text = @"Guest core linked. Debian 13 guest with Node and OpenCode 2.3.0. Server on 127.0.0.1:4096. The engine starts by itself.";
-        }
+        self.detailLabel.text = @"Guest core linked. Debian 13 guest with the OpenCode desktop app. Open the desktop from below once it is running.";
     } else if (engine.guestCoreLoadable) {
         // Runtime not loaded yet — it loads as part of the
         // automatic start, never at launch, so a framework that
         // dies while loading cannot kill the launch.
-        if (desktop) {
-            self.detailLabel.text = @"Guest runtime loads automatically when the engine starts. Debian 13 guest with the OpenCode desktop app.";
-        } else {
-            self.detailLabel.text = @"Guest runtime loads automatically when the engine starts. Debian 13 guest with Node and OpenCode 2.3.0. Server on 127.0.0.1:4096.";
-        }
+        self.detailLabel.text = @"Guest runtime loads automatically when the engine starts. Debian 13 guest with the OpenCode desktop app.";
     } else {
         self.detailLabel.text = @"Engine not ready yet. Setup downloads the guest image first. The engine cannot start in this build.";
     }
     // The desktop screen only makes sense once the desktop app is
-    // up (or starting) in Desktop UI mode.
-    BOOL showDesktop = desktop && ([OCEngine shared].state == OCEngineStateRunning || [OCEngine shared].state == OCEngineStateStarting);
+    // up (or starting).
+    BOOL showDesktop = ([OCEngine shared].state == OCEngineStateRunning || [OCEngine shared].state == OCEngineStateStarting);
     self.showDesktopButton.hidden = !showDesktop;
 }
 

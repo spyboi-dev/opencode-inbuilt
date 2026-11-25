@@ -166,8 +166,7 @@ for i in range(1, 8):
 check("no TODO-FILL", "TODO-FILL" not in blob)
 check("no BUILD-NOTE", "BUILD-NOTE" not in blob)
 # New behaviour in this build
-new_strings = ["Install OpenCode", "Choose how OpenCode runs",
-               "Retrying in 60s", "Automatic retry: starting engine",
+new_strings = ["Retrying in 60s", "Automatic retry: starting engine",
                "duplicate install ignored",
                "Auto-start: retrying after a failed start",
                "it tries again by itself",
@@ -187,7 +186,15 @@ new_strings = ["Install OpenCode", "Choose how OpenCode runs",
                "not enough free space",
                "Resuming part",
                "MEMORY WARNING during download",
-               "Download verified"]
+               "Download verified",
+               # Extraction crash fix (2026-11-25)
+               "Archive already downloaded and verified",
+               "Extracting the image",
+               "Extraction:",
+               "Extraction finished",
+               "Background time expired during install",
+               "Install paused",
+               "Install complete"]
 for m in new_strings:
     check(f"new string present: {m}", m in blob)
 # Removed controls must be gone as button titles

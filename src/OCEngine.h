@@ -3,18 +3,13 @@
 // ONE app, real OpenCode inside it. The engine is the Kernarium core:
 // a real Linux 6.18 kernel running a Debian 13 guest in-process, with
 // Node and OpenCode (2.3.0) baked into the guest image. On launch the
-// engine boots the guest and, depending on the engine mode, runs
-// either the OpenCode CLI server or the real OpenCode desktop app:
-//   CLI        - `opencode serve --port 4096 --hostname 0.0.0.0`
-//                with OPENCODE_SERVER_PASSWORD from the Keychain. The
-//                native iOS UI talks to the server at 127.0.0.1:4096
-//                through the vsock bridge (see KernGlue).
-//   Desktop UI - the real OpenCode Linux desktop app runs in the
-//                guest and its window shows through the guest display
-//                (Virtio-GPU to a Metal view). The native UI stays
-//                available; the desktop window is a second surface.
-// The mode is the user's choice, persisted in OCSettings, default
-// CLI. Switching modes restarts the engine in the new mode.
+// engine boots the guest and runs the real OpenCode desktop app: the
+// desktop app starts its server on 4096 (the native iOS UI talks to
+// that same server at 127.0.0.1:4096 through the vsock bridge, see
+// KernGlue) and its window shows through the guest display
+// (Virtio-GPU to a Metal view). The native UI stays available; the
+// desktop window is a second surface. There is no CLI mode any more
+// (removed 2026-11-25): Desktop UI only, always.
 //
 // Guest boot interface: the embedded core provides a guest executor
 // (a block that types a command at the guest console; see KernGlue).
@@ -30,16 +25,12 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-// Engine modes. CLI is the default.
-extern NSString *const OCEngineModeCLI;     // @"cli"
-extern NSString *const OCEngineModeDesktop; // @"desktop"
-
 typedef NS_ENUM(NSInteger, OCEngineState) {
     OCEngineStateNotInstalled, // first launch setup not done
     OCEngineStateInstalling,   // downloading/verifying the guest image
     OCEngineStateInstalled,    // image ready, guest not started
     OCEngineStateStarting,     // guest booting / serve launching
-    OCEngineStateRunning,      // server answering (CLI) / desktop up (Desktop UI)
+    OCEngineStateRunning,      // desktop up, server answering on 4096
     OCEngineStateStopped,      // guest stopped (app killed, iOS suspend)
     OCEngineStateCorePending,  // guest core library not linked in this build
     OCEngineStateError
@@ -114,8 +105,8 @@ typedef void (^OCGuestExecutor)(NSString *command, NSString *workingDirectory,
 // are noted instead of failing.
 - (NSString *)fullLogText;
 // Feed one chunk of guest console output (from KernGlue). Parses
-// PROGRESS / ERROR / `server listening` / `DESKTOP READY` lines and
-// appends the text to the guest console log.
+// PROGRESS / ERROR / `DESKTOP READY` lines and appends the text to
+// the guest console log.
 - (void)handleGuestConsoleText:(NSString *)text;
 
 - (void)refreshState;
@@ -129,13 +120,6 @@ typedef void (^OCGuestExecutor)(NSString *command, NSString *workingDirectory,
 - (BOOL)guestImageInstalled;
 - (void)runFirstLaunchSetupWithProgress:(void (^)(double fraction, NSString *message))progress
                              completion:(void (^)(BOOL done, NSError * _Nullable error))completion;
-// Engine mode: OCEngineModeCLI (default) or OCEngineModeDesktop.
-// Persisted in OCSettings. Setting a different mode while the engine
-// is running or starting restarts the engine in the new mode;
-// otherwise it takes effect on the next start.
-@property (nonatomic, readonly) NSString *engineMode;
-- (void)setEngineMode:(NSString *)mode;
-- (NSString *)serveLaunchCommand; // the exact CLI serve command run inside the guest
 - (NSString *)engineDirectory;    // Documents/Engine
 @end
 
