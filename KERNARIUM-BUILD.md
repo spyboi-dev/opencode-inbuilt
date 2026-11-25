@@ -8,6 +8,191 @@ launch-path hypothesis is closed. The scene investigation (why UIKit
 never called the scene method in the 07:57 run) continues on that
 settled basis.
 
+## Status: BLACK DESKTOP — XORG PROBE LOG CAPTURED, DIAGNOSTICS FRESHNESS FIXED, MODESETTING RETRY — LOCAL BUILD e001c27, verified
+
+User test of 16f1cc2, 2026-11-25 16:22 IST: desktop STILL black.
+He sent all three logs. Files: `engine-3c5f17dc.log` (689 lines,
+combined log spanning 11:31–16:24, the 16f1cc2 run is the tail),
+`guest-0568b28d.log` (5400 lines),
+`display-activity-a8e285f2.log` (558 lines), all in
+`~/workspace/user/files/`. No screenshot was sent with this run.
+The run lived ~2.5 min this time (16:21:58–16:24:46, clean
+shutdown), so the up-to-120 s READY loop and the 12-fetch
+cadence had time to run.
+
+### What the 16f1cc2 logs prove (verified from the files)
+
+1. **The early death detection FIRED — the 16f1cc2 fix is
+   proven.** Guest log line 5334: `sh
+   /tmp/desktop-bootstrap.sh`, line 5336 `SELFTEST fb0 red`,
+   line 5337 `ERROR Xorg died before its socket appeared`
+   with the Xorg stderr tail, then `ERROR Xorg did not
+   start`, `XORG DEAD`, `ERROR Xorg died while waiting for
+   the desktop`, `ERROR Desktop window did not appear
+   (ai.opencode is running but no window is mapped on :0)`,
+   `DESKTOP STATE app=yes windows=0 vt=tty1`. Xorg died
+   within seconds of launch, and the script said so at once
+   instead of burning the 30 s socket wait and the 120 s
+   READY loop in silence.
+2. **Xorg dies with "no screens found", and the stderr tail
+   names no reason.** The tail (guest log lines ~5340–5353)
+   shows only: xorg-server 2:21.1.16-1.3+deb13u4, `(++)
+   Using config directory: "/tmp/xorg.conf.d"`, `(==) Using
+   system config directory "/usr/share/X11/xorg.conf.d"`,
+   `(EE) Fatal server error: (EE) no screens found(EE)`,
+   `Server terminated with error (1)`. No probe lines, no
+   module-load lines, no driver error — Xorg's informational
+   output goes to the detailed log only, and that log is
+   `/var/log/Xorg.0.log`, root-owned and unreadable by the
+   termux snapshot, so every grep of it came back empty
+   (`DIAG Xorg errors: ` empty, `DIAG fbdev driver: `
+   empty in the 16:22:25 fetch and the 16:22:32 console
+   re-emit).
+3. **The repeated fetches ran, but every one returned the
+   first snapshot.** Only one fetch block was ever logged
+   (`[fetch 1]` at 16:22:25, engine log line 658); no fetch
+   2+ block, because the content never changed. The fetch
+   cadence works; the file it reads does not. The diag-loop
+   runs as root, so its `~/desktop-diag.txt` copy lands in
+   `/root/desktop-diag.txt`, while the server reads
+   `/home/termux/desktop-diag.txt` — the termux copy the
+   first (termux-run) snapshot wrote, never refreshed.
+   The console re-emit at 16:22:32 shows the same first
+   snapshot (it runs ~10 s after the loop starts, a race
+   with the loop's second iteration), so it cannot prove
+   whether the loop itself is alive.
+4. **The self-test outcome is still unknown, not failed.**
+   `DIAG selftest: NOT-RUN` in the first snapshot is
+   expected — the snapshot is taken before the self-test
+   runs. The echo `SELFTEST fb0 red` printed (guest log
+   line 5336) but prints regardless (it follows a `;`), so
+   whether the python wrote red (or failed on the same
+   virtual_size path) is unknown; no later snapshot ever
+   reached the server. No screenshot was sent, so whether
+   red showed on screen is unknown.
+5. **ai.opencode IS running but has no display to map onto.**
+   `DESKTOP STATE app=yes windows=0 vt=tty1`: the app
+   process is up, Xorg is dead, so no window can map. The
+   desktop is black because Xorg is dead, not because the
+   app failed to start.
+6. **Host-side image checks (verified, not assumed).**
+   fbdev_drv.so IS present at
+   `/usr/lib/xorg/modules/drivers/fbdev_drv.so` (68,536
+   bytes, needs only libc.so.6); libfbdevhw.so and
+   modesetting_drv.so are present;
+   `/usr/share/X11/xorg.conf.d` holds only 10-amdgpu.conf,
+   10-quirks.conf, 10-radeon.conf, 40-libinput.conf (the
+   amdgpu/radeon files only match their own drivers, no
+   conflicting Device config); `/etc/X11/xorg.conf.d` is
+   empty; the image's /dev is static (fd, null, ptmx, pts,
+   shm, stderr, stdin, stdout — no fb0 node, devtmpfs
+   supplies it at runtime). The kernel registers fb0 every
+   boot (`[drm] fb0: virtio_gpudrmfb frame buffer device`,
+   guest log lines 131, 572, 1042).
+7. Display log: the 16f1cc2 section has ONLY 2D CPU flushes
+   of resource 2 at 1290x2796, ~5/s, through 165 s, no virgl
+   scanout ever.
+
+### Root cause — this round: the probe log is written where the snapshot cannot read it, and the diagnostics copy goes to the wrong home
+
+Not the delivery (proven working), not the fetch cadence
+(it ran), and not the app: (a) Xorg's detailed probe log —
+the only place that names which driver it tried and why it
+refused the screen — goes to `/var/log/Xorg.0.log`, which
+the termux snapshot cannot read, so "no screens found"
+arrives with no reason; (b) the diag-loop's copy goes to
+root's home while the server reads the termux copy, so all
+12 fetches return the first snapshot and the evidence the
+loop writes (self-test outcome, Xorg fate, loop liveness)
+is never read. The fbdev driver itself refuses the screen
+for a reason only the probe log can name, so this build
+captures that log and, in parallel, retries with the driver
+that demonstrably started before (modesetting, socket
+appeared in the c360a14/c9493ce era).
+
+### What changed (commit e001c27, 2 files, +113/-15)
+
+- `src/OCEngine.m` `desktopBootstrap` — Xorg writes its
+  detailed log to /tmp: `-logfile /tmp/Xorg.0.log` on the
+  fbdev start (and `-logfile
+  /tmp/Xorg-modesetting.0.log` on the retry), so the
+  snapshot and the fetch can read it.
+- `src/OCEngine.m` `desktopBootstrap` — snapshot reads the
+  probe logs: the `(EE)` grep and the `DIAG Xorg errors` /
+  `DIAG fbdev driver` lines now read /tmp/Xorg.0.log (not
+  /var/log/Xorg.0.log), with new `Xorg probe (fbdev):` and
+  `Xorg probe (modesetting):` sections printing the
+  FBDEV/modesetting/LoadModule/(EE)/"no screens" lines from
+  both logs. The socket-wait and did-not-start error paths
+  print the probe lines at once too.
+- `src/OCEngine.m` `desktopBootstrap` — diagnostics copy
+  fixed: the snapshot script and the final copy now write
+  to the absolute `/home/termux/desktop-diag.txt` (not `~`)
+  with `chmod 644`, so the root-run loop refreshes the file
+  the server reads. New DIAG lines: `DIAG loop:` (loop
+  alive or DEAD), `DIAG fb0 node:` (`ls -l /dev/fb0`),
+  `DIAG dri:` (`ls /dev/dri/`), `DIAG modesetting
+  driver:`.
+- `src/OCEngine.m` `desktopBootstrap` — modesetting retry:
+  if the fbdev Xorg is dead after the socket wait, the
+  script logs `FBDEV Xorg died, retrying with modesetting`
+  and starts Xorg with its own configdir
+  (/tmp/xorg-modesetting.conf.d, Device Driver
+  "modesetting") and logfile, with the same socket wait +
+  early death detection and `XORG RUNNING (modesetting)` /
+  `XORG DEAD (modesetting)`. If modesetting runs and
+  ai.opencode maps a window, the desktop may appear
+  through the DRM scanout the 2D path carries. If both
+  die, the two probe logs name both causes.
+- `src/OCEngine.m` `desktopBootstrap` — the fb-flush loop
+  now only starts when Xorg is alive AND the driver is
+  fbdev (`XDRIVER` tracks which attempt won): under
+  modesetting X draws into DRM buffers, not /dev/fb0, so
+  the loop would only re-upload the console framebuffer 5
+  times a second.
+- `verify-local.py` — new-string checks for `logfile
+  /tmp/Xorg.0.log`, both `Xorg probe` sections, `DIAG
+  modesetting driver:`, `DIAG fb0 node:`, `DIAG dri:`,
+  `DIAG loop:`, `/home/termux/desktop-diag.txt`,
+  `retrying with modesetting`, `XORG RUNNING
+  (modesetting)`, `xorg-modesetting.conf.d`. ALL PASS (155
+  checks).
+
+Server-file delivery, two-phase bootstrap, fbdev config,
+self-test, chat-opens-desktop navigation,
+runtime/framework, Settings untouched. Nothing merged to
+main. `kernarium-desktop` and termx untouched. The
+bootstrap was extracted from the ObjC literals and parsed
+with `bash -n` before building (116 lines, 7974 bytes);
+the python self-test one-liner was compile-checked
+separately.
+
+Build e001c27, local, 2026-11-25 ~11:11 IST. IPA
+`mac-ipas/OpenCode-iOS-e001c27.ipa`, 25,199,923 bytes,
+SHA-256
+b1e44e0c191996b0ca8dd18b7b9332740906ca5f6bd63c9ce7f19d40ce43dc37.
+GitHub release opencode-e001c27. Staged in
+`~/workspace/goals/opencode-for-ios/files/OpenCode-iOS-e001c27.ipa`.
+
+### Device test (e001c27)
+
+Install over 16f1cc2, do NOT delete the app — the guest image
+is already installed. Tap + on Threads, then LEAVE THE APP
+OPEN at least 2 minutes (the READY loop runs up to 120 s; the
+16f1cc2 run lived 2.5 min), then send a screenshot AND
+engine.log. What to look for: "Server healthy" then
+"Desktop launch started"; "Guest diagnostics (via server)
+[fetch N]:" blocks arriving every 10 s with FRESH content
+this time — Active VT, window count, "DIAG selftest: red
+1290x2796" (or FAILED / NOT-RUN), "DIAG loop: running",
+"DIAG fb0 node:", "DIAG dri:", and the "Xorg probe
+(fbdev):" lines naming why fbdev refused the screen; if
+fbdev dies, "FBDEV Xorg died, retrying with modesetting"
+followed by "XORG RUNNING (modesetting)" (or its probe
+lines if it dies too); "DESKTOP READY" only if a window
+actually maps. If the desktop appears, say which driver
+the log shows — fbdev or modesetting.
+
 ## Status: BLACK DESKTOP — DIAGNOSTICS FETCHED EVERY 10 s, FAIL FAST ON A DEAD XORG — LOCAL BUILD 16f1cc2, verified
 
 User test of 25bb172, 2026-11-25 16:01 IST: desktop STILL black.
