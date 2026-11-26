@@ -284,6 +284,15 @@ new_strings = ["Retrying in 60s", "Automatic retry: starting engine",
                "no shell prompt on the guest console after 30 s",
                "setsid",
                "getty@tty1",
+               # tty1 permission fix (2026-11-26): /dev/tty1 is
+               # root-owned and the termux script cannot open it,
+               # so the bootstrap makes it writable with sudo
+               # chmod 666 before the stty size check and the TUI
+               # launch, and exits instead of launching a TUI
+               # that cannot work when the chmod fails.
+               "tty1 ready (writable for termux)",
+               "ERROR cannot make /dev/tty1 writable",
+               "chmod 666 /dev/tty1",
                "Terminal size:",
                "CLI ready (from guest console)",
                "ERROR CLI did not start",

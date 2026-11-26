@@ -1358,6 +1358,19 @@ static NSString *OCEngineStripANSI(NSString *line) {
     // tty1. The serve ("opencode serve ...") does not match
     // the exact-name pattern, so it is left alone.
     [b appendString:@"sudo pkill -f '^opencode$' 2>/dev/null; true\n"];
+    // /dev/tty1 is root-owned (getty runs as root) and this
+    // script runs as termux, so termux cannot open it: the stty
+    // size check and both TUI launches fail with "cannot open
+    // /dev/tty1: Permission denied" (6c09869 device test,
+    // 2026-11-26 14:38 IST). Make it writable before anything
+    // touches it. /dev is a devtmpfs whose permissions reset on
+    // reboot, so this runs every boot — and the bootstrap runs
+    // every boot. chmod 666, not chown: it leaves ownership
+    // alone, so getty's later reopen is unaffected, and it is
+    // idempotent. If it fails, the TUI cannot start, so the
+    // script restarts getty, prints the terminal marker, and
+    // exits instead of running a launch that cannot work.
+    [b appendString:@"if sudo chmod 666 /dev/tty1 2>/dev/null; then echo \"tty1 ready (writable for termux)\"; else echo \"ERROR cannot make /dev/tty1 writable, TUI cannot start\"; echo \"CLI exited\"; sudo systemctl start getty@tty1 2>/dev/null || true; exit 1; fi\n"];
     // Terminal size: tty1 is the 1290x2796 framebuffer with the
     // kernel's 8x16 font, so it reports 161 cols x 174 rows.
     // Make the size explicit and export it so the TUI lays out
