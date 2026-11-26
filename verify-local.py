@@ -351,6 +351,13 @@ new_strings = ["Retrying in 60s", "Automatic retry: starting engine",
                "resetGuestDataWithError"]
 for m in new_strings:
     check(f"new string present: {m}", m in blob)
+# The official mobile web UI shell (2026-11-26): a WKWebView loading
+# the server's own UI at /, Basic auth answered from the Keychain,
+# deep link to the tapped session (/server/<base64url>/session/<id>).
+for m in ["OCWebUIViewController",
+          "Could not load the mobile UI",
+          "/server/%@/session/%@"]:
+    check(f"new string present: {m}", m in blob)
 # The old plain serve on 0.0.0.0 is gone: it wrote no service
 # registration, so a client would spawn its own sidecar.
 check("no plain serve on 0.0.0.0", "serve --port 4096 --hostname 0.0.0.0" not in blob)
