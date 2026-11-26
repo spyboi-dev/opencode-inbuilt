@@ -311,13 +311,13 @@ new_strings = ["Retrying in 60s", "Automatic retry: starting engine",
                "retrying with modesetting",
                "XORG RUNNING (modesetting)",
                "xorg-modesetting.conf.d",
-               # Fetch fix + maximise + JIT probe (2026-11-25):
-               # the e001c27 "Failed to fetch" error page is the
-               # renderer fetching the desktop's OWN sidecar (its
-               # bundled JS stack proves it: the SDK transport
-               # calls the request-queue fetch, which calls the
-               # preload fetch, which calls the browser fetch to
-               # the sidecar URL from sidecarHttp). A plain serve
+               # Fetch fix + maximise (2026-11-25): the e001c27
+               # "Failed to fetch" error page is the renderer
+               # fetching the desktop's OWN sidecar (its bundled
+               # JS stack proves it: the SDK transport calls the
+               # request-queue fetch, which calls the preload
+               # fetch, which calls the browser fetch to the
+               # sidecar URL from sidecarHttp). A plain serve
                # writes no service registration, so the desktop
                # spawned its own sidecar on 49374 and the fetch
                # failed. Serve now runs in --service mode with
@@ -325,22 +325,36 @@ new_strings = ["Retrying in 60s", "Automatic retry: starting engine",
                # password, so the desktop adopts our already-up
                # server on 4096 instead. The window is maximised
                # with an openbox rule (the app opens 1280x800
-               # by default) plus --start-maximized; the JIT
-               # probe names V8 JIT on/off from the guest.
+               # by default) plus --start-maximized. The V8 JIT
+               # check that 77b9a2f added is removed (2026-11-26):
+               # it answered the question (JIT works, see
+               # KERNARIUM-BUILD.md) and cost ~2-3 s before
+               # serve on every boot.
+               # Boot regression fix (2026-11-26): the health
+               # timer now starts on the guest's "server
+               # listening" marker and probes at once, with a
+               # 20 s fallback if the marker never arrives; the
+               # health probe has a 5 s timeout (a pre-ready
+               # probe hung the full 30 s through the vsock
+               # bridge in 77b9a2f, healthy at 41 s).
                "serve --service",
                "opencode/service.json",
                "--hostname 127.0.0.1",
                "--start-maximized",
                "<maximized>yes</maximized>",
                "openbox maximise rule installed",
-               "JIT probe",
-               "--jitless",
+               "Health probe starting (server listening in guest)",
+               "Health timer fallback",
                "DIAG window:"]
 for m in new_strings:
     check(f"new string present: {m}", m in blob)
 # The old plain serve on 0.0.0.0 is gone: it wrote no service
 # registration, so the desktop spawned its own sidecar.
 check("no plain serve on 0.0.0.0", "serve --port 4096 --hostname 0.0.0.0" not in blob)
+# The V8 JIT check is removed from the boot path (2026-11-26):
+# it answered the question (JIT works) and cost ~2-3 s before serve.
+check("no JIT probe node command", "node --jitless" not in blob)
+check("no JIT probe output marker", "JIT probe default:" not in blob)
 # Removed controls must be gone as button titles
 check("no 'Stop engine' string", "Stop engine" not in blob)
 # Slop removal (2026-11-25): the removed UI strings must be gone

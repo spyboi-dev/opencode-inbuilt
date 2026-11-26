@@ -693,6 +693,16 @@ static NSString *OCEngineStripANSI(NSString *line) {
         if (!self.serverListening) {
             self.serverListening = YES;
             [self appendEngineLogSync:@"Server listening (from guest console)"];
+            // The guest's curl probe already proved /api/info
+            // answers, so start the health timer now and probe
+            // at once — a fixed 5 s tick fired before the server
+            // was ready and hung the full 30 s timeout (77b9a2f:
+            // healthy at 41 s). startHealthTimer is idempotent
+            // and fires the first probe immediately.
+            if (self.state == OCEngineStateStarting) {
+                [self startHealthTimer];
+                [self appendEngineLogSync:@"Health probe starting (server listening in guest)"];
+            }
         }
         return;
     }
@@ -973,7 +983,25 @@ static NSString *OCEngineStripANSI(NSString *line) {
         // ready marker; give the first start 5 minutes before health
         // failures can restart the engine.
         strongSelf.healthGraceUntil = [NSDate dateWithTimeIntervalSinceNow:300];
-        [strongSelf startHealthTimer];
+        // The health timer starts when the guest console reports
+        // "server listening" (see handleGuestConsoleLine), NOT on
+        // a fixed tick: a probe fired before the server is ready
+        // hangs the full request timeout through the vsock bridge
+        // instead of failing fast (77b9a2f: first probe at ~6 s,
+        // server ready at ~8 s, healthy at 41 s). Fallback: if
+        // the console marker never arrives (the console has
+        // dropped output before), start the timer anyway 20 s
+        // after serve launch so the engine cannot stall forever.
+        __weak typeof(self) weakFallback = strongSelf;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(20.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            typeof(self) fallbackSelf = weakFallback;
+            if (!fallbackSelf) return;
+            if (generation != fallbackSelf.serveGeneration) return;
+            if (fallbackSelf.state == OCEngineStateStopped) return;
+            if (fallbackSelf.healthTimer) return;
+            [fallbackSelf appendEngineLog:@"Health timer fallback: no server listening marker in 20 s"];
+            [fallbackSelf startHealthTimer];
+        });
         dispatch_async(dispatch_get_main_queue(), ^{ completion(YES, nil); });
     });
 #else
@@ -1010,17 +1038,14 @@ static NSString *OCEngineStripANSI(NSString *line) {
     // Tools are baked in too; a missing one is logged, never apt-
     // installed at boot (it would vanish on the next reboot anyway).
     [b appendString:@"command -v git >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v rg >/dev/null 2>&1 && command -v gh >/dev/null 2>&1 && command -v bun >/dev/null 2>&1 && echo \"PROGRESS 89 Tools ready\" || echo \"ERROR A baked-in tool is missing (see above)\"\n"];
-    // JIT probe: the guest is a real Linux 6.18 kernel running
-    // native arm64 code (Node is an AArch64 ELF in the image), so
-    // V8 JIT is available in principle — but iOS denies
-    // executable memory to a process without the JIT
-    // entitlement, and this app is ad-hoc signed with none, so
-    // V8 likely runs JITless (the user's "slow without jit").
-    // Two timed loops name it from the guest itself: if the
-    // times match, JIT is off; if default is much faster, it
-    // is on. ~1 s total, before the server starts.
-    [b appendString:@"node -e \"const t=Date.now(); let s=0; for(let i=0;i<2000000;i++) s+=Math.sqrt(i); console.log('JIT probe default: '+(Date.now()-t)+' ms')\"\n"];
-    [b appendString:@"node --jitless -e \"const t=Date.now(); let s=0; for(let i=0;i<2000000;i++) s+=Math.sqrt(i); console.log('JIT probe jitless: '+(Date.now()-t)+' ms')\"\n"];
+    // V8 JIT check removed (2026-11-26): it answered the
+    // question and cost ~2-3 s before serve on every boot.
+    // Two device runs proved JIT works in the guest
+    // (default 308/284 ms vs forced-no-JIT 1448/1513 ms):
+    // LiveContainer launches with a debugger attached, which
+    // grants the whole app process executable memory, guest
+    // included. No separate JIT enabler is needed for the
+    // guest. (See KERNARIUM-BUILD.md.)
     // The vsock proxies: the systemd units are the normal path, but
     // a unit that did not start must not leave the server cut off.
     // A second socat that cannot bind just exits; the first one
@@ -1522,7 +1547,15 @@ static NSString *OCEngineStripANSI(NSString *line) {
 }
 
 - (void)startHealthTimer {
-    [self.healthTimer invalidate];
+    // Idempotent: the "server listening" marker and the 20 s
+    // fallback both call this; only the first one starts the
+    // timer. The first probe fires at once ([timer fire]),
+    // not on the next 5 s tick — the marker already proves
+    // the server answers /api/info in the guest, so the first
+    // probe should succeed in under a second and the engine
+    // goes healthy ~6 s after serve launch, as in the
+    // pre-77b9a2f runs.
+    if (self.healthTimer) return;
     self.healthFailures = 0;
     __weak typeof(self) weakSelf = self;
     self.healthTimer = [NSTimer scheduledTimerWithTimeInterval:5.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
@@ -1589,6 +1622,7 @@ static NSString *OCEngineStripANSI(NSString *line) {
             }
         }];
     }];
+    [self.healthTimer fire];
 }
 
 - (void)checkHealthWithCompletion:(void (^)(BOOL, NSDictionary * _Nullable))completion {

@@ -87,7 +87,16 @@
 #pragma mark - Health, sessions, messages
 
 - (void)healthCheckWithCompletion:(void (^)(BOOL, NSDictionary * _Nullable, NSError * _Nullable))completion {
-    [self get:@"/api/info" completion:^(id json, NSError *error) {
+    // A 5 s timeout, not the shared 30 s: the health probe is
+    // a poll (the 5 s timer retries), and a healthy server
+    // answers /api/info in under a second. A probe fired
+    // before the server is ready hangs the full timeout
+    // through the vsock bridge instead of failing fast
+    // (77b9a2f: first probe hung 30 s, healthy at 41 s),
+    // so 5 s bounds that to one tick. Other calls keep 30 s.
+    NSMutableURLRequest *req = [self requestForPath:@"/api/info" method:@"GET" body:nil];
+    req.timeoutInterval = 5;
+    [self runRequest:req completion:^(id json, NSError *error) {
         if (error) { completion(NO, nil, error); return; }
         completion(YES, [json isKindOfClass:[NSDictionary class]] ? json : @{}, nil);
     }];
