@@ -8,6 +8,45 @@ launch-path hypothesis is closed. The scene investigation (why UIKit
 never called the scene method in the 07:57 run) continues on that
 settled basis.
 
+## Status: BOOT REGRESSION — FIRST PROBE HUNG 30 s, HEALTHY AT 41 s — FIXED IN LOCAL BUILD b115d71, verified
+
+User test of 77b9a2f, 2026-11-26 07:13 IST: "why booting now keep more time like 5x befor the server start at in 10sec now it taking 50-60". He pasted the full engine log (`~/workspace/user/files/Pasted_text-6876e711.txt`, 7344 lines, history from 11:31 Build 5f307ff to the 77b9a2f runs).
+
+### What the log proves (verified from the file)
+
+77b9a2f run 1 (07:07:54): Guest boot started 07:07:55, Guest up 07:08:04 (~9 s), Serve launch started 07:08:04, Server listening (from guest console) 07:08:12 (8 s), then [07:08:41] "Server probe failed: The request timed out.", then [07:08:45] "Server probe: /api/info 200", "Server healthy at 127.0.0.1:4096". Serve launch to healthy = 41 s; app launch to healthy = 51 s. Run 2 (07:11:28) is identical: serve 07:11:39, listening 07:11:47, probe timeout 07:12:15, healthy 07:12:20 (41 s). Baseline before 77b9a2f (4c60469 run): serve 14:44:31, listening 14:44:37, healthy 14:44:37 = 6 s. The server itself starts just as fast; the extra ~35 s is the FIRST health probe timing out (~30 s) and only the retry succeeding. The desktop itself was fine once healthy (run 1: "Desktop ready (from guest console)" 07:08:58, 13 s after healthy).
+
+### Root cause — a 2 s timing shift pushed the first probe before the server was ready, and a pre-ready probe hangs instead of failing fast
+
+Three verified links, each checked against the code/source, not guessed:
+
+1. **The JIT probe (+2 s) moved server-ready past the first probe tick.** The probe ran in phase 1 before serve (OCEngine.m consoleBootstrap) — two node cold starts, ~2-3 s. Boot-to-listening went from 6 s (baseline) to 8 s (77b9a2f). The health timer fires its first probe on a fixed 5 s tick (~6 s after serve launch), so the first probe now lands ~1-2 s BEFORE the server is ready, where before it landed just after.
+2. **A pre-ready probe through the vsock bridge hangs the full request timeout instead of failing fast.** The probe uses `requestForPath` with `req.timeoutInterval = 30` (OCServerClient.m:38) and the `healthProbeInFlight` gate blocks every later 5 s tick while one probe runs. The guest-side curl (direct TCP loopback) got a 200 from /api/info at 07:08:12 while the host probe (via vsock + socat) hung until 07:08:41 — same server, same endpoint, only the transport differs. The server was fine; a connection opened before the server listens sits half-open through the vsock layer instead of surfacing a refusal, and NSURLSession waits out the 30 s. The next tick after the timeout (07:08:45) succeeded in under a second.
+3. **serve --service is NOT the cause.** Verified in the pinned source (`~/workspace/opencode-ios-port/upstream`, commit a6b15d33): `ServerProcess.run` in service mode adds only file reads before listen (ServiceConfig.options/read) plus `Service.incumbent`, which on a fresh boot finds no registration file and returns immediately without any HTTP probe; the service registration itself happens in the `onListen` callback, AFTER listen. The server listens ~6-8 s after launch in both modes. The "run plain serve with a bootstrap-written registration" option was not needed — --service stays, and the fetch fix stands.
+
+### JIT correction — the 77b9a2f inference was wrong: JIT IS working in the guest
+
+The pasted log's guest console lines prove it (both runs): "JIT probe default: 308 ms" vs "JIT probe jitless: 1448 ms" (run 1); "default: 284 ms" vs "jitless: 1513 ms" (run 2). Default is ~5x faster than forced jitless — JIT is on. The 77b9a2f section below says "V8 likely runs JITless" and that fixing JIT needs "StikDebug JIT or a developer-signed build" — that is WRONG and is corrected here. The mechanism (per the corrected record): LiveContainer launches with a debugger attached (its per-app 'Launch with JIT' feature), which sets CS_DEBUGGED and lets the whole app process use executable memory, guest included. The app itself is ad-hoc signed with no entitlements, so without that debugger attachment there would be no JIT — but under LiveContainer the guest has it. No StikJIT or developer-signed build is needed for the guest's JIT. The slowness the user feels is not JIT: it is Electron cold start + first paint under software rendering at 1290x2796, plus the boot waits. The JIT check is removed from the boot path (it answered the question); the numbers are recorded here.
+
+### What changed (commit b115d71, 3 files, +82/-25)
+
+- `src/OCEngine.m` `handleGuestConsoleLine` — the health timer now starts on the guest's bare "server listening" marker (the guest curl probe already proved /api/info answers), not on a fixed tick. The marker handler calls `startHealthTimer` (guarded on state Starting) and logs "Health probe starting (server listening in guest)".
+- `src/OCEngine.m` `startHealthTimer` — idempotent (the marker and the fallback both call it; only the first starts the timer) and fires the first probe at once (`[timer fire]`), not on the next 5 s tick.
+- `src/OCEngine.m` `startEngineWithCompletion` — the fixed-tick timer start is replaced by a 20 s fallback: if the console marker never arrives (the console has dropped output before), the timer starts anyway so the engine cannot stall forever. The fallback logs "Health timer fallback: no server listening marker in 20 s" and only fires when no timer exists yet.
+- `src/OCServerClient.m` `healthCheckWithCompletion` — the health probe now uses a 5 s request timeout (built directly with `requestForPath` + `runRequest`), not the shared 30 s. A healthy server answers /api/info in under a second; 5 s bounds a pre-ready probe to one tick. All other calls keep 30 s.
+- `src/OCEngine.m` `consoleBootstrap` — the V8 JIT check is removed from phase 1 (two node lines + comment). It answered the question (see the correction above) and cost ~2-3 s before serve on every boot. Phase 1 is now 1710 bytes (was 1998); phase 2 unchanged at 8612 bytes.
+- `verify-local.py` — the "JIT probe" / "--jitless" presence checks are replaced by the two new log-line checks ("Health probe starting (server listening in guest)", "Health timer fallback") plus absence checks ("node --jitless", "JIT probe default:"). ALL PASS (167 checks).
+
+Serve --service, the openbox maximise rule, --start-maximized, server-file delivery, two-phase bootstrap, fbdev config, self-test, fb-flush loop, chat-opens-desktop navigation, runtime/framework, Settings untouched. Nothing merged to main. `kernarium-desktop` and termx untouched. Both bootstrap phases were extracted from the ObjC literals and parsed with `bash -n` before building (phase 1: 1710 bytes, phase 2: 8612 bytes).
+
+Build b115d71, local, 2026-11-26 ~01:53 IST. IPA `mac-ipas/OpenCode-iOS-b115d71.ipa`, 25,200,949 bytes, SHA-256 23b7f7a12e38a6d6b6212547beeb65723286c1ad64a5960c6e3d5ecee638d383. GitHub release opencode-b115d71. Staged in `~/workspace/goals/opencode-for-ios/files/OpenCode-iOS-b115d71.ipa`.
+
+Expected timing: serve launch to healthy ~6-7 s (was 41 s), app launch to healthy ~15-16 s (was 51 s). The engine log should now show "Server listening (from guest console)" then "Health probe starting (server listening in guest)" then "Server probe: /api/info 200" and "Server healthy" within ~1 s of each other, with no "Server probe failed" line.
+
+### Device test (b115d71)
+
+Install over 77b9a2f, do NOT delete the app — the guest image is already installed. Tap + on Threads. Time from app open to "Engine running" and send a screenshot AND engine.log. Look for: "Health probe starting (server listening in guest)" right after "Server listening (from guest console)"; "Server healthy" ~6-7 s after "Serve launch started" (not 41 s); no "Server probe failed" line; the desktop fills the screen with no fetch error (the 77b9a2f fixes, unchanged).
+
 ## Status: DESKTOP SHOWED, FETCH ERROR + SMALL WINDOW + SLOW — FIXES IN LOCAL BUILD 77b9a2f, verified
 
 User test of e001c27, 2026-11-25 21:40 IST: the desktop FINALLY
@@ -120,11 +159,13 @@ and never spawns a sidecar.
   but V8 JIT needs host PROT_EXEC, which iOS denies without the
   JIT entitlement, and this app is ad-hoc signed with NO
   entitlements (build-local-kernarium.sh uses -adhoc_codesign,
-  no entitlements file). So V8 likely runs JITless in the guest
-  — the user's "slow without jit" is correct in effect. The fix
-  for JIT itself is an entitlement/sideloading change
-  (StikDebug JIT or a developer-signed build), not a code change
-  here. On this VM the probe discriminates (default 49 ms vs
+  no entitlements file). [CORRECTED 2026-11-26 — see the b115d71
+  section above: this inference was WRONG. The device log proved
+  JIT IS working (default 308/284 ms vs forced-jitless
+  1448/1513 ms), because LiveContainer launches with a debugger
+  attached, which sets CS_DEBUGGED and grants the whole app
+  process executable memory, guest included. No StikJIT or
+  developer-signed build is needed for the guest's JIT.] On this VM the probe discriminates (default 49 ms vs
   jitless 98 ms).
 - **Timing breakdown (evidence).** Guest boot to login prompt
   ~21 s (c360a14 run 12:26:44→12:27:05); serve launch to
