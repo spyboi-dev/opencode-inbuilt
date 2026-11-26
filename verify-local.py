@@ -368,7 +368,20 @@ for m in ["OCT3WebViewController",
           "T3 pairing URL captured",
           "providerInstances",
           "serverUrl",
-          "t3 serve"]:
+          "t3 serve",
+          # The t3 UI wait/poll fix (2026-11-27): dc3caf2 did one
+          # fs read and failed at once when the t3 server was
+          # still starting. The view now polls the pairing-URL
+          # file with a waiting state, surfaces the engine's t3
+          # failure step, and accepts localhost / ?token= URLs.
+          "Starting the t3 server",
+          "t3 UI: waiting for pairing URL",
+          "t3 UI: pairing URL loaded",
+          "t3 UI: t3 failed",
+          "t3 UI: timed out waiting for pairing URL",
+          "t3Failed",
+          "t3FailureMessage",
+          "t3ServerReady"]:
     check(f"new string present: {m}", m in blob)
 for m in ["OCChatViewController",
           "Could not load this chat",

@@ -122,6 +122,18 @@ typedef void (^OCGuestExecutor)(NSString *command, NSString *workingDirectory,
 // between the pairing URL (first open) and the t3 root (later
 // opens, authenticated by the t3_session cookie).
 @property (nonatomic, assign) BOOL t3PairingURLLoaded;
+// t3 server state, surfaced to the chat UI so it can tell
+// "still starting" from "failed" instead of showing one generic
+// error. t3Failed is YES once the bootstrap reported a failure
+// (an "ERROR T3 ..." console line, or the bootstrap file write
+// failing); t3FailureMessage is that step's line, and
+// t3ServerReady is YES once the console printed "T3 server
+// ready". Reset on stop and on serve launch, alongside
+// t3PairingURLLoaded. The failure message never carries the
+// pairing token (the ERROR T3 lines do not include it).
+@property (nonatomic, assign) BOOL t3Failed;
+@property (nonatomic, strong, nullable) NSString *t3FailureMessage;
+@property (nonatomic, assign) BOOL t3ServerReady;
 // First-launch setup: downloads the prebuilt system image
 // (Node + OpenCode baked in) and verifies the SHA-256 of the
 // archive and of the extracted image. Safe to call again; a verified

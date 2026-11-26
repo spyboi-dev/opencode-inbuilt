@@ -783,8 +783,19 @@ static NSString *OCEngineStripANSI(NSString *line) {
         // The t3 milestones belong in the engine log too, not
         // just the guest console: the device test reads the
         // engine log to confirm the t3 server came up. (The
-        // full guest console stays in guest.log.)
+        // full guest console stays in guest.log.) They also set
+        // the t3 state the chat UI reads while it waits for the
+        // pairing URL: ready, or failed with the step that
+        // failed (the ERROR T3 line names it — install, settings
+        // seed, server start, or pairing-URL capture — and never
+        // carries the token).
         [self appendEngineLogSync:clean];
+        if ([clean isEqualToString:@"T3 server ready"]) {
+            self.t3ServerReady = YES;
+        } else if ([clean hasPrefix:@"ERROR T3"]) {
+            self.t3Failed = YES;
+            self.t3FailureMessage = clean;
+        }
         return;
     }
     if ([clean hasPrefix:@"PROGRESS "]) {
@@ -1023,6 +1034,9 @@ static NSString *OCEngineStripANSI(NSString *line) {
     self.cliBootstrapSent = NO;
     self.t3BootstrapSent = NO;
     self.t3PairingURLLoaded = NO;
+    self.t3Failed = NO;
+    self.t3FailureMessage = nil;
+    self.t3ServerReady = NO;
     self.healthProbeInFlight = NO;
     self.lastProbeOK = NO;
     self.serverProbeEverOK = NO;
@@ -1432,7 +1446,15 @@ static NSString *OCEngineStripANSI(NSString *line) {
             });
             return;
         }
-        [strongSelf appendEngineLog:[NSString stringWithFormat:@"T3 bootstrap write failed (%@), continuing without t3", error ? error.localizedDescription : @"no path"]];
+        // The bootstrap file never reached the guest, so the t3
+        // server cannot start on this boot: record the failure
+        // so the chat UI stops waiting early and names the step
+        // instead of polling the full 5 minutes for a file that
+        // will never appear. The CLI still goes.
+        NSString *t3WriteFailure = [NSString stringWithFormat:@"T3 bootstrap write failed (%@), continuing without t3", error ? error.localizedDescription : @"no path"];
+        [strongSelf appendEngineLog:t3WriteFailure];
+        strongSelf.t3Failed = YES;
+        strongSelf.t3FailureMessage = t3WriteFailure;
         [strongSelf deliverCliBootstrapIfNeeded];
     }];
 }
@@ -1640,6 +1662,9 @@ static NSString *OCEngineStripANSI(NSString *line) {
     self.cliBootstrapSent = NO;
     self.t3BootstrapSent = NO;
     self.t3PairingURLLoaded = NO;
+    self.t3Failed = NO;
+    self.t3FailureMessage = nil;
+    self.t3ServerReady = NO;
     self.healthProbeInFlight = NO;
     self.lastProbeOK = NO;
     self.serverProbeEverOK = NO;
