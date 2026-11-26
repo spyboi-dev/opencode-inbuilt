@@ -8,6 +8,37 @@ launch-path hypothesis is closed. The scene investigation (why UIKit
 never called the scene method in the 07:57 run) continues on that
 settled basis.
 
+## Status: CLI TUI COULD NOT OPEN /dev/tty1 — PERMISSION FIX — LOCAL BUILD ae76366, verified
+
+Device test of 6c09869, 2026-11-26 14:38 IST: the CLI TUI did not start. Screenshot plus the OpenCode logs (not TermX's this time): engine-7b2ad68d.log, guest-f5bd320d.log, display-activity-f0ae26bd.log. The run IS 6c09869 ("Overlay moved from tmp (first boot after the move)", "Localhost proxy: listening on 127.0.0.1 for ports 3000, 3773, 5000, 8080, 8888", "Shell prompt seen on the guest console", "Phase 1 sent (shell prompt seen)", "Server listening", "Server healthy at 127.0.0.1:4096", "CLI launch started"). The server, proxy, overlay migration, and framework all worked. The c7de65f shell-prompt gating WORKED.
+
+### Root cause — /dev/tty1 is root-owned and the termux script cannot open it
+
+The guest log tail (14:37 run) shows the failure after `sh /tmp/cli-bootstrap.sh`:
+- `/tmp/cli-bootstrap.sh: 28: cannot open /dev/tty1: Permission denied` (twice — the stty size check, which opens /dev/tty1 twice)
+- `Terminal size: 174 rows x 161 cols (tty1)` (the fallback size still printed)
+- `/tmp/cli-bootstrap.sh: 31: cannot open /dev/tty1: Permission denied` (the setsid TUI launch)
+- `WARN setsid TUI did not start, retrying without setsid`
+- `/tmp/cli-bootstrap.sh: 33: cannot open /dev/tty1: Permission denied` (the plain-redirect fallback)
+- `ERROR CLI did not start` / `CLI exited`
+
+The engine log diagnostics (fetch 3-7) confirm `DIAG server: running`, `DIAG tui: down`, Active VT tty1, and the run ends `[14:38:43] CLEAN SHUTDOWN`. The screenshot matches: tty1 shows a single "termx login:" line and black below (getty restarted after the TUI failed, per the script's `sudo systemctl start getty@tty1` on TUI exit).
+
+Why: /dev/tty1 is root-owned (getty runs as root) and the termux user cannot open it. The script already uses passwordless sudo for `systemctl stop getty@tty1` and `pkill`, so sudo works.
+
+### What changed (commit ae76366, 2 files, +22/-0)
+
+- **tty1 writable** (`src/OCEngine.m` cliBootstrap): after stopping getty@tty1 and killing a stale TUI, and BEFORE the stty size check and the TUI launch, the script runs `sudo chmod 666 /dev/tty1`. chmod 666, not chown: it leaves ownership alone, so getty's later reopen is unaffected, and it is idempotent. /dev is a devtmpfs whose permissions reset on reboot, so this runs every boot — and the bootstrap runs every boot. The TUI still runs as termux (same user as the server, same home and config) — it is NOT run as root via sudo, or root-owned TUI state and files would cause permission problems later. The setsid launch and the plain-redirect fallback are unchanged.
+- **Failure path**: if the chmod fails, the script logs "ERROR cannot make /dev/tty1 writable, TUI cannot start", prints the "CLI exited" terminal marker, restarts getty@tty1, and exits instead of running a launch that cannot work.
+- `verify-local.py`: 3 new markers ("tty1 ready (writable for termux)", "ERROR cannot make /dev/tty1 writable", "chmod 666 /dev/tty1"). ALL PASS, 166 checks.
+- No image change, no framework change (still the fork build, API 46), no persistence change.
+
+Build ae76366, local, 2026-11-26 ~14:43 IST (39 s). IPA `mac-ipas/OpenCode-iOS-ae76366.ipa`, 25,241,232 bytes, SHA-256 225677d5d89a2aa1106488918bad4456b9561e7d9a9e6268875c6c35b84aca24. GitHub release opencode-ae76366. Staged in `~/workspace/goals/opencode-for-ios/files/OpenCode-iOS-ae76366.ipa`. Clean build, no warnings.
+
+### Device test (ae76366)
+
+Install over 6c09869, do NOT delete the app — the guest image is already installed. Open the Terminal view (Engine tab → Show terminal, or tap + on Threads). The CLI TUI should be up AND visible. Type in it via the Keyboard button. Look for "tty1 ready (writable for termux)" then "Terminal size: 174 rows x 161 cols (tty1)" and "CLI ready (from guest console)"; the diagnostics blocks should name DIAG server: running, DIAG tui: running. Send a screenshot AND the OpenCode engine.log — explicitly the OpenCode app's log, not TermX's.
+
 ## Status: PERSISTENT OVERLAY — GUEST DATA SURVIVES REBOOTS — LOCAL BUILD 6c09869, verified
 
 Persistence is solved (user direction 2026-11-26): sessions, logins and /root/Projects no longer vanish every guest reboot. The app change that makes the TermX persistent-upper patch (already in the fork framework from 15a5747) actually work: the overlay file is created once and reused, instead of being deleted and recreated on every boot.
