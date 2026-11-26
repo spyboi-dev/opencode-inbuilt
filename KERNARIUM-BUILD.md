@@ -1,3 +1,33 @@
+## Status: OFFICIAL MOBILE UI IN A NATIVE SHELL — LOCAL BUILD bb7a3d2, verified
+
+User direction 2026-11-26: "yup use opencode official mobile ui for ios", then "go to opencode repo u can find there", then he sent https://github.com/Shahfarzane/opencode-mobile. The parent re-checked: the opencode-ai org still has only opencode and homebrew-tap (no mobile repo), and opencode-ai/opencode has no mobile paths. The official mobile UI is the mobile-responsive web UI inside packages/app of the TypeScript repo (anomalyco/opencode): mobile-drawer.tsx, mobile-panel-drawer.tsx, mobile-tabs-machine.ts, e2e mobile-*.spec.ts. The server serves it at /.
+
+### Why the official UI, not Shahfarzane
+
+The Shahfarzane app (fork of OpenChamber, Expo/React Native, packages/mobile) was read in full as a reference: its API client uses Bearer-token auth and OpenChamber-server endpoints (/api/fs/cwd, /api/config/settings, POST /api/session/:id/prompt_async, permission .../respond, messages shaped {info, parts}). None of that matches our server: OpenCode 2.3.0 uses HTTP Basic auth, has no prompt_async endpoint (verified absent from the pinned a6b15d33 source), replies to permission at .../reply, and shapes messages as {type, content:[...]}. Its client can only point at an OpenChamber web server on a computer (port 3000), which would need a new guest service and an image rebuild. It is also React Native, which does not fit this native ObjC app. The official UI matches the pinned server exactly and needs no extra layer: the server already serves it. The Shahfarzane repo stays a design reference only (its tabs, chat, terminal and git views); no code from it is in this repo.
+
+### What the server serves, verified from the pinned 2.3.0 source (a6b15d33)
+
+- `packages/cli/src/services/web-ui.ts` (WebUi handler wrapping serve): every path that is not /api*, /auth* or /openapi.json returns the embedded packages/app build, with an SPA fallback to index.html. GET http://127.0.0.1:4096/ serves the UI, before API authentication, so a signed-out browser gets the app's sign-in screen.
+- The mobile layout is the responsive app shell at phone width (mobile drawers, mobile tabs machine); a WKWebView is phone-width, so it renders the mobile layout.
+- Session deep link: /server/<key>/session/<id>, key = base64url (no padding) of the server URL (packages/app src/shell/routes/session.ts sessionHref; the key for an http connection is its URL, runtime/server/registry.tsx ServerConnection.key). For our server that is /server/aHR0cDovLzEyNy4wLjAuMTo0MDk2/session/<id>.
+- Auth: HTTP Basic, realm "Secure Area" (packages/server/src/middleware/authorization.ts). The /api/* fetch/XHR calls from the UI hit the same challenge.
+- API endpoints used by the UI (and already by the native client): GET /api/session, POST /api/session, GET /api/session/:id/message, POST /api/session/:id/prompt {text}, POST /api/session/:id/model, GET /api/model, GET /api/event (SSE: session.text.delta, session.step.streamed, session.message.content.updated, session.tool.*, session.execution.*).
+
+### What changed (commit bb7a3d2, 6 files, +208/-14)
+
+- **New shell** (`src/OCWebUIViewController.h/.m`): a WKWebView loading the server URL from OCSettings (http://127.0.0.1:4096), or the session deep link when opened with a session ID. Basic auth is answered in `webView:didReceiveAuthenticationChallenge:` with NSURLCredential user "opencode", password from [OCSettings serverPassword] (the same Keychain password the native UI uses), session persistence, one attempt only (a rejected credential cancels instead of looping). Link taps to another host are cancelled (the shell has no address bar, so leaving would strand the user away from the chat). A failed load shows "Could not load the mobile UI. Start the engine and try again." with a Retry button instead of a blank screen. Title "Chat", reload button, hidesBottomBarWhenPushed.
+- **Threads** (`src/OCSessionsViewController.m` openSession): tapping a thread (or + for a new chat) now pushes the web UI at that session instead of the Terminal. The Terminal view is untouched and stays reachable from the Engine tab (Show terminal). The native OCChatViewController stays in the codebase as the fallback.
+- **Build** (`build-local-kernarium.sh`): OCWebUIViewController added to the compile and link lists. `verify-local.py`: 3 new markers (OCWebUIViewController, "Could not load the mobile UI", "/server/%@/session/%@"). ALL PASS, 170 checks.
+- README: "The chat opens the OpenCode terminal." → tapping a thread opens the official mobile UI; the terminal stays under Engine → Show terminal.
+- No image change, no framework change (still the fork build, API 46), no Settings change, no bootstrap change. Nothing merged to main. `kernarium-desktop` and termx untouched.
+
+Build bb7a3d2, local, 2026-11-26 ~15:25 IST (32 s). IPA `mac-ipas/OpenCode-iOS-bb7a3d2.ipa`, 25,246,262 bytes, SHA-256 9f0dc0f8205cd375a81eaed8ebeccb7b9b3c624fe88ac919fd9bd1705ab2facc. GitHub release opencode-bb7a3d2. Staged in `~/workspace/goals/opencode-for-ios/files/OpenCode-iOS-bb7a3d2.ipa`. One pre-existing compiler warning (sign-compare at OCEngine.m:603, log-tail helper, not in this diff) — build exits 0.
+
+### Device test (bb7a3d2)
+
+Install over ae76366, do NOT delete the app — the guest image is already installed. On Threads, tap a thread (or + for a new chat). The official mobile UI should open in the phone layout: session list / chat with the composer and model picker, no sign-in screen. Send a real message and confirm the streamed reply appears. The Terminal still works from the Engine tab → Show terminal. Send a screenshot AND the OpenCode engine.log — explicitly the OpenCode app's log, not TermX's. If the UI shows a sign-in screen instead, the Basic-auth challenge answer missed; the engine log plus a screenshot of that screen names it. If it shows "Could not load the mobile UI", the engine was not up when the view opened — tap Retry.
+
 ## Standing direction (user, 2026-11-22): LiveContainer is NOT the issue
 
 The user runs the app as a LiveContainer guest. That is the settled
