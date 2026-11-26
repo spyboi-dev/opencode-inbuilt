@@ -351,14 +351,29 @@ new_strings = ["Retrying in 60s", "Automatic retry: starting engine",
                "resetGuestDataWithError"]
 for m in new_strings:
     check(f"new string present: {m}", m in blob)
-# The native chat thread (2026-11-26): Threads taps open
-# OCChatViewController, linked to the already-running engine with
-# Basic auth from the Keychain. A failed load shows a tap-to-retry
-# empty state, never a pairing/connect screen.
+# The t3code chat UI (2026-11-26): Threads taps open
+# OCT3WebViewController, a WKWebView shell over the t3 server the
+# engine starts in the guest (127.0.0.1:3773, via the localhost
+# proxy), wired to our OpenCode server on 4096 through the
+# provider settings the bootstrap seeds. First open per engine
+# run loads the one-time pairing URL the bootstrap captured;
+# later opens load the t3 root with the t3_session cookie. A
+# failed load shows a retry screen, never a pairing/connect
+# screen. The basic native chat (OCChatViewController) is deleted.
+for m in ["OCT3WebViewController",
+          "Could not load the t3 UI",
+          "t3-pairing-url",
+          "http://127.0.0.1:3773",
+          "T3 Code server is ready",
+          "T3 pairing URL captured",
+          "providerInstances",
+          "serverUrl",
+          "t3 serve"]:
+    check(f"new string present: {m}", m in blob)
 for m in ["OCChatViewController",
           "Could not load this chat",
           "tap here to retry"]:
-    check(f"new string present: {m}", m in blob)
+    check(f"no native chat leftover: {m}", m not in blob)
 # The WKWebView shell was rejected on device (it opened the web UI's
 # "Connect to a server" pairing screen) and is deleted: its class,
 # its load-error string and its session deep link must be gone.

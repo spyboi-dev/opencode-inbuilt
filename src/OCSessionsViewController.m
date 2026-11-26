@@ -1,6 +1,6 @@
 // OCSessionsViewController - list of OpenCode sessions from the in-app engine.
 #import "OCSessionsViewController.h"
-#import "OCChatViewController.h"
+#import "OCT3WebViewController.h"
 #import "OCEngineViewController.h"
 #import "OCServerClient.h"
 #import "OCSettings.h"
@@ -151,28 +151,31 @@ static NSString *OCGreetingForNow(void) {
 }
 
 - (void)newChat {
-    [[self client] createSessionWithTitle:nil agent:[OCSettings shared].agent completion:^(NSDictionary *session, NSError *error) {
-        if (error || !session) {
-            // No modal for this normal state: the engine is not
-            // running. Say so in the status line instead.
-            self.statusLabel.text = @"Could not start a chat. Start the engine first.";
-            return;
-        }
-        [self openSession:session];
-        [self reloadSessions];
-    }];
+    // t3 manages its own threads: + opens the t3 UI root and the
+    // user starts the thread there, instead of creating an empty
+    // OpenCode session first.
+    [self openT3Chat];
 }
 
 - (void)openSession:(NSDictionary *)session {
-    // User decision (2026-11-26): tapping a chat opens the native
-    // chat thread, linked to the already-running engine with Basic
-    // auth from the Keychain. No pairing, no connect screen, no QR,
-    // no sign-in. The WKWebView shell (OCWebUIViewController) was
-    // rejected on device test 2026-11-26: it opened the web UI's
-    // "Connect to a server" pairing screen instead of a chat, and
-    // is deleted. The Terminal stays reachable from the Engine tab
-    // (Show terminal).
-    OCChatViewController *chat = [[OCChatViewController alloc] initWithSession:session];
+    // User decision (2026-11-26): the basic native chat is
+    // removed; tapping a thread opens t3code's UI instead
+    // (https://github.com/pingdotgg/t3code), served by the t3
+    // server the engine starts in the guest and wired to our
+    // OpenCode server. t3 threads are t3-managed, not OpenCode
+    // sessions, so there is no 1:1 mapping: the tap opens the
+    // t3 UI root (its own thread list) and the user picks or
+    // starts a thread there. No pairing, no connect screen, no
+    // QR, no sign-in: the pairing URL is loaded
+    // programmatically on the first open per engine run. The
+    // Terminal stays reachable from the Engine tab (Show
+    // terminal).
+    (void)session;
+    [self openT3Chat];
+}
+
+- (void)openT3Chat {
+    OCT3WebViewController *chat = [[OCT3WebViewController alloc] init];
     [self.navigationController pushViewController:chat animated:YES];
 }
 

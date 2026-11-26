@@ -43,6 +43,12 @@ static NSString *const kGuestImageInstalled = @"oc.guestImageInstalled";
 // succeeds, so the shell is idle and the tty buffer cannot drop
 // the middle of a paste (977334d).
 @property (nonatomic, assign) BOOL cliBootstrapSent;
+// YES once the t3 bootstrap (phase 2a) has been sent to the
+// guest console. The t3 server needs the OpenCode server up
+// first, so it goes on the first healthy probe, before the CLI
+// (phase 2b), which waits for the t3 script's DONE marker on the
+// console (see handleGuestConsoleLine).
+@property (nonatomic, assign) BOOL t3BootstrapSent;
 // YES once the CLI TUI reported ready.
 @property (nonatomic, assign) BOOL cliReady;
 // YES once the guest console has shown the autologin shell prompt
@@ -760,6 +766,27 @@ static NSString *OCEngineStripANSI(NSString *line) {
         }
         return;
     }
+    if ([clean isEqualToString:@"T3 BOOTSTRAP DONE"]) {
+        // Phase 2a finished (installed/seeded/started, or failed
+        // gracefully): the console shell is idle again, so phase
+        // 2b (the CLI) can go now. The t3 script runs in the
+        // foreground, so typing the CLI line earlier would have
+        // queued it behind the script — this marker is the
+        // handoff. Exact match only: the one-line `sh` command
+        // never contains the marker.
+        [self deliverCliBootstrapIfNeeded];
+        return;
+    }
+    if ([clean isEqualToString:@"T3 server ready"] ||
+        [clean isEqualToString:@"T3 pairing URL captured"] ||
+        [clean hasPrefix:@"ERROR T3"]) {
+        // The t3 milestones belong in the engine log too, not
+        // just the guest console: the device test reads the
+        // engine log to confirm the t3 server came up. (The
+        // full guest console stays in guest.log.)
+        [self appendEngineLogSync:clean];
+        return;
+    }
     if ([clean hasPrefix:@"PROGRESS "]) {
         NSArray<NSString *> *parts = [clean componentsSeparatedByString:@" "];
         if (parts.count >= 3) {
@@ -994,6 +1021,8 @@ static NSString *OCEngineStripANSI(NSString *line) {
     self.guestDiagnosticsFetchAttempts = 0;
     self.guestDiagnosticsRetryPending = NO;
     self.cliBootstrapSent = NO;
+    self.t3BootstrapSent = NO;
+    self.t3PairingURLLoaded = NO;
     self.healthProbeInFlight = NO;
     self.lastProbeOK = NO;
     self.serverProbeEverOK = NO;
@@ -1215,14 +1244,14 @@ static NSString *OCEngineStripANSI(NSString *line) {
     return b;
 }
 
-// The CLI bootstrap (phase 2): everything after the server
+// The CLI bootstrap (phase 2b): everything after the server
 // is up. Sent only after the /api/info probe first succeeds, so
 // the guest shell is idle at its prompt and consumes each line
 // as it arrives. The TUI runs in the foreground of the console
 // shell (see cliBootstrap): the only long foreground command in
 // the script is the TUI itself, and the script's `wait` keeps
 // the console shell there until the TUI exits.
-// Phase 2 delivery: the CLI script goes to the guest as a
+// Phase 2b delivery: the CLI script goes to the guest as a
 // file, not as typed console input. Typing a multi-KB script
 // into the tty dropped bytes even into an idle shell (df597d2
 // logs: the diag-snapshot heredoc opener was lost so the script
@@ -1239,6 +1268,175 @@ static NSString *OCEngineStripANSI(NSString *line) {
 // be split. If the write fails the old console typing is the
 // fallback, so a surprise in the experimental endpoint leaves
 // the CLI delayed rather than unlaunched.
+// Send the CLI bootstrap (phase 2b) once, if it has not been
+// sent yet for this serve attempt. Called from the t3 DONE
+// console marker, from the t3 watchdog, and from the t3 write
+// fallback: whichever fires first sends it, the others are
+// no-ops. Main queue only (console lines and the watchdog both
+// run there), so the check-and-set cannot race.
+- (void)deliverCliBootstrapIfNeeded {
+    if (self.cliBootstrapSent) return;
+    if (self.state == OCEngineStateStopped) return;
+    self.cliBootstrapSent = YES;
+    [self deliverCliBootstrap];
+}
+
+// The t3 server bootstrap (phase 2a): install the t3 server if
+// it is missing, seed its OpenCode provider settings, start it
+// on 127.0.0.1:3773, and capture its one-time pairing URL for
+// the chat UI. Delivered as a file like the CLI script (see
+// deliverCliBootstrap) and run in the FOREGROUND of the console
+// shell, so its progress ("T3 server ready", "T3 pairing URL
+// captured") lands in the console log; the CLI waits for the
+// DONE marker the trap prints on every exit path. Any failure
+// here logs a clear ERROR and exits 0: the engine (opencode
+// serve + CLI terminal) must keep working without t3.
+//
+// Wiring (t3code 0.1.12, pingdotgg/t3code): the t3 server's
+// OpenCode provider is pointed at our server through its
+// settings file (~/.t3/userdata/settings.json,
+// providerInstances.opencode, driver "opencode", serverUrl
+// http://127.0.0.1:4096, serverPassword the same Keychain
+// password the bootstrap already uses). For an external server
+// the password must come from the settings — there is no env
+// fallback — so it is seeded here, merged with any existing
+// settings. The server binds 127.0.0.1 explicitly (loopback
+// auth policy) on port 3773, which the localhost proxy already
+// forwards, so the phone reaches it at 127.0.0.1:3773. The
+// pairing URL is written to ~/.t3-pairing-url (the token is
+// never echoed into the log) and the app reads it back through
+// the OpenCode server's file API.
+// Install: t3 0.1.12, linux-arm64 tarball (~177 MB), once; it
+// is cached in the persistent overlay (~/.t3), so later boots
+// skip the download. T3CODE_VERSION is pinned.
+- (NSString *)t3Bootstrap {
+    NSMutableString *b = [NSMutableString string];
+    [b appendString:@"#!/bin/sh\n"];
+    [b appendString:@"trap 'echo \"T3 BOOTSTRAP DONE\"' EXIT\n"];
+    [b appendString:@"echo \"T3 Code: bootstrap starting\"\n"];
+    [b appendString:@"T3BIN=\"$HOME/.local/bin/t3\"\n"];
+    [b appendString:@"if ! [ -x \"$T3BIN\" ]; then\n"];
+    [b appendString:@"  echo \"T3 Code: installing t3 0.1.12 (~177 MB, first boot only)...\"\n"];
+    [b appendString:@"  if curl -fsSL https://t3.codes/install.sh | T3CODE_VERSION=0.1.12 T3CODE_HOME=\"$HOME/.t3\" T3CODE_INSTALL_BIN_DIR=\"$HOME/.local/bin\" sh >/tmp/t3-install.log 2>&1; then\n"];
+    [b appendString:@"    echo \"T3 Code: install finished\"\n"];
+    [b appendString:@"  else\n"];
+    [b appendString:@"    echo \"ERROR T3 Code install failed (see /tmp/t3-install.log), continuing without t3\"\n"];
+    [b appendString:@"    exit 0\n"];
+    [b appendString:@"  fi\n"];
+    [b appendString:@"fi\n"];
+    [b appendString:@"if ! [ -x \"$T3BIN\" ]; then\n"];
+    [b appendString:@"  echo \"ERROR T3 Code binary missing after install, continuing without t3\"\n"];
+    [b appendString:@"  exit 0\n"];
+    [b appendString:@"fi\n"];
+    [b appendString:@"if [ -z \"$OPENCODE_SERVER_PASSWORD\" ]; then\n"];
+    [b appendString:@"  echo \"ERROR T3 Code: no server password in this shell, continuing without t3\"\n"];
+    [b appendString:@"  exit 0\n"];
+    [b appendString:@"fi\n"];
+    // Seed the provider settings with python3 (present in the
+    // guest; phase 1 checks it). Merged with any existing
+    // settings.json, never overwritten wholesale. The password
+    // reaches python only as $OPENCODE_SERVER_PASSWORD, so the
+    // literal never lands in the script file or the console
+    // transcript.
+    [b appendString:@"cat > /tmp/t3-settings.py <<'PYEOF'\n"];
+    [b appendString:@"import json, os\n"];
+    [b appendString:@"home = os.path.expanduser(\"~\")\n"];
+    [b appendString:@"path = os.path.join(home, \".t3\", \"userdata\", \"settings.json\")\n"];
+    [b appendString:@"os.makedirs(os.path.dirname(path), exist_ok=True)\n"];
+    [b appendString:@"settings = {}\n"];
+    [b appendString:@"if os.path.exists(path):\n"];
+    [b appendString:@"    try:\n"];
+    [b appendString:@"        with open(path) as f:\n"];
+    [b appendString:@"            settings = json.load(f)\n"];
+    [b appendString:@"    except Exception:\n"];
+    [b appendString:@"        settings = {}\n"];
+    [b appendString:@"if not isinstance(settings, dict):\n"];
+    [b appendString:@"    settings = {}\n"];
+    [b appendString:@"instances = settings.get(\"providerInstances\")\n"];
+    [b appendString:@"if not isinstance(instances, dict):\n"];
+    [b appendString:@"    instances = {}\n"];
+    [b appendString:@"instances[\"opencode\"] = {\n"];
+    [b appendString:@"    \"driver\": \"opencode\",\n"];
+    [b appendString:@"    \"enabled\": True,\n"];
+    [b appendString:@"    \"config\": {\n"];
+    [b appendString:@"        \"enabled\": True,\n"];
+    [b appendString:@"        \"binaryPath\": \"opencode\",\n"];
+    [b appendString:@"        \"serverUrl\": \"http://127.0.0.1:4096\",\n"];
+    [b appendString:@"        \"serverPassword\": os.environ.get(\"OPENCODE_SERVER_PASSWORD\", \"\"),\n"];
+    [b appendString:@"        \"customModels\": [],\n"];
+    [b appendString:@"    },\n"];
+    [b appendString:@"}\n"];
+    [b appendString:@"settings[\"providerInstances\"] = instances\n"];
+    [b appendString:@"with open(path, \"w\") as f:\n"];
+    [b appendString:@"    json.dump(settings, f, indent=2)\n"];
+    [b appendString:@"print(\"T3 settings seeded\")\n"];
+    [b appendString:@"PYEOF\n"];
+    [b appendString:@"if ! OPENCODE_SERVER_PASSWORD=\"$OPENCODE_SERVER_PASSWORD\" python3 /tmp/t3-settings.py; then\n"];
+    [b appendString:@"  echo \"ERROR T3 Code settings seed failed, continuing without t3\"\n"];
+    [b appendString:@"  exit 0\n"];
+    [b appendString:@"fi\n"];
+    // A t3 server from this boot may already be up (engine
+    // restart on a live guest): reuse it instead of failing to
+    // bind. Either way the ready wait and the pairing-URL
+    // capture below run against the live server's log.
+    [b appendString:@"if pgrep -f 't3 serve' >/dev/null 2>&1; then\n"];
+    [b appendString:@"  echo \"T3 server already running\"\n"];
+    [b appendString:@"else\n"];
+    [b appendString:@"  rm -f /home/termux/.t3-pairing-url\n"];
+    [b appendString:@"  echo \"T3 Code: starting server on 127.0.0.1:3773...\"\n"];
+    [b appendString:@"  nohup \"$T3BIN\" serve --host 127.0.0.1 --port 3773 >/tmp/t3-serve.log 2>&1 &\n"];
+    [b appendString:@"fi\n"];
+    [b appendString:@"for i in $(seq 1 30); do grep -q \"T3 Code server is ready\" /tmp/t3-serve.log 2>/dev/null && break; sleep 2; done\n"];
+    [b appendString:@"if ! grep -q \"T3 Code server is ready\" /tmp/t3-serve.log 2>/dev/null; then\n"];
+    [b appendString:@"  echo \"ERROR T3 server did not become ready (see /tmp/t3-serve.log), continuing without t3\"\n"];
+    [b appendString:@"  exit 0\n"];
+    [b appendString:@"fi\n"];
+    [b appendString:@"echo \"T3 server ready\"\n"];
+    // The pairing URL carries a one-time token in its fragment:
+    // it goes to the file only, never to an echo. The app reads
+    // the file back through the OpenCode server's file API.
+    [b appendString:@"PAIRING_URL=$(grep \"Pairing URL:\" /tmp/t3-serve.log 2>/dev/null | head -1 | sed 's/.*Pairing URL: *//')\n"];
+    [b appendString:@"if [ -n \"$PAIRING_URL\" ]; then\n"];
+    [b appendString:@"  printf '%s' \"$PAIRING_URL\" > /home/termux/.t3-pairing-url\n"];
+    [b appendString:@"  chmod 644 /home/termux/.t3-pairing-url\n"];
+    [b appendString:@"  echo \"T3 pairing URL captured\"\n"];
+    [b appendString:@"else\n"];
+    [b appendString:@"  echo \"ERROR T3 pairing URL not found in /tmp/t3-serve.log, continuing without t3\"\n"];
+    [b appendString:@"  exit 0\n"];
+    [b appendString:@"fi\n"];
+    return b;
+}
+
+// Deliver the t3 bootstrap (phase 2a) as a file through the
+// server's file API, then run it in the foreground of the
+// console shell. If the write fails, the engine continues
+// without t3 and the CLI still goes. A 5 min watchdog sends
+// the CLI anyway, so a t3 script that hangs cannot stall the
+// terminal forever; the typed CLI line queues in the tty input
+// buffer and runs when the script exits.
+- (void)deliverT3Bootstrap {
+    OCSettings *settings = [OCSettings shared];
+    OCServerClient *client = [[OCServerClient alloc] initWithServerURL:settings.serverURL password:[settings serverPassword]];
+    NSData *data = [[self t3Bootstrap] dataUsingEncoding:NSUTF8StringEncoding];
+    __weak typeof(self) weakSelf = self;
+    [client writeFileAtPath:@"/tmp/t3-bootstrap.sh" content:data completion:^(NSString * _Nullable resolvedPath, NSError * _Nullable error) {
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        if (strongSelf.state == OCEngineStateStopped) return;
+        if (!error && resolvedPath.length) {
+            [strongSelf appendEngineLog:@"T3 bootstrap started"];
+            [[OCKernGlue shared] sendConsoleText:@"sh /tmp/t3-bootstrap.sh"];
+            __weak typeof(self) weakWatchdog = strongSelf;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(300.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                [weakWatchdog deliverCliBootstrapIfNeeded];
+            });
+            return;
+        }
+        [strongSelf appendEngineLog:[NSString stringWithFormat:@"T3 bootstrap write failed (%@), continuing without t3", error ? error.localizedDescription : @"no path"]];
+        [strongSelf deliverCliBootstrapIfNeeded];
+    }];
+}
+
 - (void)deliverCliBootstrap {
     OCSettings *settings = [OCSettings shared];
     OCServerClient *client = [[OCServerClient alloc] initWithServerURL:settings.serverURL password:[settings serverPassword]];
@@ -1440,6 +1638,8 @@ static NSString *OCEngineStripANSI(NSString *line) {
     self.guestDiagnosticsFetchAttempts = 0;
     self.guestDiagnosticsRetryPending = NO;
     self.cliBootstrapSent = NO;
+    self.t3BootstrapSent = NO;
+    self.t3PairingURLLoaded = NO;
     self.healthProbeInFlight = NO;
     self.lastProbeOK = NO;
     self.serverProbeEverOK = NO;
@@ -1479,22 +1679,38 @@ static NSString *OCEngineStripANSI(NSString *line) {
                     strongSelf.serveProgressDone = YES;
                     [strongSelf setServeProgress:1.0 status:@"Engine running"];
                     [strongSelf appendEngineLog:@"Server healthy at 127.0.0.1:4096"];
-                    // Phase 2 of the bootstrap: the CLI section
-                    // goes now, not with the serve launch — and not
-                    // as typed console input. Typing the ~4.5 KB
-                    // script dropped bytes even into a ready shell
-                    // (df597d2: the diag-snapshot heredoc opener
-                    // was lost so the script was never written, the
-                    // fbdev.conf heredoc was mangled, and the
-                    // ai.opencode line split mid-flag so `gpu`
-                    // exited 127 and the desktop never started).
-                    // The server answering means it can receive
-                    // the script as a file, so deliverCli-
-                    // Bootstrap writes it through the server's
-                    // file API and types only the one-line `sh`
-                    // command. 2 s later, so the curl loop has
-                    // finished breaking.
-                    if (!strongSelf.cliBootstrapSent) {
+                    // Phase 2 of the bootstrap goes now, not with
+                    // the serve launch — and not as typed console
+                    // input. Typing a multi-KB script dropped
+                    // bytes even into a ready shell (df597d2: the
+                    // diag-snapshot heredoc opener was lost so the
+                    // script was never written, the fbdev.conf
+                    // heredoc was mangled, and the ai.opencode
+                    // line split mid-flag so `gpu` exited 127 and
+                    // the desktop never started). The server
+                    // answering means it can receive the scripts
+                    // as files, so the deliver methods write them
+                    // through the server's file API and type only
+                    // one-line `sh` commands. 2 s later, so the
+                    // curl loop has finished breaking.
+                    // Phase 2a is the t3 server: it needs the
+                    // OpenCode server up first (it wires to it on
+                    // 4096), so it goes before the CLI. Phase 2b
+                    // (the CLI) follows on the t3 script's DONE
+                    // console marker, or on its 5 min watchdog
+                    // (see deliverT3Bootstrap).
+                    if (!strongSelf.t3BootstrapSent) {
+                        strongSelf.t3BootstrapSent = YES;
+                        __weak OCEngine *weakEngine = strongSelf;
+                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                            OCEngine *engine = weakEngine;
+                            if (!engine) return;
+                            if (engine.state == OCEngineStateStopped) return;
+                            [engine deliverT3Bootstrap];
+                        });
+                    } else if (!strongSelf.cliBootstrapSent) {
+                        // The t3 step already ran (or was skipped):
+                        // the CLI still has to go.
                         strongSelf.cliBootstrapSent = YES;
                         __weak OCEngine *weakEngine = strongSelf;
                         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{

@@ -118,7 +118,7 @@ BUILD_ID="$(git rev-parse --short HEAD 2>/dev/null || echo dev)"
 CLANG=clang-18
 CFLAGS="-target arm64-apple-ios$MIN -isysroot $SDK -miphoneos-version-min=$MIN -fobjc-arc -O2 -Wall -Wextra -Wno-deprecated-declarations -DOC_KERNARIUM_LINKED=1 -DOC_BUILD_ID=\"${BUILD_ID}\" -I$SRC -F$SDK/System/Library/SubFrameworks -F$SDK/System/Library/PrivateFrameworks"
 
-for f in main AppDelegate OCSceneDelegate OCKeychain OCUtil OCSettings OCServerClient OCEngine OCCrashLog OCSessionsViewController OCChatViewController OCFilesViewController OCEngineViewController OCSettingsViewController OCIntegrationsViewController OCBrowserViewController OCCodeViewController OCStartupViewController OCDesktopViewController KernGlue OCVsockBridge OCLocalhostProxy OCGuestInstall; do
+for f in main AppDelegate OCSceneDelegate OCKeychain OCUtil OCSettings OCServerClient OCEngine OCCrashLog OCSessionsViewController OCT3WebViewController OCFilesViewController OCEngineViewController OCSettingsViewController OCIntegrationsViewController OCBrowserViewController OCCodeViewController OCStartupViewController OCDesktopViewController KernGlue OCVsockBridge OCLocalhostProxy OCGuestInstall; do
   echo "== $f.m"
   $CLANG $CFLAGS -c "$SRC/$f.m" -o "$OUT/$f.o"
 done
@@ -130,7 +130,7 @@ ld64.lld-18 -arch arm64 -platform_version ios $MIN 26.5 \
   -L"$SDK/usr/lib" \
   -adhoc_codesign -ObjC -dead_strip \
   -rpath @executable_path/Frameworks \
-  "$OUT"/main.o "$OUT"/AppDelegate.o "$OUT"/OCSceneDelegate.o "$OUT"/OCKeychain.o "$OUT"/OCUtil.o "$OUT"/OCSettings.o "$OUT"/OCServerClient.o "$OUT"/OCEngine.o "$OUT"/OCCrashLog.o "$OUT"/OCSessionsViewController.o "$OUT"/OCChatViewController.o "$OUT"/OCFilesViewController.o "$OUT"/OCEngineViewController.o "$OUT"/OCSettingsViewController.o "$OUT"/OCIntegrationsViewController.o "$OUT"/OCBrowserViewController.o "$OUT"/OCCodeViewController.o "$OUT"/OCStartupViewController.o "$OUT"/OCDesktopViewController.o "$OUT"/KernGlue.o "$OUT"/OCVsockBridge.o "$OUT"/OCLocalhostProxy.o "$OUT"/OCGuestInstall.o \
+  "$OUT"/main.o "$OUT"/AppDelegate.o "$OUT"/OCSceneDelegate.o "$OUT"/OCKeychain.o "$OUT"/OCUtil.o "$OUT"/OCSettings.o "$OUT"/OCServerClient.o "$OUT"/OCEngine.o "$OUT"/OCCrashLog.o "$OUT"/OCSessionsViewController.o "$OUT"/OCT3WebViewController.o "$OUT"/OCFilesViewController.o "$OUT"/OCEngineViewController.o "$OUT"/OCSettingsViewController.o "$OUT"/OCIntegrationsViewController.o "$OUT"/OCBrowserViewController.o "$OUT"/OCCodeViewController.o "$OUT"/OCStartupViewController.o "$OUT"/OCDesktopViewController.o "$OUT"/KernGlue.o "$OUT"/OCVsockBridge.o "$OUT"/OCLocalhostProxy.o "$OUT"/OCGuestInstall.o \
   -framework UIKit -framework Foundation -framework Security -framework CoreGraphics -framework QuartzCore -framework WebKit -framework Metal -framework MetalKit -framework CoreLocation \
   -lobjc -lSystem -lz \
   -o "$APP/OpenCode"

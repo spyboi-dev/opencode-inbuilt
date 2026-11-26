@@ -3,9 +3,10 @@
 // ONE app, real OpenCode inside it. On launch the engine boots,
 // starts the OpenCode server on 127.0.0.1:4096 (password in the
 // Keychain, Basic auth user `opencode`), and shows the OpenCode
-// CLI terminal. The native iOS UI talks to that same
-// server. The desktop was removed 2026-11-26 (the CLI is lite):
-// the terminal is the in-app UI.
+// CLI terminal. The chat UI is t3code's web UI, served by the t3
+// server the engine starts in the guest on 127.0.0.1:3773 and
+// wired to that same OpenCode server. The desktop was removed
+// 2026-11-26 (the CLI is lite): the terminal is the in-app UI.
 //
 // Engine interface: the engine provides an executor (a block
 // that types a command at the system console; see KernGlue).
@@ -114,6 +115,13 @@ typedef void (^OCGuestExecutor)(NSString *command, NSString *workingDirectory,
 // on the next call and on a 10 s timer, up to 12 attempts, and
 // every miss is logged with its attempt number.
 - (void)fetchGuestDiagnosticsIfNeeded;
+// YES once the chat UI has loaded the t3 server's one-time
+// pairing URL for this engine run. The t3 server restarts with
+// the engine, so a restart issues a new token: reset on stop and
+// on serve launch. Read by OCT3WebViewController to decide
+// between the pairing URL (first open) and the t3 root (later
+// opens, authenticated by the t3_session cookie).
+@property (nonatomic, assign) BOOL t3PairingURLLoaded;
 // First-launch setup: downloads the prebuilt system image
 // (Node + OpenCode baked in) and verifies the SHA-256 of the
 // archive and of the extracted image. Safe to call again; a verified
