@@ -1,6 +1,6 @@
 // OCSessionsViewController - list of OpenCode sessions from the in-app engine.
 #import "OCSessionsViewController.h"
-#import "OCWebUIViewController.h"
+#import "OCChatViewController.h"
 #import "OCEngineViewController.h"
 #import "OCServerClient.h"
 #import "OCSettings.h"
@@ -164,16 +164,16 @@ static NSString *OCGreetingForNow(void) {
 }
 
 - (void)openSession:(NSDictionary *)session {
-    // User decision (2026-11-26): tapping a chat opens the official
-    // mobile web UI, not the CLI terminal. The server serves its own
-    // UI at / (packages/app), so the shell loads it at phone width
-    // and deep-links to this session; the Terminal view stays
-    // reachable from the Engine tab (Show terminal). The native
-    // OCChatViewController stays in the codebase as the fallback.
-    NSString *sessionID = session[@"id"];
-    if (![sessionID isKindOfClass:[NSString class]]) sessionID = nil;
-    OCWebUIViewController *webUI = [[OCWebUIViewController alloc] initWithSessionID:sessionID];
-    [self.navigationController pushViewController:webUI animated:YES];
+    // User decision (2026-11-26): tapping a chat opens the native
+    // chat thread, linked to the already-running engine with Basic
+    // auth from the Keychain. No pairing, no connect screen, no QR,
+    // no sign-in. The WKWebView shell (OCWebUIViewController) was
+    // rejected on device test 2026-11-26: it opened the web UI's
+    // "Connect to a server" pairing screen instead of a chat, and
+    // is deleted. The Terminal stays reachable from the Engine tab
+    // (Show terminal).
+    OCChatViewController *chat = [[OCChatViewController alloc] initWithSession:session];
+    [self.navigationController pushViewController:chat animated:YES];
 }
 
 #pragma mark - Table

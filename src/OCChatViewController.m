@@ -751,14 +751,39 @@ static UIColor *OCClaudeGlass(void) {
     return latest ?: @[];
 }
 
+// 2.3.0 tool output: state.content is [{type:"text",text} |
+// {type:"file",uri,mime,name}]. Join the text parts; a file part
+// renders as its name (or URI).
++ (NSString *)textFromToolContent:(id)content {
+    if (![content isKindOfClass:[NSArray class]]) return @"";
+    NSMutableArray *parts = [NSMutableArray array];
+    for (id raw in (NSArray *)content) {
+        if (![raw isKindOfClass:[NSDictionary class]]) continue;
+        NSDictionary *c = raw;
+        if ([c[@"type"] isEqualToString:@"text"] && [c[@"text"] isKindOfClass:[NSString class]]) {
+            [parts addObject:c[@"text"]];
+        } else if ([c[@"type"] isEqualToString:@"file"]) {
+            NSString *name = c[@"name"];
+            if (![name isKindOfClass:[NSString class]] || !name.length) name = c[@"uri"];
+            if ([name isKindOfClass:[NSString class]] && name.length) [parts addObject:[NSString stringWithFormat:@"[file: %@]", name]];
+        }
+    }
+    return [parts componentsJoinedByString:@"\n"];
+}
+
 + (NSArray *)displayItemsFromMessages:(NSArray *)messages {
-    // Real server shape (verified live against opencode 2.2.6):
+    // Real server shape (opencode 2.3.0, pinned a6b15d33):
     // user:      {type:"user", text:"...", time:{created}}
     // assistant: {type:"assistant", model:{id, providerID}, time:{created, completed},
     //            content:[{type:"text", text:"..."},
     //            {type:"reasoning", text:"..."},
-    //            {type:"tool", name:"shell", state:{status, input:{command}, output:"..."}}]}
+    //            {type:"tool", name:"shell", state:{status, input:{command},
+    //             content:[{type:"text", text:"..."}]}}]}
+    // shell:     {type:"shell", command, status, exit, output}
     // idle:      {type:"idle", outcome:"succeeded"} (skipped, it is a status line)
+    // ToolState statuses are streaming|running|completed|error. There
+    // is no state.output in 2.3.0: completed/error output lives in
+    // state.content, and a streaming state's input is a plain string.
     NSMutableArray *items = [NSMutableArray array];
     NSInteger messageIndex = 0;
     for (id raw in messages) {
@@ -795,6 +820,22 @@ static UIColor *OCClaudeGlass(void) {
             sentTime = [formatter stringFromDate:date];
         }
         NSArray *parts = message[@"content"];
+        if ([role isEqualToString:@"shell"]) {
+            // 2.3.0 top-level shell message: {type:"shell", command,
+            // status, exit, output}. It has no content[] and no text,
+            // so without this it would be dropped silently. Render
+            // it as a shell tool row.
+            NSString *command = message[@"command"];
+            if (![command isKindOfClass:[NSString class]]) command = @"";
+            NSString *shellStatus = message[@"status"];
+            if (![shellStatus isKindOfClass:[NSString class]]) shellStatus = @"";
+            NSString *shellOutput = message[@"output"];
+            if (![shellOutput isKindOfClass:[NSString class]]) shellOutput = @"";
+            if (shellOutput.length > 65536) shellOutput = [shellOutput substringFromIndex:shellOutput.length - 65536];
+            [items addObject:@{@"kind": @"tool", @"role": role, @"text": @"shell", @"detail": command, @"output": shellOutput, @"state": shellStatus, @"model": modelID, @"provider": providerID, @"duration": duration, @"sentTime": sentTime, @"key": messageID}];
+            messageIndex++;
+            continue;
+        }
         if (![parts isKindOfClass:[NSArray class]] || !parts.count) {
             NSString *text = message[@"text"];
             if ([text isKindOfClass:[NSString class]] && text.length)
@@ -819,16 +860,29 @@ static UIColor *OCClaudeGlass(void) {
                 NSString *output = @"";
                 if ([state isKindOfClass:[NSDictionary class]]) {
                     if ([state[@"status"] isKindOfClass:[NSString class]]) status = state[@"status"];
-                    NSDictionary *input = state[@"input"];
+                    id input = state[@"input"];
                     if ([input isKindOfClass:[NSDictionary class]]) {
                         detail = input[@"command"] ?: input[@"filePath"] ?: input[@"path"] ?: input[@"pattern"] ?: input[@"query"] ?: input[@"url"] ?: @"";
                         if (![detail isKindOfClass:[NSString class]]) detail = @"";
+                    } else if ([input isKindOfClass:[NSString class]]) {
+                        // A streaming state's input is a plain string.
+                        detail = input;
                     }
-                    id out = state[@"output"];
-                    if ([out isKindOfClass:[NSString class]]) output = out;
-                    else if ([out isKindOfClass:[NSDictionary class]] || [out isKindOfClass:[NSArray class]]) {
-                        NSData *json = [NSJSONSerialization dataWithJSONObject:out options:0 error:nil];
-                        if (json) output = [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding] ?: @"";
+                    // 2.3.0 has no state.output: completed/error
+                    // output is state.content (see textFromToolContent).
+                    output = [OCChatViewController textFromToolContent:state[@"content"]];
+                    if (!output.length) {
+                        id out = state[@"output"]; // pre-2.3.0 shape, kept as a fallback
+                        if ([out isKindOfClass:[NSString class]]) output = out;
+                        else if ([out isKindOfClass:[NSDictionary class]] || [out isKindOfClass:[NSArray class]]) {
+                            NSData *json = [NSJSONSerialization dataWithJSONObject:out options:0 error:nil];
+                            if (json) output = [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding] ?: @"";
+                        }
+                    }
+                    if (!output.length) {
+                        // An error state's message, when it has no content.
+                        id err = state[@"error"];
+                        if ([err isKindOfClass:[NSDictionary class]] && [err[@"message"] isKindOfClass:[NSString class]]) output = err[@"message"];
                     }
                 }
                 // OpenCode keeps only the last 64 KiB of shell output.
@@ -892,13 +946,25 @@ static UIColor *OCClaudeGlass(void) {
     UILabel *label = [[UILabel alloc] initWithFrame:self.tableView.bounds];
     label.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     label.text = self.loadError
-        ? @"Could not load this chat.\nStart the engine and try again."
+        ? @"Could not load this chat.\nStart the engine, then tap here to retry."
         : @"No messages yet.\nType below to start.";
+    if (self.loadError) {
+        // The empty thread is the retry state: tapping it reloads
+        // the thread, so a server that was not up yet needs no
+        // navigation away and back. Never a pairing/connect screen.
+        label.userInteractionEnabled = YES;
+        UITapGestureRecognizer *retryTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(retryLoadTapped)];
+        [label addGestureRecognizer:retryTap];
+    }
     label.font = OCRoundedFont(15, UIFontWeightRegular);
     label.textColor = OCTextFaint();
     label.textAlignment = NSTextAlignmentCenter;
     label.numberOfLines = 0;
     self.tableView.backgroundView = label;
+}
+
+- (void)retryLoadTapped {
+    [self reloadMessages];
 }
 
 - (void)scrollToBottom {
@@ -1465,7 +1531,8 @@ static UIColor *OCClaudeGlass(void) {
     BOOL expanded = [self.expandedKeys containsObject:key];
     NSString *tool = item[@"text"];
     NSString *status = item[@"state"];
-    BOOL running = [status isEqualToString:@"pending"] || [status isEqualToString:@"running"];
+    // 2.3.0 ToolState statuses are streaming|running|completed|error.
+    BOOL running = [status isEqualToString:@"streaming"] || [status isEqualToString:@"running"];
 
     UIView *row = [[UIView alloc] init];
     row.translatesAutoresizingMaskIntoConstraints = NO;

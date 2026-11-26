@@ -1,7 +1,7 @@
 // OCServerClient - talks to the real OpenCode server over HTTP + SSE.
 // Server: opencode serve on 127.0.0.1:4096 (the in-app engine).
 // Auth: HTTP Basic, user "opencode", password from the Keychain, on every call.
-// API verified live against opencode 2.2.6 (see BUILD-NOTE.md).
+// API verified against opencode 2.3.0 (pinned source a6b15d33).
 // SSE: GET /api/event, events arrive as `data: {json}\n\n`, envelope
 // {id, type, data}. The client parses each event and forwards it to its
 // delegate; it never assumes a fixed set of event types.
