@@ -45,6 +45,21 @@ static NSString *const kGuestImageInstalled = @"oc.guestImageInstalled";
 @property (nonatomic, assign) BOOL cliBootstrapSent;
 // YES once the CLI TUI reported ready.
 @property (nonatomic, assign) BOOL cliReady;
+// YES once the guest console has shown the autologin shell prompt
+// ("termux@termx"). Phase 1 is typed only after this: the boot
+// gate fires on the getty "login: " prompt, which is not a shell,
+// and typing a script into getty eats it as login attempts
+// (dceea4c: dozens of "termx login:" prompts, ending at
+// "Password:"). The prompt has no trailing newline, so it is
+// detected on the raw console text, not on complete lines.
+@property (nonatomic, assign) BOOL shellPromptSeen;
+// YES while phase 1 is waiting to be sent; NO once it has been
+// sent (or the watchdog gave up). phase1Generation is the serve
+// attempt it belongs to, so a late trigger cannot send a stale
+// bootstrap into a restarted engine.
+@property (nonatomic, assign) BOOL phase1Pending;
+@property (nonatomic, assign) BOOL phase1Sent;
+@property (nonatomic, assign) NSUInteger phase1Generation;
 // YES once the guest console printed "server listening" (the
 // bootstrap's curl probe to /api/info succeeded in the guest).
 @property (nonatomic, assign) BOOL serverListening;
@@ -84,6 +99,12 @@ static NSString *const kGuestImageInstalled = @"oc.guestImageInstalled";
 @property (nonatomic, assign) BOOL launchUpdateCheckInFlight;
 @property (nonatomic, assign) BOOL launchUpdateCheckStarted;
 - (void)startServeWithCompletion:(void (^)(BOOL, NSError * _Nullable))completion;
+// The autologin shell prompt ("termux@termx") was seen on the
+// guest console; phase 1 can go now (see startServeWithCompletion).
+- (void)noteShellPromptSeen;
+// Sends phase 1 once, if it is still pending for this serve
+// attempt. Idempotent; safe to call from any trigger.
+- (void)sendPhase1IfPending;
 // CLI bootstrap (phase 2): sent only after the /api/info
 // probe first succeeds, so the guest shell is idle. See
 // consoleBootstrap (phase 1) for why the split exists.
@@ -673,6 +694,13 @@ static NSString *OCEngineStripANSI(NSString *line) {
     // cleaned line or they never match.
     NSString *clean = [OCEngineStripANSI(line) stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (!clean.length) return;
+    if ([clean containsString:@"termux@termx"]) {
+        // The shell prompt prefixes every echoed command line,
+        // and the bare prompt itself is caught on the raw text
+        // (see handleGuestConsoleText). Either way, the shell
+        // is up, so phase 1 can go.
+        [self noteShellPromptSeen];
+    }
     if ([clean hasPrefix:@"DIAG "]) {
         // The bootstrap's compact CLI summary: it belongs in
         // the engine log too, so the pasted log names the VT, the
@@ -778,6 +806,19 @@ static NSString *OCEngineStripANSI(NSString *line) {
         }
         NSMutableString *partial = OCEngineConsolePartial();
         [partial appendString:copy];
+        // The shell prompt has no trailing newline, so it sits in
+        // the partial buffer until the next line arrives — it
+        // never reaches handleGuestConsoleLine on its own. Detect
+        // it here, on the raw text: the prompt string survives
+        // ANSI codes (it appears literally, twice, in the raw
+        // prompt bytes), so a plain containsString is enough.
+        if ([partial containsString:@"termux@termx"]) {
+            __weak typeof(self) weakPrompt = self;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                typeof(self) promptSelf = weakPrompt;
+                if (promptSelf) [promptSelf noteShellPromptSeen];
+            });
+        }
         while (YES) {
             NSRange nl = [partial rangeOfString:@"\n"];
             if (nl.location == NSNotFound) break;
@@ -910,6 +951,10 @@ static NSString *OCEngineStripANSI(NSString *line) {
         [self setState:OCEngineStateStarting];
         [self setServeProgress:0.05 status:@"Starting…"];
         [self appendEngineLogSync:@"Guest boot started"];
+        // A fresh boot means a fresh console: the shell prompt
+        // sighting from any earlier boot is stale, so phase 1
+        // waits for a new one (see startServeWithCompletion).
+        self.shellPromptSeen = NO;
         __weak typeof(self) weakSelf = self;
         [[OCKernGlue shared] bootWithCompletion:^(BOOL ok, NSError * _Nullable error) {
             typeof(self) strongSelf = weakSelf;
@@ -957,49 +1002,75 @@ static NSString *OCEngineStripANSI(NSString *line) {
     [self setState:OCEngineStateStarting];
     [self setServeProgress:0.05 status:@"Starting terminal..."];
     [self appendEngineLogSync:@"Serve launch started"];
-    NSString *bootstrap = [self consoleBootstrap];
+    // The bootstrap string is built fresh in sendPhase1IfPending
+    // (consoleBootstrap is deterministic: same password, same
+    // commands), so there is no local to hold here.
     // The password is typed with echo off (see the bootstrap) and is
     // also the glue's redact string, so it never lands in a log.
     NSString *pw = [[OCSettings shared] ensureServerPassword];
     [OCKernGlue shared].consoleRedactString = pw;
-    // The login prompt means systemd is up, but the shell needs a
-    // moment before the first typed line lands.
-    __weak typeof(self) weakSelf = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        typeof(self) strongSelf = weakSelf;
-        if (!strongSelf) return;
-        if (generation != strongSelf.serveGeneration) {
-            [strongSelf appendEngineLog:@"Serve launch ignored: engine was stopped while starting"];
-            return;
-        }
-        [[OCKernGlue shared] sendConsoleText:bootstrap];
-        [strongSelf setState:OCEngineStateStarting];
-        [strongSelf setServeProgress:0.05 status:@"Starting terminal..."];
-        // The guest still has to boot its userland and print the
-        // ready marker; give the first start 5 minutes before health
-        // failures can restart the engine.
-        strongSelf.healthGraceUntil = [NSDate dateWithTimeIntervalSinceNow:300];
-        // The health timer starts when the guest console reports
-        // "server listening" (see handleGuestConsoleLine), NOT on
-        // a fixed tick: a probe fired before the server is ready
-        // hangs the full request timeout through the vsock bridge
-        // instead of failing fast (77b9a2f: first probe at ~6 s,
-        // server ready at ~8 s, healthy at 41 s). Fallback: if
-        // the console marker never arrives (the console has
-        // dropped output before), start the timer anyway 20 s
-        // after serve launch so the engine cannot stall forever.
-        __weak typeof(self) weakFallback = strongSelf;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(20.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            typeof(self) fallbackSelf = weakFallback;
-            if (!fallbackSelf) return;
-            if (generation != fallbackSelf.serveGeneration) return;
-            if (fallbackSelf.state == OCEngineStateStopped) return;
-            if (fallbackSelf.healthTimer) return;
-            [fallbackSelf appendEngineLog:@"Health timer fallback: no server listening marker in 20 s"];
-            [fallbackSelf startHealthTimer];
-        });
-        dispatch_async(dispatch_get_main_queue(), ^{ completion(YES, nil); });
+    // Phase 1 goes only into a real shell, never into getty.
+    // The boot gate fires on the getty "login: " prompt
+    // (KernGlue), which is not a shell: the serial getty
+    // auto-logs in as termux, and the shell prompt
+    // ("termux@termx") follows ~1 s later. Typing the script
+    // before that prompt eats it as login attempts (dceea4c:
+    // dozens of "termx login:" prompts on the tty1 display,
+    // ending at "Password:"). So the send waits for the shell
+    // prompt (see noteShellPromptSeen); if the prompt was
+    // already seen (a restart on a live guest), it goes after
+    // 1 s as before. A 30 s watchdog gives up with a clear
+    // error instead of typing into a login prompt or waiting
+    // forever.
+    [self setState:OCEngineStateStarting];
+    [self setServeProgress:0.05 status:@"Starting terminal..."];
+    // The guest still has to boot its userland and print the
+    // ready marker; give the first start 5 minutes before health
+    // failures can restart the engine.
+    self.healthGraceUntil = [NSDate dateWithTimeIntervalSinceNow:300];
+    // The health timer starts when the guest console reports
+    // "server listening" (see handleGuestConsoleLine), NOT on
+    // a fixed tick: a probe fired before the server is ready
+    // hangs the full request timeout through the vsock bridge
+    // instead of failing fast (77b9a2f: first probe at ~6 s,
+    // server ready at ~8 s, healthy at 41 s). Fallback: if
+    // the console marker never arrives (the console has
+    // dropped output before), start the timer anyway 20 s
+    // after serve launch so the engine cannot stall forever.
+    __weak typeof(self) weakFallback = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(20.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        typeof(self) fallbackSelf = weakFallback;
+        if (!fallbackSelf) return;
+        if (generation != fallbackSelf.serveGeneration) return;
+        if (fallbackSelf.state == OCEngineStateStopped) return;
+        if (fallbackSelf.healthTimer) return;
+        [fallbackSelf appendEngineLog:@"Health timer fallback: no server listening marker in 20 s"];
+        [fallbackSelf startHealthTimer];
     });
+    self.phase1Pending = YES;
+    self.phase1Sent = NO;
+    self.phase1Generation = generation;
+    if (self.shellPromptSeen) {
+        // Restart on a live guest: the shell is already there.
+        __weak typeof(self) weakSelf = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            typeof(self) strongSelf = weakSelf;
+            if (!strongSelf) return;
+            [strongSelf sendPhase1IfPending];
+        });
+    }
+    // Fresh boot: the prompt has not been seen yet, so the send
+    // waits for noteShellPromptSeen. The watchdog bounds the wait.
+    __weak typeof(self) weakWatchdog = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        typeof(self) watchdogSelf = weakWatchdog;
+        if (!watchdogSelf) return;
+        if (generation != watchdogSelf.serveGeneration) return;
+        if (!watchdogSelf.phase1Pending || watchdogSelf.phase1Sent) return;
+        watchdogSelf.phase1Pending = NO;
+        [watchdogSelf appendEngineLog:@"ERROR: no shell prompt on the guest console after 30 s — the guest is at a login prompt, so the bootstrap was not sent"];
+    });
+    dispatch_async(dispatch_get_main_queue(), ^{ completion(YES, nil); });
 #else
     (void)completion;
     [self setState:OCEngineStateCorePending];
@@ -1009,8 +1080,37 @@ static NSString *OCEngineStripANSI(NSString *line) {
 #endif
 }
 
+// The guest console showed the autologin shell prompt
+// ("termux@termx"). Called on the main queue, from the console
+// text (the prompt has no trailing newline, so it is detected
+// on the raw text, not on complete lines) and from complete
+// console lines (the prompt prefixes every echoed command).
+- (void)noteShellPromptSeen {
+    if (!self.shellPromptSeen) {
+        self.shellPromptSeen = YES;
+        [self appendEngineLogSync:@"Shell prompt seen on the guest console"];
+    }
+    [self sendPhase1IfPending];
+}
+
+// Send phase 1 if it is still pending for this serve attempt.
+// Idempotent: the 1 s timer, the prompt detection, and the
+// watchdog can all reach it, but the script goes once.
+- (void)sendPhase1IfPending {
+    if (!self.phase1Pending || self.phase1Sent) return;
+    if (self.phase1Generation != self.serveGeneration) return;
+    self.phase1Sent = YES;
+    self.phase1Pending = NO;
+    [[OCKernGlue shared] sendConsoleText:[self consoleBootstrap]];
+    [self appendEngineLogSync:@"Phase 1 sent (shell prompt seen)"];
+}
+
 // The console bootstrap: one block of shell typed at the autologin
-// shell after the `login: ` prompt. Node and OpenCode are baked into
+// shell (serial console ttyS0) after the shell prompt
+// ("termux@termx"). The boot gate fires on the getty "login: "
+// prompt, which is not a shell — typing before the shell prompt
+// eats the script as login attempts (dceea4c). See
+// startServeWithCompletion. Node and OpenCode are baked into
 // the guest image, so this only CHECKS them (a missing binary is an
 // ERROR line, never a download: the overlay is wiped every boot, so
 // a first-Start download would repeat on every launch). The same
@@ -1173,13 +1273,13 @@ static NSString *OCEngineStripANSI(NSString *line) {
     // opencode-desktop systemd service: the service is disabled
     // at boot (rootfs-build) and the desktop is gone (2026-11-26:
     // the user replaced it with the CLI TUI, which is lite). The
-    // TUI runs in the foreground of the autologin termux shell
-    // on tty1 — the console the app shows — so it draws straight
-    // into the framebuffer the runtime already flushes on the
-    // CPU path. No Xorg, no openbox, no Electron: the whole
-    // desktop stack is deleted from the bootstrap (it stays in
-    // git history and in the image; the image slimming is a
-    // separate follow-up).
+    // TUI runs on tty1 (see below), not on this script's tty:
+    // this script runs in the autologin termux shell on the
+    // serial console (ttyS0), which the user never sees, while
+    // the Terminal view shows the framebuffer (tty1). No Xorg,
+    // no openbox, no Electron: the whole desktop stack is
+    // deleted from the bootstrap (it stays in git history and
+    // in the image; the image slimming is a separate follow-up).
     // Leftovers are killed first so a restart is clean: a stale
     // diagnostics loop from a previous boot would keep writing
     // the previous boot's state over the new one.
@@ -1235,26 +1335,46 @@ static NSString *OCEngineStripANSI(NSString *line) {
     [b appendString:@"EOF\n"];
     [b appendString:@"chmod +x /tmp/diag-loop.sh\n"];
     [b appendString:@"sudo nohup sh /tmp/diag-loop.sh >/tmp/diag-loop.log 2>&1 &\n"];
-    // Terminal size: the console is the 1290x2796 framebuffer
-    // with the kernel's 8x16 font, so the kernel reports 161
-    // cols x 174 rows. The TUI wants a wide terminal; make the
-    // size explicit (the shell's COLUMNS/LINES can be stale from
-    // the login) and export it so the TUI lays out for the full
-    // screen. If the kernel ever reports something narrow, fall
-    // back to the framebuffer-derived size instead of handing
-    // the TUI a narrow terminal. TERM defaults to linux (the
-    // virtual console); the TUI needs it set to draw.
-    [b appendString:@"SZ=$(stty size 2>/dev/null || echo \"174 161\"); set -- $SZ; TR=$1; TC=$2; [ \"$TC\" -lt 100 ] && { TR=174; TC=161; }; stty rows $TR cols $TC 2>/dev/null; export COLUMNS=$TC LINES=$TR; echo \"Terminal size: ${TR} rows x ${TC} cols\"\n"];
-    [b appendString:@"export TERM=${TERM:-linux}\n"];
+    // The TUI runs on tty1, the framebuffer VT the Terminal view
+    // shows — NOT on this script's tty (the serial console ttyS0).
+    // Two terminals, and dceea4c confused them: the autologin
+    // shell (and this script) run on ttyS0, which the user never
+    // sees, while the Terminal view shows tty1, whose getty has
+    // no autologin and sits at "termx login:". A TUI started here
+    // draws on ttyS0 (invisible) and reads the serial console,
+    // not the user's keyboard (which feeds tty1). So the TUI is
+    // moved to tty1: stop its getty, size it from the
+    // framebuffer, and run the TUI as a session leader with tty1
+    // as its controlling terminal, so the Terminal view shows it
+    // and the keyboard reaches it. TERM is linux on the virtual
+    // console (not the xterm-256color the serial autologin sets).
+    // Stop getty first: it owns tty1, and a TUI that shares the
+    // VT with a live getty fights it for input. Bounded with
+    // timeout — a systemctl that hangs on D-Bus (977334d) must
+    // not stall the script. Restart it when the TUI exits, so
+    // the user gets a login prompt back instead of a blank VT.
+    [b appendString:@"timeout 15 sudo systemctl stop getty@tty1 2>/dev/null || echo \"WARN getty@tty1 did not stop\"\n"];
+    // A stale TUI from a restart would fight the new one for
+    // tty1. The serve ("opencode serve ...") does not match
+    // the exact-name pattern, so it is left alone.
+    [b appendString:@"sudo pkill -f '^opencode$' 2>/dev/null; true\n"];
+    // Terminal size: tty1 is the 1290x2796 framebuffer with the
+    // kernel's 8x16 font, so it reports 161 cols x 174 rows.
+    // Make the size explicit and export it so the TUI lays out
+    // for the full screen. If the kernel ever reports something
+    // narrow, fall back to the framebuffer-derived size instead
+    // of handing the TUI a narrow terminal.
+    [b appendString:@"SZ=$(stty size < /dev/tty1 2>/dev/null || echo \"174 161\"); set -- $SZ; TR=$1; TC=$2; [ \"$TC\" -lt 100 ] && { TR=174; TC=161; }; stty rows $TR cols $TC < /dev/tty1 2>/dev/null; export COLUMNS=$TC LINES=$TR; echo \"Terminal size: ${TR} rows x ${TC} cols (tty1)\"\n"];
+    [b appendString:@"export TERM=linux\n"];
     // The TUI's project directory: the autologin shell starts in
     // /home/termux, and the server's default project is there
     // too, so the TUI opens on the same sessions the native UI
     // and the mobile app see. cd explicitly so a stray cwd from
     // a restart cannot change it.
     [b appendString:@"cd /home/termux\n"];
-    // The CLI TUI, in the foreground of this shell: `opencode`
-    // with no args runs the default command, which resolves its
-    // server through Service.discover — it finds our serve's
+    // The CLI TUI, on tty1 (see above): `opencode` with no args
+    // runs the default command, which resolves its server
+    // through Service.discover — it finds our serve's
     // registration (URL http://127.0.0.1:4096 + password from
     // service.json, written by phase 1) and connects to it, and
     // only spawns its own server when no healthy registration
@@ -1264,16 +1384,28 @@ static NSString *OCEngineStripANSI(NSString *line) {
     // registration — the TUI adopts our server, no second
     // server. It runs in the background of this script so the
     // script can confirm the process is alive and print the
-    // CLI READY marker the app watches for; the script is
-    // non-interactive (no job control), so the TUI shares the
-    // foreground process group and reads the tty. `wait` keeps
-    // the script — and the console shell — in the foreground
-    // until the TUI exits.
-    [b appendString:@"opencode &\n"];
-    [b appendString:@"TUI_PID=$!\n"];
+    // CLI READY marker the app watches for. The poll loop below
+    // keeps the script — and the console shell — in the
+    // foreground until the TUI exits.
+    // setsid makes the TUI a session leader with tty1 as its
+    // controlling terminal (the --ctty terminal is stdin,
+    // redirected from /dev/tty1), so the Terminal view's
+    // keyboard — which feeds tty1 — reaches it and Ctrl-C works.
+    // Fall back to a plain redirect if setsid fails (the TUI
+    // still reads and draws on tty1 through stdio; only job
+    // control is weaker). The first pgrep loop waits the full
+    // 10 s before the fallback, so a slow-starting TUI is not
+    // doubled.
+    [b appendString:@"setsid -c opencode </dev/tty1 >/dev/tty1 2>&1 &\n"];
     [b appendString:@"for i in $(seq 1 10); do pgrep -f '^opencode$' >/dev/null 2>&1 && break; sleep 1; done\n"];
+    [b appendString:@"if ! pgrep -f '^opencode$' >/dev/null 2>&1; then echo \"WARN setsid TUI did not start, retrying without setsid\"; opencode </dev/tty1 >/dev/tty1 2>&1 & for i in $(seq 1 10); do pgrep -f '^opencode$' >/dev/null 2>&1 && break; sleep 1; done; fi\n"];
     [b appendString:@"if pgrep -f '^opencode$' >/dev/null 2>&1; then echo \"CLI READY\"; else echo \"ERROR CLI did not start\"; fi\n"];
-    [b appendString:@"wait $TUI_PID 2>/dev/null; echo \"CLI exited (code $?)\"\n"];
+    // Wait for the TUI to exit by polling, not `wait $!`:
+    // setsid may fork, so $! is not reliably the TUI's PID.
+    // The poll keeps the script — and the console shell — in
+    // the foreground until the TUI exits.
+    [b appendString:@"while pgrep -f '^opencode$' >/dev/null 2>&1; do sleep 5; done; echo \"CLI exited\"\n"];
+    [b appendString:@"sudo systemctl start getty@tty1 2>/dev/null || true\n"];
     return b;
 }
 

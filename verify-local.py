@@ -270,15 +270,24 @@ new_strings = ["Retrying in 60s", "Automatic retry: starting engine",
                "DIAG server:",
                "/home/termux/cli-diag.txt",
                # CLI TUI (2026-11-26): the desktop is gone. The
-               # TUI runs in the foreground of the console shell
-               # on tty1, sized from `stty size` (161x174 on the
-               # 1290x2796 framebuffer, fallback if narrow), and
-               # adopts the already-running serve through the
-               # service registration, same as the desktop did.
+               # TUI runs on tty1 (the framebuffer VT the Terminal
+               # view shows), sized from `stty size` on tty1
+               # (161x174 on the 1290x2796 framebuffer, fallback
+               # if narrow), and adopts the already-running serve
+               # through the service registration, same as the
+               # desktop did. Phase 1 is typed only after the
+               # autologin shell prompt ("termux@termx") is seen
+               # on the serial console (ttyS0) — typing it into
+               # getty eats it as login attempts (dceea4c).
+               "Shell prompt seen on the guest console",
+               "Phase 1 sent (shell prompt seen)",
+               "no shell prompt on the guest console after 30 s",
+               "setsid",
+               "getty@tty1",
                "Terminal size:",
                "CLI ready (from guest console)",
                "ERROR CLI did not start",
-               "CLI exited (code ",
+               "CLI exited",
                "Terminal ready",
                # Fetch fix (2026-11-25): the e001c27
                # "Failed to fetch" error page is a client
