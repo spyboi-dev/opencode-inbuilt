@@ -8,6 +8,37 @@ launch-path hypothesis is closed. The scene investigation (why UIKit
 never called the scene method in the 07:57 run) continues on that
 settled basis.
 
+## Status: DESKTOP REMOVED — CLI TERMINAL IS THE IN-APP UI — LOCAL BUILD dceea4c, verified
+
+User direction 2026-11-26 07:51 IST: "then remove desktop use cli version coz its lite". Reverses the 2026-11-25 direction (CLI removed, Desktop only). The desktop code stays recoverable in git history (kernarium-desktop branch at 9fbaefa, and this branch's history); nothing was deleted from the repo, only from the bootstrap. The desktop stack stays in the guest image (the image slimming is a separate follow-up); the CLI was already in the image, so no image change was needed.
+
+### What changed (commit dceea4c, 12 files, +298/-579)
+
+- `src/OCEngine.m` `desktopBootstrap` deleted and replaced by `cliBootstrap` (1691 bytes, was 8612): no Xorg, no openbox, no ai.opencode, no fb-flush loop, no modesetting retry, no maximise rule, no READY loop. After the server is healthy, phase 2 sizes the terminal from `stty size` (161 cols x 174 rows on the 1290x2796 framebuffer with the kernel's 8x16 font; falls back to 174x161 if the kernel ever reports under 100 cols), exports COLUMNS/LINES, sets TERM=linux, cd /home/termux, starts `opencode` in the background, polls pgrep -f '^opencode$' up to 10 s, prints "CLI READY" when alive ("ERROR CLI did not start" if not), then `wait` in the foreground so the console shell stays on the TUI until it exits ("CLI exited (code N)").
+- `src/OCEngine.m` phase 1 UNCHANGED (1710 bytes): serve --service --port 4096 --hostname 127.0.0.1 with the pre-written service config. The server is the backend for the CLI, the mobile app pairing, and the native UI.
+- `src/OCEngine.m` diagnostics: the snapshot drops the Xorg/ai.opencode/window/self-test/fbdev/modesetting lines and reports the server and the TUI instead (DIAG server:, DIAG tui:, DIAG loop:, serve log tail), written to /tmp/cli-diag.txt and copied to /home/termux/cli-diag.txt (chmod 644), fetched every 10 s. The DESKTOP READY marker is now CLI READY (exact match, "CLI ready (from guest console)").
+- `src/OCEngine.m` `deliverCliBootstrap` / `src/OCServerClient.m`: server-file delivery unchanged (writes /tmp/cli-bootstrap.sh via POST /api/experimental/fs/write, types only `sh /tmp/cli-bootstrap.sh`, console typing as fallback).
+- UI renames: the Desktop view is now Terminal (title "Terminal", hint "Use Keyboard to type.", "Terminal is not up yet..."), the Engine tab button is "Show terminal", tapping a chat opens the terminal, the startup Server row reads "Terminal ready" / "Starting terminal...". The OCDesktopViewController class name is unchanged (the build script compiles a fixed file list).
+- `verify-local.py`: desktop/Xorg/fbdev/self-test/modesetting/maximise markers removed, CLI markers added (CLI READY, cli-bootstrap.sh, cli-diag.txt, DIAG tui:, DIAG server:, Terminal size:, CLI exited, Terminal ready, Show terminal, Starting terminal...). ALL PASS (144 checks).
+- README: "The OpenCode desktop app, running on your phone." → "The OpenCode CLI, running on your phone." / "The chat opens the OpenCode terminal."
+
+### How the TUI adopts the server (verified from the pinned 2.3.0 source, not guessed)
+
+`opencode` with no args runs the default command (packages/cli/src/commands/handlers/default.ts:35), which calls ServerConnection.resolve({mismatch: "replace"}). resolve() (packages/cli/src/services/server-connection.ts:51-60) calls Service.discover first and only calls Service.ensure on mismatch/reconnect. Our serve is 2.3.0 and the CLI is 2.3.0, same version, so discover reuses the registration (URL http://127.0.0.1:4096 + password from service.json, written by phase 1) and no second server is spawned. Same mechanism as the desktop's ensure (77b9a2f), same registration. The mobile app pairing is unaffected (same server, same 4096, same registration); the pair command is now run in the TUI instead of a desktop chat.
+
+### Open questions for the device test
+
+- Does the TUI respond to keyboard input through the console? The script is non-interactive (no job control), so the TUI shares the foreground process group and reads the tty — but the first device run is the proof.
+- Does the TUI draw correctly at 161x174? The size is logged ("Terminal size: 174 rows x 161 cols"), so the screenshot + engine.log will show it.
+
+Serve --service, server-file delivery, two-phase bootstrap, b115d71 boot fix, runtime/framework, Settings untouched. Nothing merged to main. `kernarium-desktop` and termx untouched. Both bootstrap phases were extracted from the ObjC literals and parsed with `bash -n` before building (phase 1: 1710 bytes, phase 2: 1691 bytes).
+
+Build dceea4c, local, 2026-11-26 ~08:04 IST. IPA `mac-ipas/OpenCode-iOS-dceea4c.ipa`, 25,197,480 bytes, SHA-256 8c29946eab6a4b7b87aca0c9712fc8d39d5dd49b252e84a35ebf5496f53e9595. GitHub release opencode-dceea4c. Staged in `~/workspace/goals/opencode-for-ios/files/OpenCode-iOS-dceea4c.ipa`.
+
+### Device test (dceea4c)
+
+Install over b115d71, do NOT delete the app — the guest image is already installed. Open the Terminal view (Engine tab → Show terminal, or tap + on Threads). The CLI TUI should be up. Type in it via the Keyboard button. Send a screenshot AND engine.log. Look for: "CLI launch started" ~2 s after "Server healthy"; "Terminal size: 174 rows x 161 cols"; "CLI ready (from guest console)"; the TUI filling the screen; "Guest diagnostics (via server)" blocks naming DIAG server: running, DIAG tui: running. If the TUI does not appear or does not take keyboard input, send the screenshot + engine.log + guest log — the "ERROR CLI did not start" / "CLI exited" lines and the diagnostics block name the failure.
+
 ## Status: BOOT REGRESSION — FIRST PROBE HUNG 30 s, HEALTHY AT 41 s — FIXED IN LOCAL BUILD b115d71, verified
 
 User test of 77b9a2f, 2026-11-26 07:13 IST: "why booting now keep more time like 5x befor the server start at in 10sec now it taking 50-60". He pasted the full engine log (`~/workspace/user/files/Pasted_text-6876e711.txt`, 7344 lines, history from 11:31 Build 5f307ff to the 77b9a2f runs).
