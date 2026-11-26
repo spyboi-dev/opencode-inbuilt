@@ -50,9 +50,10 @@ below has run on a device yet.
   `gh jq ripgrep socat bun`, Xorg + openbox + OpenCode desktop app,
   vsock proxy units, desktop service). Not run yet: the TermX image
   build is unfinished.
-- Persistence: NOT solved. See "PERSISTENCE-TODO" below. Sessions,
-  provider logins and `/root/Projects` vanish on every reboot until
-  that work lands. Do not merge without that decision.
+- Persistence: solved 2026-11-26 (see "PERSISTENCE-TODO" below).
+  The overlay is created once and reused, so sessions, provider
+  logins and `/root/Projects` survive a guest reboot; Settings has
+  a "Reset guest data" action for a corrupt disk.
 
 ## 1. What the current engine seam is
 
@@ -603,7 +604,17 @@ port 8000 is guest-local unless a second vsock forward is added
    location (engine stops with the app, as before). (No mode
    switching any more — CLI mode was removed 2026-11-25.)
 
-## PERSISTENCE-TODO (the biggest product risk, unsolved)
+## PERSISTENCE-TODO (solved 2026-11-26 — persistent overlay)
+
+Status 2026-11-26: SOLVED by the persistent overlay, no vsock sync
+agent needed. The app creates the 4 GiB overlay once in
+Documents/Engine/guest and reuses it on every boot; the fork
+framework's persistent-upper patch makes the boot reuse the
+existing ext4 upper instead of formatting. Sessions, provider
+logins and `/root/Projects` survive a guest reboot. Settings has a
+"Reset guest data" action that deletes the overlay file only, for
+a corrupt disk. The text below is the pre-fix record (2026-11-20)
+and is kept for history.
 
 Status 2026-11-20: sessions, provider logins/keys stored in the
 guest, and `/root/Projects` (including `app.py`) VANISH on every

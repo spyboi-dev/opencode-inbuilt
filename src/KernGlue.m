@@ -10,6 +10,7 @@
 #import <dlfcn.h>
 #import <errno.h>
 #import <limits.h>
+#import <stdio.h>
 #import <stdlib.h>
 #import <string.h>
 #import <sys/stat.h>
@@ -23,8 +24,11 @@ typedef const kernarium_runtime_api *(*OCKernariumGetApi)(void);
 // the runtime's GPU budget wants.
 static const uint32_t kGuestMemoryMiB = 1024;
 static const uint32_t kGuestCPUs = 2;
-// Writable space for one session, in GiB. The boot formats the overlay
-// fresh every time, so this is session scratch, not storage.
+// Writable space, in GiB. The boot formats the overlay once (the
+// TermX persistent-upper patch reuses an existing ext4 upper), and
+// the app reuses the file on every boot, so this is persistent
+// guest storage now, not session scratch. Kept at 4 GiB; a size
+// picker is a later UI decision.
 static const uint64_t kOverlayGiB = 4;
 static const NSUInteger kConsoleChunkBytes = 512;
 
@@ -117,6 +121,8 @@ static BOOL OCPathUsableOnKernelCommandLine(const char *path) {
 - (void)handleConsoleData:(NSData *)data;
 - (void)startBridges;
 - (void)stopBridges;
+- (NSString *)overlayPath;
+- (NSString *)legacyOverlayPath;
 @end
 
 @implementation OCKernGlue
@@ -256,26 +262,127 @@ static BOOL OCPathUsableOnKernelCommandLine(const char *path) {
     [[OCEngine shared] appendEngineLogSync:@"Guest executor installed (Kernarium console)"];
 }
 
-// Create the sparse overlay file the boot formats fresh on ubd1.
-// The path must name no spaces, quotes, commas or colons (the runtime
-// names it on the kernel command line); NSTemporaryDirectory is safe.
+// The persistent overlay lives in Documents/Engine/guest next to
+// rootfs and session.json (TermX's shape: Documents/guest/
+// termx-data.ext4, created once and reused). NSTemporaryDirectory
+// can be purged by iOS, so the old tmp location would lose the disk.
+- (NSString *)overlayPath {
+    return OCCanonicalizePath([[self guestDirectory] stringByAppendingPathComponent:@"opencode-overlay.ext4"]);
+}
+
+// The old location, kept only for the one-time migration in
+// createOverlayWithError and for resetGuestDataWithError (a reset
+// before the first boot after the move must also clear it, or the
+// next boot would migrate it back in).
+- (NSString *)legacyOverlayPath {
+    return OCCanonicalizePath([NSTemporaryDirectory() stringByAppendingPathComponent:@"opencode-overlay.ext4"]);
+}
+
+// Create the sparse overlay file the boot formats once on ubd1
+// (the TermX persistent-upper patch in the fork framework: the
+// boot reuses an existing ext4 upper instead of formatting). The
+// file is created ONLY if it does not exist and reused on every
+// later boot, so sessions, logins and /root/Projects survive a
+// guest reboot. The path must name no spaces, quotes, commas or
+// colons (the runtime names it on the kernel command line).
 // Canonicalized: /var is a symlink to /private/var (see
 // OCCanonicalizePath above).
+// First boot after the move: if no overlay exists at the new path
+// but the old tmp overlay is still on disk, move it (same volume,
+// a rename) so the last run's data survives the switch. The move
+// only happens for a regular file of exactly 4 GiB; anything else
+// is left alone and a fresh overlay is created.
 - (BOOL)createOverlayWithError:(NSString **)error {
-    NSString *path = OCCanonicalizePath([NSTemporaryDirectory() stringByAppendingPathComponent:@"opencode-overlay.ext4"]);
     NSFileManager *fm = [NSFileManager defaultManager];
-    [fm removeItemAtPath:path error:nil];
-    int fd = open(path.UTF8String, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    NSString *dir = OCCanonicalizePath([self guestDirectory]);
+    NSError *dirError = nil;
+    if (![fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:&dirError]) {
+        if (error) *error = @"could not create the guest directory";
+        return NO;
+    }
+    NSString *path = [dir stringByAppendingPathComponent:@"opencode-overlay.ext4"];
+    struct stat st;
+    if (stat(path.UTF8String, &st) == 0) {
+        if (!S_ISREG(st.st_mode)) {
+            if (error) *error = @"the overlay path is not a file";
+            return NO;
+        }
+        _overlayPath = path;
+        [[OCEngine shared] appendEngineLogSync:@"Overlay reused (persistent guest data)"];
+        return YES;
+    }
+    // One-time migration from the old tmp location.
+    NSString *legacy = [self legacyOverlayPath];
+    if (stat(legacy.UTF8String, &st) == 0 && S_ISREG(st.st_mode) && st.st_size == ((off_t)kOverlayGiB << 30)) {
+        if (rename(legacy.UTF8String, path.UTF8String) == 0) {
+            _overlayPath = path;
+            [[OCEngine shared] appendEngineLogSync:@"Overlay moved from tmp (first boot after the move)"];
+            return YES;
+        }
+        [[OCEngine shared] appendEngineLogSync:@"Overlay move from tmp failed, creating a fresh overlay"];
+    }
+    int fd = open(path.UTF8String, O_WRONLY | O_CREAT | O_EXCL, 0644);
     if (fd < 0) {
+        if (errno == EEXIST && stat(path.UTF8String, &st) == 0 && S_ISREG(st.st_mode)) {
+            // Created between the stat and the open: reuse it.
+            _overlayPath = path;
+            [[OCEngine shared] appendEngineLogSync:@"Overlay reused (persistent guest data)"];
+            return YES;
+        }
         if (error) *error = @"could not create the overlay disk";
         return NO;
     }
     off_t size = (off_t)kOverlayGiB << 30;
     BOOL ok = ftruncate(fd, size) == 0;
     close(fd);
-    if (!ok && error) *error = @"could not size the overlay disk";
+    if (!ok) {
+        if (error) *error = @"could not size the overlay disk";
+        return NO;
+    }
     _overlayPath = path;
-    return ok;
+    [[OCEngine shared] appendEngineLogSync:@"Overlay created (4 GiB, first boot)"];
+    return YES;
+}
+
+// Delete the overlay file ONLY — the guest's saved data (sessions,
+// logins, /root/Projects). The rootfs and session.json are never
+// touched. Also deletes the legacy tmp overlay, which is the same
+// logical disk at the old location: without that, a reset before
+// the first boot after the move would leave the tmp file behind and
+// the next boot would migrate it back in.
+// Only unlinks paths that are exactly "opencode-overlay.ext4" in
+// the guest directory or the tmp directory and are regular files;
+// anything else refuses instead of deleting. Safe to call while
+// the guest is shutting down: unlinking an open file only removes
+// the directory entry, and the next boot creates a fresh overlay.
+// The caller stops the engine first (see OCSettingsViewController).
+- (BOOL)resetGuestDataWithError:(NSString **)error {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSArray<NSString *> *paths = @[[self overlayPath], [self legacyOverlayPath]];
+    BOOL deletedAny = NO;
+    for (NSString *path in paths) {
+        // Guard: only the exact overlay filename, and only a
+        // regular file. A directory or anything else at that
+        // path refuses instead of deleting.
+        if (![path.lastPathComponent isEqualToString:@"opencode-overlay.ext4"]) continue;
+        struct stat st;
+        if (stat(path.UTF8String, &st) != 0) continue; // absent: nothing to delete
+        if (!S_ISREG(st.st_mode)) {
+            if (error) *error = @"the overlay path is not a file";
+            return NO;
+        }
+        NSError *removeError = nil;
+        if (![fm removeItemAtPath:path error:&removeError]) {
+            if (error) *error = [NSString stringWithFormat:@"could not delete the guest data: %@", removeError.localizedDescription ?: @"unknown error"];
+            return NO;
+        }
+        deletedAny = YES;
+        [[OCEngine shared] appendEngineLogSync:[NSString stringWithFormat:@"Guest data deleted: %@", path]];
+    }
+    if (!deletedAny) {
+        [[OCEngine shared] appendEngineLogSync:@"Guest data reset: no overlay file on disk (already fresh)"];
+    }
+    return YES;
 }
 
 - (void)finishBootWithSuccess:(BOOL)ok error:(nullable NSError *)error {
@@ -605,7 +712,8 @@ static BOOL OCPathUsableOnKernelCommandLine(const char *path) {
     _booted = NO;
     // Settle first, best effort, off the main thread: ask the guest
     // to write its filesystems back before it is stopped. This only
-    // flushes the overlay file; nothing survives the next boot.
+    // flushes the overlay file; the overlay itself is persistent
+    // now, so the guest's files survive the next boot.
     __weak typeof(self) weakSelf = self;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         typeof(self) strongSelf = weakSelf;

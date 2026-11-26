@@ -325,7 +325,21 @@ new_strings = ["Retrying in 60s", "Automatic retry: starting engine",
                "opencode/service.json",
                "--hostname 127.0.0.1",
                "Health probe starting (server listening in guest)",
-               "Health timer fallback"]
+               "Health timer fallback",
+               # Persistent overlay (2026-11-26): the overlay is
+               # created once in Documents/Engine/guest and reused
+               # on every boot instead of being deleted and
+               # recreated, so sessions, logins and /root/Projects
+               # survive a guest reboot. First boot after the move
+               # migrates the old tmp overlay. Settings has a
+               # "Reset guest data" action that deletes the overlay
+               # file only.
+               "Overlay reused (persistent guest data)",
+               "Overlay moved from tmp",
+               "Overlay created (4 GiB, first boot)",
+               "Guest data deleted",
+               "Reset guest data",
+               "resetGuestDataWithError"]
 for m in new_strings:
     check(f"new string present: {m}", m in blob)
 # The old plain serve on 0.0.0.0 is gone: it wrote no service

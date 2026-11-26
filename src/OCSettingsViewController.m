@@ -62,20 +62,22 @@
 
 #pragma mark - Table
 
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 4; }
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 5; }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     if (section == 0) return 3;
     if (section == 1) return 2;
     if (section == 2) return MAX(1, (NSInteger)self.providers.count);
-    return 2;
+    if (section == 3) return 2;
+    return 1;
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
     if (section == 0) return @"Engine server";
     if (section == 1) return @"Agent";
     if (section == 2) return @"Providers (from the engine)";
-    return @"About";
+    if (section == 3) return @"About";
+    return @"Guest data";
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -86,9 +88,11 @@
     cell.detailTextLabel.numberOfLines = 0;
     // Cells are reused across rows: clear the accessory, or the
     // Server URL field (or a disclosure chevron) can show up on a
-    // row it does not belong to.
+    // row it does not belong to. The reset row is red, so the text
+    // colour is reset here too.
     cell.accessoryType = UITableViewCellAccessoryNone;
     cell.accessoryView = nil;
+    cell.textLabel.textColor = [UIColor labelColor];
     cell.textLabel.text = nil;
     cell.detailTextLabel.text = nil;
     OCSettings *s = [OCSettings shared];
@@ -143,6 +147,15 @@
     } else if (indexPath.section == 3 && indexPath.row == 1) {
         cell.textLabel.text = @"Files";
         cell.detailTextLabel.text = @"Agent files live in ~/Projects. Nothing leaves the phone except calls to your AI provider.";
+    } else if (indexPath.section == 4 && indexPath.row == 0) {
+        // Reset guest data: deletes the overlay file only (sessions,
+        // logins, ~/Projects). The guest image and settings are kept.
+        // A corrupt overlay breaks every boot, so this is the
+        // recovery path. Red text, like a destructive action.
+        cell.textLabel.text = @"Reset guest data";
+        cell.textLabel.textColor = [UIColor systemRedColor];
+        cell.detailTextLabel.text = @"Deletes sessions, logins and ~/Projects. The guest image and settings are kept.";
+        cell.selectionStyle = UITableViewCellSelectionStyleDefault;
     }
     return cell;
 }
@@ -218,7 +231,30 @@
             [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
             [self presentViewController:sheet animated:YES completion:nil];
         }];
+    } else if (indexPath.section == 4 && indexPath.row == 0) {
+        // Reset guest data: confirmation first, then stop the
+        // engine (the overlay cannot be deleted while the guest
+        // runs on it) and delete the overlay file only.
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Reset guest data" message:@"Deletes the guest's saved files — sessions, logins, and ~/Projects. The guest image and your settings are kept. The engine stops, and you will need to relaunch the app to start again." preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+        [alert addAction:[UIAlertAction actionWithTitle:@"Reset" style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull a) {
+            (void)a;
+            [self resetGuestData];
+        }]];
+        [self presentViewController:alert animated:YES completion:nil];
     }
+}
+
+- (void)resetGuestData {
+    OCEngine *engine = [OCEngine shared];
+    if (engine.state == OCEngineStateRunning || engine.state == OCEngineStateStarting) {
+        [engine stopEngine];
+    }
+    NSString *error = nil;
+    BOOL ok = [[OCKernGlue shared] resetGuestDataWithError:&error];
+    UIAlertController *done = [UIAlertController alertControllerWithTitle:ok ? @"Guest data deleted" : @"Reset failed" message:ok ? @"The guest starts with a fresh disk next time. Relaunch the app to start it." : (error ?: @"Could not delete the guest data.") preferredStyle:UIAlertControllerStyleAlert];
+    [done addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:done animated:YES completion:nil];
 }
 
 - (BOOL)textFieldShouldReturn:(UITextField *)textField {

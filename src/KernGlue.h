@@ -16,7 +16,7 @@
 //      kernarium_runtime_get_api_v28() (public C API v46).
 //   2. Boots the Debian guest the way TermX does: plan_gpu_budget(),
 //      set_console_output_callback(), fill kernarium_runtime_boot
-//      (rootfs + fresh 4 GiB overlay, use_jit = 0), then run() on a
+//      (rootfs + persistent 4 GiB overlay, use_jit = 0), then run() on a
 //      background thread (it blocks until the guest stops). The
 //      guest is "up" when the console shows `login: `; there is no
 //      other boot-completed signal. A hidden full-screen MTKView is
@@ -43,8 +43,10 @@
 // Deliberately NOT carried over: the LinuxRunner fakefs root, the
 // .deb first-launch setup, the exchange bind mount (no shared folder
 // exists in the public Kernarium API), and any guest executor with
-// exit codes. Guest writes vanish on every reboot (overlay formatted
-// fresh); see KERNARIUM-ENGINE.md, "PERSISTENCE-TODO".
+// exit codes. Guest writes persist across reboots: the overlay is
+// created once and reused (the boot formats it only on first use);
+// Settings has a "Reset guest data" action that deletes the overlay
+// file only, for a corrupt disk.
 // SPDX-License-Identifier: GPL-2.0-or-later
 #import <Foundation/Foundation.h>
 #import <MetalKit/MetalKit.h>
@@ -111,8 +113,13 @@ NS_ASSUME_NONNULL_BEGIN
 // Best-effort guest storage settle (runtime sync()): asks the guest
 // to write its filesystems back and flushes the host files. The
 // completion says whether the guest confirmed. This settles the
-// overlay file only; it does NOT make anything persist across boots
-// (the overlay is formatted fresh on the next boot).
+// overlay file; the overlay is persistent now, so settled writes
+// survive the next boot.
+// Delete the overlay file only (the guest's saved data: sessions,
+// logins, /root/Projects). The rootfs and session.json are never
+// touched. The caller stops the engine first; safe while the guest
+// is shutting down. The next boot creates a fresh overlay.
+- (BOOL)resetGuestDataWithError:(NSString * _Nullable * _Nullable)error;
 - (void)syncGuestWithCompletion:(void (^)(BOOL confirmed))completion;
 
 // Hold (background) / release (foreground) the guest's GPU requests.
