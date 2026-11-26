@@ -7,14 +7,14 @@
 #import <mach/mach.h>
 #import <zlib.h>
 
-// Guest image published 2026-11-21 as release rootfs-20261120
-// (opencode-debian-trixie-arm64.ext4.gz, 1,159,150,314 bytes).
+// Guest image published 2026-11-26 as release rootfs-20261126-slim
+// (opencode-debian-trixie-arm64.ext4.gz, 472,629,946 bytes).
 // Hashes from rootfs-build/SHA256SUMS. A version difference is an
 // update, not a failure: an installed image from an older release
 // boots as-is (see guestInstalledAt:), and only a file that cannot
 // be a guest image at all is damaged.
 //
-// Chunked delivery: the 1.16 GB .gz is split into 12 ~100 MiB parts
+// Chunked delivery: the 451 MB .gz is split into 5 ~100 MiB parts
 // (rootfs-build/CHUNKS-SHA256SUMS). The app downloads each part,
 // verifies its SHA-256, and only then reassembles the .gz and verifies
 // the whole archive hash. A part that fails verification is deleted
@@ -72,46 +72,31 @@
 // gunzip cleanly instead of being frozen mid-write and killed
 // while suspended.
 NSString *const kOCGuestImageChunkBaseURL =
-    @"https://github.com/spyboi-dev/opencode-ios/releases/download/rootfs-20261120/";
+    @"https://github.com/spyboi-dev/opencode-ios/releases/download/rootfs-20261126-slim/";
 NSString *const kOCGuestImageName = @"opencode-debian-trixie-arm64.ext4";
-NSString *const kOCGuestImageGzSHA256 = @"b1018c9357236ea2355bff488eda32171cc25c450997cccd7052b15992d3a8fa";
-NSString *const kOCGuestImageSHA256 = @"c7511200d3e23e21bcd68e63904e489b4724e24c263464e92c8dd72963a83e1f";
-const long long kOCGuestImageSize = 4462739456; // extracted .ext4 size in bytes
+NSString *const kOCGuestImageGzSHA256 = @"68dfee689d778c4628a5b91d4afc274b7b0910dddc41234a20904ef1a1cd434e";
+NSString *const kOCGuestImageSHA256 = @"70d25c189d42b62ee39e0e2366eff854bb925c17ed4491ee653b15092f045358";
+const long long kOCGuestImageSize = 1778384896; // extracted .ext4 size in bytes
 
-// Chunk table: 12 parts, 100 MiB each except the last (5,716,714 bytes).
+// Chunk table: 5 parts, 100 MiB each except the last (53,199,546 bytes).
 // Names and SHA-256 from rootfs-build/CHUNKS-SHA256SUMS.
-static const NSInteger kOCGuestImageChunkCount = 12;
+static const NSInteger kOCGuestImageChunkCount = 5;
 static NSString *const kOCGuestImageChunkNames[] = {
     @"opencode-debian-trixie-arm64.ext4.gz.part00",
     @"opencode-debian-trixie-arm64.ext4.gz.part01",
     @"opencode-debian-trixie-arm64.ext4.gz.part02",
     @"opencode-debian-trixie-arm64.ext4.gz.part03",
     @"opencode-debian-trixie-arm64.ext4.gz.part04",
-    @"opencode-debian-trixie-arm64.ext4.gz.part05",
-    @"opencode-debian-trixie-arm64.ext4.gz.part06",
-    @"opencode-debian-trixie-arm64.ext4.gz.part07",
-    @"opencode-debian-trixie-arm64.ext4.gz.part08",
-    @"opencode-debian-trixie-arm64.ext4.gz.part09",
-    @"opencode-debian-trixie-arm64.ext4.gz.part10",
-    @"opencode-debian-trixie-arm64.ext4.gz.part11",
 };
 static NSString *const kOCGuestImageChunkSHA256[] = {
-    @"fcb2337ab43d5e4158295d69a355388c31bfdb06e6bfdad9e008c962ce95ba53",
-    @"35a25e8b2ede174bd02ab20bf36d8e7b5cf121f7358f3b4b102d2a0737308fe3",
-    @"0eabfe831216767a07b89909d42e4707a33d9789018566f3f2abb64113158ef9",
-    @"a56f58349f8906932ba294c64e94faf3ea62a28a824ee886f4c1ea58316170cd",
-    @"aac03682fac715e776623e9a4ca0a2a0b19b3b671bc6c3a0a9551f016110c98b",
-    @"a957c690982dbd46f8ae56841e38d523af0f063b4e9b98bbaec8d7223164b14f",
-    @"7fb8d922db43f2baaa3d36f511c9dbc0e31ebb3babdb2bb83e6c8a3aaa768fd8",
-    @"00a262fc27ab876063b5f200d6f607482a645bcba5a3b3b0b1c84695e9d2bea7",
-    @"e53e8d09f2dd0ee5410f1056aa74d05f8492fc3a16163332fe51027ddf25e601",
-    @"9dad6dc9cf7df436bd1a12348bbe63da54303231862e13a316c40274c7c62360",
-    @"ffba913c707fe29c94a7a2f109b479794843da7ca6ab22bfa1d46f11442d7297",
-    @"77d42a1fcf088a4cd917b0cb48cb648969263fbbad5593ae77ce662569013db5",
+    @"90103bee8596f61830f057e883a0ad084d3d2c0a49adf41ac3b925db399cd9db",
+    @"5fd941dbef8b0f90503770f8d2a007008831ba04d2d48ea98999ec66d33c96e5",
+    @"7ff67c1c27ada73ef07fe23d8617316e9e1123942bea35af6d28cdf1eb70e706",
+    @"62231a8057380bc405687bf835b5a5d04029c77d7e8abfd21db3416d611ce5d3",
+    @"c448923f9617322f4544d458c1ec72be9d5d5d1f76ba74b3b7862706440ee4a7",
 };
 static const long long kOCGuestImageChunkSizes[] = {
-    104857600, 104857600, 104857600, 104857600, 104857600, 104857600,
-    104857600, 104857600, 104857600, 104857600, 104857600, 5716714,
+    104857600, 104857600, 104857600, 104857600, 53199546,
 };
 
 // Stop flag for the extraction: set by the install pipeline's
@@ -135,9 +120,9 @@ static NSString *SHA256OfFile(NSString *path, NSError **outError) {
         // autoreleased 1 MB NSData, and this loop runs inside the
         // install block on a GCD worker thread whose pool only
         // drains when the block returns. Without the pool, hashing
-        // the 4.46 GB extracted image retains gigabytes of dead
+        // the 1.78 GB extracted image retains gigabytes of dead
         // NSData in the pool — on top of the ~2.4 GB already hashed
-        // in this block (12 parts + the .gz) — and iOS SIGKILLs
+        // in this block (5 parts + the .gz) — and iOS SIGKILLs
         // the app past its jetsam limit with no crash line,
         // exactly the silent death the 2026-11-25 log shows (log
         // stops after "Download verified", no extraction lines, no
@@ -275,12 +260,12 @@ static void ReportProgress(void (^progress)(double, NSString *), double fraction
 // suspended and finishes even if the app died — and the next
 // Install finds the part already verified instead of restarting
 // from zero. (TermX TXRootfsDownload, same shape, single file;
-// here one part at a time, 12 parts in sequence.)
+// here one part at a time, 5 parts in sequence.)
 //
 // Why a background session (2026-11-24, the download crash): the
 // old code used [NSURLSession sharedSession] with a completion
 // handler and a dispatch_semaphore_wait poll loop on a blocked GCD
-// thread — the whole 1.16 GB transfer ran in-process while the app
+// thread — the whole 451 MB transfer ran in-process while the app
 // sat on its background location budget, and died SIGKILL-class
 // (no CRASH line, no error, log stops mid-download) on two builds.
 // A background session moves the transfer out of the app's memory
@@ -646,7 +631,7 @@ static BOOL AssembleChunks(NSArray<NSString *> *chunkPaths, NSString *dstPath) {
             // @autoreleasepool per chunk, same as SHA256OfFile
             // above: without it the 1 MB autoreleased NSData from
             // every read accumulates in the install block's pool
-            // for the whole 1.16 GB assembly.
+            // for the whole 451 MB assembly.
             @autoreleasepool {
                 NSData *data = [in readDataOfLength:1 << 20];
                 if (data.length == 0) break;
@@ -681,7 +666,7 @@ static BOOL AssembleChunks(NSArray<NSString *> *chunkPaths, NSString *dstPath) {
 // NSUserDefaults as the file's path, size, modification date AND
 // the hash it verified as. guestInstalledAt — called on the boot
 // path (KernGlue) and at install start/end — then answers from
-// that fingerprint with a stat call instead of re-hashing 4.46 GB.
+// that fingerprint with a stat call instead of re-hashing 1.78 GB.
 // The fingerprint only counts for the exact file it was recorded
 // for: any size or mtime change voids it. The recorded hash is
 // what tells an older release from the current one without
@@ -695,7 +680,7 @@ static NSString *const kOCVerifiedRootfsKey = @"oc.verified-rootfs";
 // Cheap by design: exists + size + read-only bit, then the
 // recorded fingerprint or the ext4 magic. NEVER a hash here —
 // this runs on the boot path (KernGlue), and a full SHA-256 of
-// 4.46 GB on every boot is the stall the fingerprint exists to
+// 1.78 GB on every boot is the stall the fingerprint exists to
 // avoid. A version difference is NOT a failure: an older release
 // that is a valid ext4 image boots exactly like the current one,
 // and the update is offered separately. Only a file that cannot
@@ -765,7 +750,7 @@ static NSString *const kOCVerifiedRootfsKey = @"oc.verified-rootfs";
 }
 
 // Cheap: is the installed image already this build's release? Only
-// the fingerprint's recorded hash can answer without hashing 4.46 GB.
+// the fingerprint's recorded hash can answer without hashing 1.78 GB.
 + (BOOL)installedImageIsCurrentReleaseAt:(NSString *)rootfsPath {
     NSString *hash = [self installedImageVerifiedHashAt:rootfsPath];
     return hash != nil && [hash isEqualToString:kOCGuestImageSHA256];
@@ -838,7 +823,7 @@ static NSString *const kOCVerifiedRootfsKey = @"oc.verified-rootfs";
     }
     // 1 MiB stdio buffer, set before any I/O on the stream: the
     // default is the filesystem block size (4 KiB on APFS), which
-    // turns a 4.46 GB extraction into ~1.1 M write() calls.
+    // turns a 1.78 GB extraction into ~1.1 M write() calls.
     setvbuf(out, NULL, _IOFBF, 1 << 20);
     // Heap buffer, never the stack: TermX's SIGBUS (commit d2b4f2e)
     // was a 1 MiB gunzip buffer on a 512 KiB GCD worker stack, so the
@@ -882,7 +867,7 @@ static NSString *const kOCVerifiedRootfsKey = @"oc.verified-rootfs";
 + (void)installGuestTo:(NSString *)rootfsPath
               progress:(void (^)(double, NSString *))progress
             completion:(void (^)(BOOL, NSString *))completion {
-    // The installed check SHA-256s a 4.46 GB image: never on the main
+    // The installed check SHA-256s a 1.78 GB image: never on the main
     // thread (TermX 8c76d48). The whole install runs on a background
     // queue; progress and completion hop to the main queue themselves.
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -961,7 +946,7 @@ static NSString *const kOCVerifiedRootfsKey = @"oc.verified-rootfs";
     }
     // The assembled .gz, once verified, is the resume point for the
     // whole install: a kill during extraction or verification must
-    // cost a ~30 s re-extraction, never a 1.16 GB re-download. So
+    // cost a ~30 s re-extraction, never a 451 MB re-download. So
     // the archive is NOT deleted blindly here. If a verified .gz is
     // already on disk (a previous attempt got past assembly), the
     // download and the assembly are both skipped; if it is stale
@@ -1063,9 +1048,9 @@ static NSString *const kOCVerifiedRootfsKey = @"oc.verified-rootfs";
         }
         // The .gz is verified: the parts are redundant now (a later
         // failure is in gunzip, where re-downloading is the correct
-        // recovery anyway), so drop them before the 4.46 GB extraction
+        // recovery anyway), so drop them before the 1.78 GB extraction
         // — that keeps the extraction peak at .gz + new image + old
-        // image instead of adding 1.16 GB of parts to it.
+        // image instead of adding 451 MB of parts to it.
         for (NSString *chunkPath in chunkPaths) {
             [fm removeItemAtPath:chunkPath error:nil];
             [fm removeItemAtPath:[chunkPath stringByAppendingString:@".resume"] error:nil];
@@ -1082,7 +1067,7 @@ static NSString *const kOCVerifiedRootfsKey = @"oc.verified-rootfs";
     // first so a later free-space check stays honest.
     NSString *newPath = [rootfsPath stringByAppendingString:@".new"];
     [fm removeItemAtPath:newPath error:nil];
-    OCInstallLog(@"Extracting the image — 4.46 GB, progress every 10%");
+    OCInstallLog(@"Extracting the image — 1.78 GB, progress every 10%");
     __block NSInteger lastExtractLoggedPercent = 0;
     NSString *extractError = nil;
     if (![self gunzipFile:gzPath to:newPath progress:^(unsigned long long bytesWritten) {

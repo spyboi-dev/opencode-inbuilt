@@ -9,7 +9,7 @@
 // image are checked against their SHA-256. If the image is already in
 // place with the right hash, no download happens at all.
 //
-// The image is published as release rootfs-20261120, delivered in 12
+// The image is published as release rootfs-20261126-slim, delivered in 5
 // verified ~100 MiB parts (rootfs-build/CHUNKS-SHA256SUMS): the app
 // downloads each part, verifies its SHA-256, reassembles the .gz and
 // verifies the whole archive hash before extracting. A part that
@@ -46,12 +46,12 @@ extern const long long kOCGuestImageSize;     // bytes of the extracted image
 // NOT a failure: an older release boots as-is. Only a file that
 // cannot be a guest image at all (wrong size, not ext4) is
 // damaged. Never hashes the file: this runs on the boot path
-// (KernGlue) and a 4.46 GB hash there would stall every launch.
+// (KernGlue) and a 1.78 GB hash there would stall every launch.
 + (BOOL)guestInstalledAt:(NSString *)rootfsPath error:(NSString * _Nullable * _Nullable)error;
 
 // Cheap: is the installed image already this build's release?
 // Only the fingerprint's recorded hash can answer without
-// hashing 4.46 GB.
+// hashing 1.78 GB.
 + (BOOL)installedImageIsCurrentReleaseAt:(NSString *)rootfsPath;
 
 // The hash this exact file was verified as, from its fingerprint
@@ -63,7 +63,7 @@ extern const long long kOCGuestImageSize;     // bytes of the extracted image
 // launch update check uses this (not guestImageHashValidAt:) so a
 // mismatching hash can still be recorded in the fingerprint —
 // "different hash" is how the next launch knows the image is an
-// older release without hashing 4.46 GB again.
+// older release without hashing 1.78 GB again.
 + (nullable NSString *)SHA256OfImageAt:(NSString *)path;
 
 // Record the verified fingerprint (path, size, mtime, hash) for a

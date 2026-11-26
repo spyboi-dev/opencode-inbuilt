@@ -632,10 +632,10 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
     if (!engine.guestCoreLinked && !engine.guestCoreLoadable) {
         reason = @"The engine is not ready yet.";
     } else if (engine.state == OCEngineStateNotInstalled) {
-        reason = @"1.16 GB download";
+        reason = @"451 MB download";
     } else if (engine.state == OCEngineStateInstalling) {
         // The live install step (e.g. "Downloading guest image
-        // part 3 of 12…"), or the static line until the first
+        // part 3 of 5…"), or the static line until the first
         // progress callback arrives.
         reason = self.installMessage.length ? self.installMessage : @"First-launch setup is still running.";
     } else if (engine.state == OCEngineStateError) {

@@ -155,10 +155,10 @@ markers = ["DYLD OK", "BOOT.txt", "Calling UIApplicationMain",
            "Scene config requested", "Window attached to scene",
            "Window attached to scene (poll)", "App became active",
            "Continue to app", BUILD_ID,
-           "b1018c9357236ea2355bff488eda32171cc25c450997cccd7052b15992d3a8fa",
-           "c7511200d3e23e21bcd68e63904e489b4724e24c263464e92c8dd72963a83e1f",
+           "68dfee689d778c4628a5b91d4afc274b7b0910dddc41234a20904ef1a1cd434e",
+           "70d25c189d42b62ee39e0e2366eff854bb925c17ed4491ee653b15092f045358",
            "opencode-debian-trixie-arm64.ext4.gz.part00",
-           "opencode-debian-trixie-arm64.ext4.gz.part11"]
+           "opencode-debian-trixie-arm64.ext4.gz.part04"]
 for m in markers:
     check(f"string present: {m[:40]}", m in blob)
 for i in range(1, 8):

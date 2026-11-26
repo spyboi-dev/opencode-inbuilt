@@ -151,7 +151,7 @@ static NSString *const kGuestImageInstalled = @"oc.guestImageInstalled";
 
 // Launch update check (TermX c2f4ed5 + 28f2191): settles whether
 // the installed image is this build's release, on a background
-// queue — never the main thread, it can hash 4.46 GB. It sets
+// queue — never the main thread, it can hash 1.78 GB. It sets
 // updateAvailable, and when a newer image is available it holds
 // the guest stopped (Installed -> Stopped) so the startup screen
 // offers a tappable Update button (and a Start button to boot
@@ -175,7 +175,7 @@ static NSString *const kGuestImageInstalled = @"oc.guestImageInstalled";
         if (!strongSelf) return;
         // Cheap first: the fingerprint recorded by the install
         // pipeline carries the hash it verified. A recorded hash
-        // answers with no 4.46 GB hash at all — equal means
+        // answers with no 1.78 GB hash at all — equal means
         // current, different means an older release.
         NSString *recordedHash = [OCGuestInstall installedImageVerifiedHashAt:imagePath];
         BOOL answered = recordedHash != nil;
@@ -186,8 +186,8 @@ static NSString *const kGuestImageInstalled = @"oc.guestImageInstalled";
             // hash field): one full hash settles it, and the hash
             // is recorded in the fingerprint either way, so the
             // next launch answers cheaply — a mismatch is an older
-            // release, not a reason to hash 4.46 GB every launch.
-            // (TermX records only on success; with a 4.46 GB
+            // release, not a reason to hash 1.78 GB every launch.
+            // (TermX records only on success; with a 1.78 GB
             // image the repeated hash costs too much to copy.)
             NSString *hash = [OCGuestInstall SHA256OfImageAt:imagePath];
             if (hash) {
@@ -290,7 +290,7 @@ static NSString *const kGuestImageInstalled = @"oc.guestImageInstalled";
 // done yet (the startup screen's Install finishes it, and the
 // state observer calls this again when it does), and a failed
 // setup (the startup screen's Install retries that one — a
-// 1.16 GB download does not restart on its own). A skip that
+// 451 MB download does not restart on its own). A skip that
 // consumed the attempt would leave a fresh install unable to
 // auto-start after its own Install.
 //
