@@ -1,3 +1,36 @@
+## Status: NATIVE CHAT — THREADS OPENS OCChatViewController, WEBVIEW DELETED — LOCAL BUILD 4082db7, verified
+
+Device test of bb7a3d2, 2026-11-26 16:57 IST: REJECTED. The WKWebView opened the web UI's "Connect to a server" pairing screen (paste a pairing link, scan its QR code) instead of a chat. The user wants a NATIVE UI adapted into the app, linked to the engine automatically: no pairing, no connect screen, no QR, no sign-in.
+
+The native chat UI already existed in the repo (OCChatViewController, 1669 lines) and was substantial; this build wires Threads to it and fixes what had bit-rotted against the 2.3.0 server, instead of building a new UI from nothing. The official OpenCode mobile iOS source is NOT public (re-checked 2026-11-26: opencode-ai org has only opencode and homebrew-tap), so there is no official iOS code to take.
+
+### Audit (OCServerClient.m + OCChatViewController.m vs pinned 2.3.0 source a6b15d33)
+
+Already correct, no fix needed: every endpoint matches — GET /api/session, POST /api/session, GET /api/session/:id/message (default order desc, so the chat's reverse to chronological is right), POST /api/session/:id/prompt {text}, POST /api/session/:id/model {model:{id,providerID}} (= Model.Ref), GET /api/model ({data:[Model.Info]} with modelID/providerID/name), GET /api/event (SSE frames `data: {json}\n\n`, events carry top-level `type` such as session.text.delta), permission reply {decision: once|always|reject}, /api/fs/list, /api/fs/read/*, POST /api/experimental/fs/write, GET /api/info. Auth is HTTP Basic, user opencode, password from the Keychain, on every call. Session time.busy/idle exist, so the poll stops when the run finishes. Message shapes are {type, content:[...]}; user messages carry top-level text, assistant text/reasoning/tool parts, idle messages are skipped.
+
+Broken, fixed in this build:
+- **Tool output never rendered.** The chat read `state[@"output"]`, but 2.3.0 ToolState has no `output` field: completed/error states carry `content:[{type:"text",text} | {type:"file",uri,mime,name}]`. The chat now parses that (text parts joined, file parts as `[file: name]`), with the legacy `output` shape and the error state's message kept as fallbacks.
+- **Streaming tools showed as finished.** The running check was `pending|running`; 2.3.0 statuses are `streaming|running|completed|error`. Running is now `streaming|running`, so a streaming tool gets the spinner and accent title.
+- **Streaming tool input ignored.** A streaming state's input is a plain string, not a dict; the detail now uses it.
+- **Top-level shell messages were dropped silently.** `{type:"shell", command, status, exit, output}` has no content[] and no text, so it fell through every branch. It now renders as a shell tool row (command + output card).
+- **No retry action on load failure.** The empty state was text only ("Start the engine and try again"); retry needed leaving and re-entering the thread. It now reads "Start the engine, then tap here to retry." and tapping it reloads the thread. Never a pairing/connect/QR/sign-in screen.
+- Stale version notes: "verified live against opencode 2.2.6" in OCServerClient.h and OCChatViewController.m now say 2.3.0 (pinned a6b15d33).
+
+### What changed (commit 4082db7, 8 files, +104/-29)
+
+- **Threads** (`src/OCSessionsViewController.m` openSession): tapping a thread (or + for a new chat, which creates the session then calls openSession) now pushes `[[OCChatViewController alloc] initWithSession:session]`. The chat uses the existing Basic auth (opencode + Keychain password) and the already-running server at 127.0.0.1:4096, so it links to the engine automatically.
+- **WebView deleted** (`src/OCWebUIViewController.h/.m`): both files removed, and removed from `build-local-kernarium.sh` (compile + link lists). Confirmed by grep: no reference remains in src, the build script or verify-local.py except the one history comment in OCSessionsViewController.m. The -framework WebKit link stays: OCBrowserViewController (the globe button's in-app browser for previewing a build) still uses it; that is not the chat UI.
+- **Chat fixes** (`src/OCChatViewController.m`): tool content parsing, streaming running state, streaming string input, shell messages, tap-to-retry empty state (see audit above).
+- `verify-local.py`: the 3 web-UI presence markers are replaced by 3 native-chat presence markers (OCChatViewController, "Could not load this chat", "tap here to retry") plus 3 absence checks (OCWebUIViewController, "Could not load the mobile UI", "/server/%@/session/%@"). ALL PASS, 172 checks.
+- README: "Tapping a thread opens the official mobile UI..." → "Tapping a thread opens the native chat, linked to the OpenCode 2.3.0 server on this device."
+- No image change, no framework change (still the fork build, API 46), no Settings change, no bootstrap change (no new bootstrap/script lines in this diff, so no bash -n extraction was needed). The CLI Terminal stays (Engine tab → Show terminal). Nothing merged to main. `kernarium-desktop` and termx untouched.
+
+Build 4082db7, local, 2026-11-26 ~17:37 IST (28 s). IPA `mac-ipas/OpenCode-iOS-4082db7.ipa`, 25,243,058 bytes, SHA-256 cd54e50b3dd1695a05cbc4a5fd0c42eeb972f45a360f19a878905ccb4ba57d1e. GitHub release opencode-4082db7. Staged in `~/workspace/goals/opencode-for-ios/files/OpenCode-iOS-4082db7.ipa`. One pre-existing compiler warning (sign-compare at OCEngine.m:603, log-tail helper, not in this diff) — build exits 0.
+
+### Device test (4082db7)
+
+Install over bb7a3d2, do NOT delete the app — the guest image is already installed. On Threads, tap a thread (or + for a new chat). The native chat opens directly with no pairing/connect screen, no QR, no sign-in. Send a real message and confirm the streamed reply appears, with tool rows and shell output rendering. The Terminal still works from the Engine tab → Show terminal. Send a screenshot AND the OpenCode engine.log — explicitly the OpenCode app's log, not TermX's. If the chat shows "Could not load this chat", the engine was not up when the thread opened — start the engine, then tap the message to retry.
+
 ## Status: OFFICIAL MOBILE UI IN A NATIVE SHELL — LOCAL BUILD bb7a3d2, verified
 
 User direction 2026-11-26: "yup use opencode official mobile ui for ios", then "go to opencode repo u can find there", then he sent https://github.com/Shahfarzane/opencode-mobile. The parent re-checked: the opencode-ai org still has only opencode and homebrew-tap (no mobile repo), and opencode-ai/opencode has no mobile paths. The official mobile UI is the mobile-responsive web UI inside packages/app of the TypeScript repo (anomalyco/opencode): mobile-drawer.tsx, mobile-panel-drawer.tsx, mobile-tabs-machine.ts, e2e mobile-*.spec.ts. The server serves it at /.
