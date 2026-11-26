@@ -3,6 +3,8 @@
 #import "OCSettings.h"
 #import "OCServerClient.h"
 #import "OCEngine.h"
+#import "OCLocalhostProxy.h"
+#import "KernGlue.h"
 
 @interface OCSettingsViewController () <UITableViewDataSource, UITableViewDelegate, UITextFieldDelegate>
 @property (nonatomic, strong) UITableView *tableView;
@@ -63,7 +65,7 @@
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 4; }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    if (section == 0) return 2;
+    if (section == 0) return 3;
     if (section == 1) return 2;
     if (section == 2) return MAX(1, (NSInteger)self.providers.count);
     return 2;
@@ -98,6 +100,17 @@
     } else if (indexPath.section == 0 && indexPath.row == 1) {
         cell.textLabel.text = @"Server password";
         cell.detailTextLabel.text = s.hasServerPassword ? @"Stored in Keychain" : @"Not set yet (generated on first engine start)";
+    } else if (indexPath.section == 0 && indexPath.row == 2) {
+        // Localhost ports: guest services on these ports answer at
+        // the phone's 127.0.0.1 (the localhost proxy). 4096 and
+        // 8000 are already bridged and never listed here.
+        cell.textLabel.text = @"Localhost ports";
+        NSArray<NSNumber *> *ports = [OCLocalhostProxy configuredPorts];
+        NSMutableArray<NSString *> *parts = [NSMutableArray array];
+        for (NSNumber *port in ports) [parts addObject:[port stringValue]];
+        cell.detailTextLabel.text = parts.count ? [parts componentsJoinedByString:@", "] : @"None";
+        cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     } else if (indexPath.section == 1 && indexPath.row == 0) {
         cell.textLabel.text = @"Agent mode";
         cell.detailTextLabel.text = [s.agent isEqualToString:@"plan"] ? @"Plan" : @"Build";
@@ -139,7 +152,38 @@
     // Tapping a row while editing the server URL used to leave the
     // keyboard up over the sheet that opens.
     [self.serverField resignFirstResponder];
-    if (indexPath.section == 1 && indexPath.row == 0) {
+    if (indexPath.section == 0 && indexPath.row == 2) {
+        // Edit the localhost ports as a comma-separated list. 4096
+        // and 8000 are already bridged and are dropped on save.
+        NSArray<NSNumber *> *current = [OCLocalhostProxy configuredPorts];
+        NSMutableArray<NSString *> *parts = [NSMutableArray array];
+        for (NSNumber *port in current) [parts addObject:[port stringValue]];
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Localhost ports" message:@"Comma-separated ports. 4096 and 8000 are already bridged." preferredStyle:UIAlertControllerStyleAlert];
+        [alert addTextFieldWithConfigurationHandler:^(UITextField * _Nonnull field) {
+            field.text = [parts componentsJoinedByString:@", "];
+            field.keyboardType = UIKeyboardTypeNumbersAndPunctuation;
+            field.autocapitalizationType = UITextAutocapitalizationTypeNone;
+            field.autocorrectionType = UITextAutocorrectionTypeNo;
+        }];
+        [alert addAction:[UIAlertAction actionWithTitle:@"Save" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull a) {
+            (void)a;
+            NSString *text = alert.textFields.firstObject.text ?: @"";
+            NSMutableArray<NSNumber *> *ports = [NSMutableArray array];
+            for (NSString *piece in [text componentsSeparatedByString:@","]) {
+                NSString *trimmed = [piece stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                long port = (long)[trimmed integerValue];
+                if (trimmed.length && port >= 1 && port <= 65535) [ports addObject:@(port)];
+            }
+            // An empty list means no change: saving nothing would
+            // make the next read fall back to the defaults.
+            if (!ports.count) return;
+            [OCLocalhostProxy setConfiguredPorts:ports];
+            [[OCKernGlue shared] restartLocalhostProxy];
+            [self.tableView reloadData];
+        }]];
+        [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
+    } else if (indexPath.section == 1 && indexPath.row == 0) {
         OCSettings *s = [OCSettings shared];
         UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Agent mode" message:nil preferredStyle:UIAlertControllerStyleActionSheet];
         [sheet addAction:[UIAlertAction actionWithTitle:@"Build" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull a) { (void)a; s.agent = @"build"; [s save]; [self.tableView reloadData]; }]];

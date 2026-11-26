@@ -5,6 +5,7 @@
 #import "OCEngine.h"
 #import "OCGuestInstall.h"
 #import "OCVsockBridge.h"
+#import "OCLocalhostProxy.h"
 #import <UIKit/UIKit.h>
 #import <dlfcn.h>
 #import <errno.h>
@@ -107,6 +108,10 @@ static BOOL OCPathUsableOnKernelCommandLine(const char *path) {
     NSMutableArray<void (^)(BOOL, NSError * _Nullable)> *_bootWaiters;
     OCVsockBridge *_serverBridge;
     OCVsockBridge *_appBridge;
+    // The general localhost proxy (guest ports beyond 4096/8000).
+    // Started with the bridges, stopped with them. Dormant until
+    // the guest image carries tx-vsock-bridge (slim image rebuild).
+    OCLocalhostProxy *_localhostProxy;
     dispatch_queue_t _consoleQueue;
 }
 - (void)handleConsoleData:(NSData *)data;
@@ -514,13 +519,28 @@ static BOOL OCPathUsableOnKernelCommandLine(const char *path) {
     if (![_appBridge startOnLocalPort:8000 vsockPort:8000 error:&error]) {
         [[OCEngine shared] appendEngineLogSync:[NSString stringWithFormat:@"App bridge failed: %@", error.localizedDescription]];
     }
+    // The general localhost proxy: any other guest localhost port
+    // answers at the phone's localhost (vsock 5999 to the guest
+    // bridge). Dormant until the guest image carries the bridge.
+    if (!_localhostProxy) _localhostProxy = [[OCLocalhostProxy alloc] init];
+    [_localhostProxy startWithAPI:_api];
 }
 
 - (void)stopBridges {
+    [_localhostProxy stop];
     [_serverBridge stop];
     _serverBridge = nil;
     [_appBridge stop];
     _appBridge = nil;
+}
+
+// Restart the localhost proxy with the current configured ports
+// (after the user edits them in Settings). No-op when the guest
+// is not running. startWithAPI while running restarts cleanly.
+- (void)restartLocalhostProxy {
+    if (_localhostProxy && _api && _running) {
+        [_localhostProxy startWithAPI:_api];
+    }
 }
 
 - (void)sendConsoleText:(NSString *)text {

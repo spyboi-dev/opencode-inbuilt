@@ -289,6 +289,18 @@ new_strings = ["Retrying in 60s", "Automatic retry: starting engine",
                "ERROR CLI did not start",
                "CLI exited",
                "Terminal ready",
+               # Termx-Kernel fork adoption (2026-11-26): the app
+               # runs the fork framework (API 46) and starts the
+               # general localhost proxy next to the two vsock
+               # bridges. The guest bridge is not in the image
+               # yet, so the proxy is dormant: it listens, the
+               # auto-mirror gives up after a few failed polls
+               # with one log line, and nothing crashes or spams.
+               "Localhost proxy: listening on 127.0.0.1 for ports",
+               "Localhost proxy: stopped",
+               "Localhost proxy: guest bridge not answering",
+               "Localhost ports",
+               "restartLocalhostProxy",
                # Fetch fix (2026-11-25): the e001c27
                # "Failed to fetch" error page is a client
                # fetching its OWN sidecar. A plain serve
@@ -323,6 +335,12 @@ check("no plain serve on 0.0.0.0", "serve --port 4096 --hostname 0.0.0.0" not in
 # it answered the question (JIT works) and cost ~2-3 s before serve.
 check("no JIT probe node command", "node --jitless" not in blob)
 check("no JIT probe output marker", "JIT probe default:" not in blob)
+# The proxy is an adaptation of TermX's, not a copy: no TermX
+# identifiers may leak into this binary (wrong defaults key,
+# wrong log prefix, wrong queue label).
+for m in ["termx.localhostPorts", "TXLocalhostProxy",
+          "app.termx.ios.localhost-proxy"]:
+    check(f"no TermX proxy leftover: {m}", m not in blob)
 # Removed controls must be gone as button titles
 check("no 'Stop engine' string", "Stop engine" not in blob)
 # Slop removal (2026-11-25): the removed UI strings must be gone

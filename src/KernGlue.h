@@ -13,7 +13,7 @@
 // What it does, with no Swift and no Kernarium UI:
 //
 //   1. Loads exactly one runtime framework and resolves only
-//      kernarium_runtime_get_api_v28() (public C API v43).
+//      kernarium_runtime_get_api_v28() (public C API v46).
 //   2. Boots the Debian guest the way TermX does: plan_gpu_budget(),
 //      set_console_output_callback(), fill kernarium_runtime_boot
 //      (rootfs + fresh 4 GiB overlay, use_jit = 0), then run() on a
@@ -24,7 +24,10 @@
 //      behind the tab bar, never shown.
 //   3. Starts the host half of the vsock bridge (OCVsockBridge)
 //      before boot: 127.0.0.1:4096 -> guest vsock 4096 (the OpenCode
-//      server) and 127.0.0.1:8000 -> guest vsock 8000 (app.py).
+//      server) and 127.0.0.1:8000 -> guest vsock 8000 (app.py), plus
+//      the general localhost proxy (OCLocalhostProxy) for any other
+//      guest localhost port. The proxy is dormant until the guest
+//      image carries tx-vsock-bridge.
 //   4. Provides the guest executor OCEngine expects, redefined for a
 //      runtime that has no executor: the block types a command at the
 //      autologin shell over the serial console and acks once it was
@@ -99,6 +102,11 @@ NS_ASSUME_NONNULL_BEGIN
 // cannot be released, so a later boot in the same process may be
 // refused until the app is relaunched (see KERNARIUM-ENGINE.md).
 - (void)stopGuest;
+
+// Restart the localhost proxy with the current configured ports
+// (after the user edits them in Settings). No-op when the guest is
+// not running.
+- (void)restartLocalhostProxy;
 
 // Best-effort guest storage settle (runtime sync()): asks the guest
 // to write its filesystems back and flushes the host files. The

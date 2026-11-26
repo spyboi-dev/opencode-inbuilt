@@ -60,10 +60,18 @@ OUT=build-local
 APP=$OUT/Payload/OpenCode.app
 MIN=15.0
 
-KRUNTIME_SHA="74e97d928f3e23f106010a327dd21963b37e14d9c9017758ee2d8de267f838ac"
+# Termx-Kernel fork framework (fork HEAD 962678f49, upstream 9bda5e831,
+# runtime API 46, LocalhostProxy, boot-ramdisk persistent-upper patch).
+# The old upstream fbe12ee framework stays cached alongside at
+# KRuntime_6_18_4K.framework, so the old build stays reproducible.
+KRUNTIME_SHA="18275b14a448ebb59d52af6daeeaa0d93c33c82c828d007effac35706a79e978"
 KRUNTIME_CACHE_DIR="$HOME/workspace/opencode-local-frameworks"
-KRUNTIME_CACHE="$KRUNTIME_CACHE_DIR/KRuntime_6_18_4K.framework"
+KRUNTIME_CACHE="$KRUNTIME_CACHE_DIR/KRuntime_6_18_4K-fork-962678f49.framework"
 MAC_IPA="mac-ipas/OpenCode-Inbuilt-kernarium-d6cb75f.ipa"
+# NOTE: the fallback IPA below holds the OLD fbe12ee framework (API 43);
+# extracting from it yields a framework that fails the SHA check above.
+# The fork framework lives at ~/workspace/framework-artifacts/KRuntime_6_18_4K.framework
+# (workflow artifact KRuntime_6_18_4K from the Termx-Kernel fork build).
 # Override to point at a different prebuilt framework, e.g. a fresh
 # Mac-workflow one: KRUNTIME_FRAMEWORK=/path/to/KRuntime_6_18_4K.framework
 KRUNTIME_FRAMEWORK="${KRUNTIME_FRAMEWORK:-$KRUNTIME_CACHE}"
@@ -110,7 +118,7 @@ BUILD_ID="$(git rev-parse --short HEAD 2>/dev/null || echo dev)"
 CLANG=clang-18
 CFLAGS="-target arm64-apple-ios$MIN -isysroot $SDK -miphoneos-version-min=$MIN -fobjc-arc -O2 -Wall -Wextra -Wno-deprecated-declarations -DOC_KERNARIUM_LINKED=1 -DOC_BUILD_ID=\"${BUILD_ID}\" -I$SRC -F$SDK/System/Library/SubFrameworks -F$SDK/System/Library/PrivateFrameworks"
 
-for f in main AppDelegate OCSceneDelegate OCKeychain OCUtil OCSettings OCServerClient OCEngine OCCrashLog OCSessionsViewController OCChatViewController OCFilesViewController OCEngineViewController OCSettingsViewController OCIntegrationsViewController OCBrowserViewController OCCodeViewController OCStartupViewController OCDesktopViewController KernGlue OCVsockBridge OCGuestInstall; do
+for f in main AppDelegate OCSceneDelegate OCKeychain OCUtil OCSettings OCServerClient OCEngine OCCrashLog OCSessionsViewController OCChatViewController OCFilesViewController OCEngineViewController OCSettingsViewController OCIntegrationsViewController OCBrowserViewController OCCodeViewController OCStartupViewController OCDesktopViewController KernGlue OCVsockBridge OCLocalhostProxy OCGuestInstall; do
   echo "== $f.m"
   $CLANG $CFLAGS -c "$SRC/$f.m" -o "$OUT/$f.o"
 done
@@ -122,7 +130,7 @@ ld64.lld-18 -arch arm64 -platform_version ios $MIN 26.5 \
   -L"$SDK/usr/lib" \
   -adhoc_codesign -ObjC -dead_strip \
   -rpath @executable_path/Frameworks \
-  "$OUT"/main.o "$OUT"/AppDelegate.o "$OUT"/OCSceneDelegate.o "$OUT"/OCKeychain.o "$OUT"/OCUtil.o "$OUT"/OCSettings.o "$OUT"/OCServerClient.o "$OUT"/OCEngine.o "$OUT"/OCCrashLog.o "$OUT"/OCSessionsViewController.o "$OUT"/OCChatViewController.o "$OUT"/OCFilesViewController.o "$OUT"/OCEngineViewController.o "$OUT"/OCSettingsViewController.o "$OUT"/OCIntegrationsViewController.o "$OUT"/OCBrowserViewController.o "$OUT"/OCCodeViewController.o "$OUT"/OCStartupViewController.o "$OUT"/OCDesktopViewController.o "$OUT"/KernGlue.o "$OUT"/OCVsockBridge.o "$OUT"/OCGuestInstall.o \
+  "$OUT"/main.o "$OUT"/AppDelegate.o "$OUT"/OCSceneDelegate.o "$OUT"/OCKeychain.o "$OUT"/OCUtil.o "$OUT"/OCSettings.o "$OUT"/OCServerClient.o "$OUT"/OCEngine.o "$OUT"/OCCrashLog.o "$OUT"/OCSessionsViewController.o "$OUT"/OCChatViewController.o "$OUT"/OCFilesViewController.o "$OUT"/OCEngineViewController.o "$OUT"/OCSettingsViewController.o "$OUT"/OCIntegrationsViewController.o "$OUT"/OCBrowserViewController.o "$OUT"/OCCodeViewController.o "$OUT"/OCStartupViewController.o "$OUT"/OCDesktopViewController.o "$OUT"/KernGlue.o "$OUT"/OCVsockBridge.o "$OUT"/OCLocalhostProxy.o "$OUT"/OCGuestInstall.o \
   -framework UIKit -framework Foundation -framework Security -framework CoreGraphics -framework QuartzCore -framework WebKit -framework Metal -framework MetalKit -framework CoreLocation \
   -lobjc -lSystem -lz \
   -o "$APP/OpenCode"
@@ -142,7 +150,10 @@ printf 'APPL????' > "$APP/PkgInfo"
 # framework kills the launch before any app code runs — see
 # build-kernarium.sh). Drop any prebuilt code signature: the
 # installer re-signs everything anyway.
-cp -r "$KRUNTIME_FRAMEWORK" "$APP/Frameworks/"
+# The cache directory may carry a suffix (fork build), but the
+# framework MUST land in the bundle as KRuntime_6_18_4K.framework:
+# loadRuntime resolves it by that exact name.
+cp -r "$KRUNTIME_FRAMEWORK" "$APP/Frameworks/KRuntime_6_18_4K.framework"
 cp -r Frameworks/KosmicKrisp.framework Frameworks/MesaEGL.framework Frameworks/MesaGallium.framework "$APP/Frameworks/"
 find "$APP/Frameworks" -name _CodeSignature -type d -exec rm -rf {} + 2>/dev/null || true
 
