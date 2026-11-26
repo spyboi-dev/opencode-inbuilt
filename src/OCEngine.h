@@ -2,10 +2,10 @@
 //
 // ONE app, real OpenCode inside it. On launch the engine boots,
 // starts the OpenCode server on 127.0.0.1:4096 (password in the
-// Keychain, Basic auth user `opencode`), and shows the real
-// OpenCode desktop app. The native iOS UI talks to that same
-// server. There is no CLI mode any more (removed 2026-11-25):
-// Desktop UI only, always.
+// Keychain, Basic auth user `opencode`), and shows the OpenCode
+// CLI terminal. The native iOS UI talks to that same
+// server. The desktop was removed 2026-11-26 (the CLI is lite):
+// the terminal is the in-app UI.
 //
 // Engine interface: the engine provides an executor (a block
 // that types a command at the system console; see KernGlue).
@@ -25,7 +25,7 @@ typedef NS_ENUM(NSInteger, OCEngineState) {
     OCEngineStateInstalling,   // downloading/verifying the image
     OCEngineStateInstalled,    // image ready, not started
     OCEngineStateStarting,     // booting / server launching
-    OCEngineStateRunning,      // server answering on 4096 (desktop view available as a tab)
+    OCEngineStateRunning,      // server answering on 4096 (terminal view available as a tab)
     OCEngineStateStopped,      // stopped (app killed, iOS suspend)
     OCEngineStateCorePending,  // engine not linked in this build
     OCEngineStateError
@@ -83,7 +83,7 @@ typedef void (^OCGuestExecutor)(NSString *command, NSString *workingDirectory,
 - (void)bootInstalledImageAsIs;
 // In-app engine log + serve progress (for the Logs view and the Engine tab).
 // serveProgress is 0..1 while the engine is starting; serveStatus is the
-// current start stage ("Checking Node...", "Starting desktop...", ...).
+// current start stage ("Checking Node...", "Starting terminal...", ...).
 @property (nonatomic, readonly) double serveProgress;
 @property (nonatomic, readonly, nullable) NSString *serveStatus;
 @property (nonatomic, copy, nullable) void (^serveProgressDidChange)(double progress, NSString * _Nullable status);
@@ -100,7 +100,7 @@ typedef void (^OCGuestExecutor)(NSString *command, NSString *workingDirectory,
 // are noted instead of failing.
 - (NSString *)fullLogText;
 // Feed one chunk of console output (from KernGlue). Parses
-// PROGRESS / ERROR / `DESKTOP READY` lines and appends the text to
+// PROGRESS / ERROR / `CLI READY` lines and appends the text to
 // the console log.
 - (void)handleGuestConsoleText:(NSString *)text;
 
@@ -109,7 +109,7 @@ typedef void (^OCGuestExecutor)(NSString *command, NSString *workingDirectory,
 - (void)stopEngine;
 - (void)checkHealthWithCompletion:(void (^)(BOOL healthy, NSDictionary * _Nullable info))completion;
 // Guest diagnostics through the server's file API (the console
-// drops post-X output): reads ~/desktop-diag.txt via /api/fs/read
+// drops post-TUI output): reads ~/cli-diag.txt via /api/fs/read
 // and appends it to the engine log. Once per boot; a miss retries
 // on the next call and on a 10 s timer, up to 12 attempts, and
 // every miss is logged with its attempt number.

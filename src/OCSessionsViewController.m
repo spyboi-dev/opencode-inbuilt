@@ -164,17 +164,16 @@ static NSString *OCGreetingForNow(void) {
 }
 
 - (void)openSession:(NSDictionary *)session {
-    // User decision (2026-11-25): tapping a chat opens the REAL
-    // OpenCode desktop, not the custom native chat window. The
-    // desktop app joins the same server on 4096, so the session is
-    // there; there is no deep-link to open one specific session
-    // inside the desktop app, so the user picks it inside the
-    // desktop itself. The native OCChatViewController stays in the
-    // codebase as the fallback, but the Threads tab no longer
-    // reaches it.
+    // User decision (2026-11-26): tapping a chat opens the CLI
+    // terminal, not the custom native chat window. The TUI joins
+    // the same server on 4096, so the session is there; there is
+    // no deep-link to open one specific session inside the TUI,
+    // so the user picks it inside the terminal itself. The native
+    // OCChatViewController stays in the codebase as the fallback,
+    // but the Threads tab no longer reaches it.
     (void)session;
-    OCDesktopViewController *desktop = [[OCDesktopViewController alloc] init];
-    [self.navigationController pushViewController:desktop animated:YES];
+    OCDesktopViewController *terminal = [[OCDesktopViewController alloc] init];
+    [self.navigationController pushViewController:terminal animated:YES];
 }
 
 #pragma mark - Table

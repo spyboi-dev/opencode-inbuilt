@@ -110,7 +110,7 @@ NS_ASSUME_NONNULL_BEGIN
 // Hold (background) / release (foreground) the guest's GPU requests.
 - (void)setGpuHold:(BOOL)held;
 
-// Guest input, for the desktop: the guest display is a
+// Guest input, for the terminal: the guest display is a
 // touchscreen (slots 0..<10, coordinates 0..32767 on both axes) plus
 // a keyboard. No-ops when the guest is not running.
 - (void)sendTouchSlot:(uint32_t)slot x:(uint32_t)x y:(uint32_t)y pressed:(BOOL)pressed;
@@ -118,7 +118,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)sendKeyboardUsage:(uint32_t)usage pressed:(BOOL)pressed;
 
 // Park the guest framebuffer view behind the app's window (where it
-// lives while the desktop is not on screen). The desktop screen
+// lives while the terminal is not on screen). The terminal screen
 // moves it into its own view while visible and parks it again on
 // leaving, so run() always has the same view.
 - (void)parkGuestView;

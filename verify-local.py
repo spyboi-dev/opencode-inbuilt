@@ -176,7 +176,7 @@ new_strings = ["Retrying in 60s", "Automatic retry: starting engine",
                "Auto-start: retrying after a failed start",
                "it tries again by itself",
                "Not installed yet",
-               "Show desktop",
+               "Show terminal",
                # TermX auto-start/update port (2026-11-23)
                "Update available",
                "Image update check",
@@ -203,63 +203,48 @@ new_strings = ["Retrying in 60s", "Automatic retry: starting engine",
                "Canonicalized boot paths",
                "Boot paths:",
                "Boot pre-flight:",
-               # Server-first bootstrap + desktop VT fix (2026-11-25)
+               # Server-first bootstrap (2026-11-25)
                "server listening",
                "Server listening",
                "Server probe:",
                "Server probe failed:",
                "Starting server...",
-               "Starting desktop...",
+               "Starting terminal...",
                "Server on 4096 confirmed",
-               "DESKTOP READY",
-               "desktop diagnostics",
+               "CLI READY",
+               "cli diagnostics",
                "Active VT:",
                "Could not load chats",
-               # Chat opens the real desktop + black-desktop hardening (2026-11-25)
-               "Desktop view shown:",
-               "ERROR Xorg did not start",
-               "Xorg log:",
-               "Desktop app log:",
-               # Desktop window-mapped READY gate + display activity log (2026-11-25)
-               "Desktop window did not appear",
+               # Chat opens the terminal (2026-11-26): the desktop
+               # is gone, the CLI TUI is the in-app UI; tapping a
+               # chat opens the Terminal view.
+               "Terminal view shown:",
+               # Diagnostics via server (2026-11-25): the console
+               # drops output once the TUI takes over, so the
+               # diagnostics come over HTTP instead. The snapshot
+               # names the server and the TUI, not Xorg.
                "DIAG ",
                "UML_GPU_DISPLAY_ACTIVITY_LOG",
                "display-activity.log",
                "Display log (runtime)",
-               # Framebuffer flush loop (2026-11-25): X's mmap writes
-               # never flush, so the loop writes the framebuffer back
-               # through write() to force the transfer.
-               "fb-flush.sh",
-               "DIAG fb-flush:",
-               "DIAG fbdev driver:",
-               "DIAG fb size:",
-               # Red-fill self-test + Xorg liveness + server-fetched
-               # diagnostics (2026-11-25): the 165c227 logs prove X
-               # never drew and the console loses every post-X
-               # diagnostic, so the test is visible in a screenshot
-               # and the diagnostics come over HTTP instead.
-               "SELFTEST fb0 red",
-               "XORG RUNNING",
-               "DESKTOP STATE",
-               "Self-test log:",
-               "desktop-diag.txt",
+               "cli-diag.txt",
                "Guest diagnostics (via server)",
                "fetchGuestDiagnosticsIfNeeded",
                # Two-phase bootstrap (2026-11-25): the 977334d logs
                # prove the whole 5 KB bootstrap typed at once
                # overflows the tty input buffer while the shell is
                # blocked in the curl loop, so the middle is dropped
-               # (the shell never got past `systemctl stop`, X never
-               # started, no diagnostics file). Phase 2 goes only
-               # after the server probe first succeeds, and the
-               # diagnostics are a script refreshed every 10 s.
-               "desktopBootstrap",
-               "Desktop launch started",
+               # (the shell never got past `systemctl stop`, the
+               # desktop never started, no diagnostics file).
+               # Phase 2 goes only after the server probe first
+               # succeeds, and the diagnostics are a script
+               # refreshed every 10 s.
+               "cliBootstrap",
+               "CLI launch started",
                "diag-snapshot.sh",
                "diag-loop.sh",
-               "DIAG selftest:",
                "Guest diagnostics not available via server yet (attempt ",
-               # Server-file delivery of the desktop bootstrap
+               # Server-file delivery of the CLI bootstrap
                # (df597d2 logs: typing the 4.5 KB script dropped
                # bytes even into an idle shell — the diag-snapshot
                # heredoc opener was lost, the fbdev.conf heredoc
@@ -268,64 +253,42 @@ new_strings = ["Retrying in 60s", "Automatic retry: starting engine",
                # written through the server's file API and only
                # the one-line `sh` is typed; console typing is
                # the fallback if the write fails.
-               "desktop-bootstrap.sh",
+               "cli-bootstrap.sh",
                "experimental/fs/write",
-               "Desktop bootstrap write failed",
-               "sh /tmp/desktop-bootstrap.sh",
+               "CLI bootstrap write failed",
+               "sh /tmp/cli-bootstrap.sh",
                # Repeated diagnostics fetching (25bb172 logs: the
                # only fetched block was the first snapshot, taken
-               # 4 s after launch before Xorg started, and the
-               # later snapshots naming Xorg's fate were never
-               # read). The fetch now repeats every 10 s and logs
-               # a block only when its content changed; the
-               # socket wait and the READY loop break out early
-               # on a dead Xorg instead of burning their full
-               # spans in silence.
+               # before the TUI started, and the later snapshots
+               # naming the TUI's fate were never read). The fetch
+               # now repeats every 10 s and logs a block only
+               # when its content changed.
                "lastGuestDiagnosticsText",
                "Guest diagnostics (via server) [fetch ",
-               "Xorg died before its socket appeared",
-               "Xorg died while waiting for the desktop",
-               "selftest.result",
-               "DIAG graphics:",
-               # Modesetting retry + Xorg probe log + diagnostics
-               # freshness (2026-11-25): the 16f1cc2 logs prove the
-               # fbdev Xorg dies at once with "no screens found"
-               # and the detailed probe log is unreadable at
-               # /var/log/Xorg.0.log, so Xorg now writes it to
-               # /tmp with -logfile and the snapshot prints the
-               # driver/module/error lines; the diag-loop runs as
-               # root, so its `~` copy landed in /root while the
-               # server reads the termux copy — the snapshot now
-               # copies to the absolute /home/termux path, so the
-               # 10 s fetches see fresh content; and a dead fbdev
-               # Xorg retries with modesetting, the driver that
-               # demonstrably started in the c360a14 era.
-               "logfile /tmp/Xorg.0.log",
-               "Xorg probe (fbdev):",
-               "Xorg probe (modesetting):",
-               "DIAG modesetting driver:",
-               "DIAG fb0 node:",
-               "DIAG dri:",
                "DIAG loop:",
-               "/home/termux/desktop-diag.txt",
-               "retrying with modesetting",
-               "XORG RUNNING (modesetting)",
-               "xorg-modesetting.conf.d",
-               # Fetch fix + maximise (2026-11-25): the e001c27
-               # "Failed to fetch" error page is the renderer
-               # fetching the desktop's OWN sidecar (its bundled
-               # JS stack proves it: the SDK transport calls the
-               # request-queue fetch, which calls the preload
-               # fetch, which calls the browser fetch to the
-               # sidecar URL from sidecarHttp). A plain serve
-               # writes no service registration, so the desktop
-               # spawned its own sidecar on 49374 and the fetch
-               # failed. Serve now runs in --service mode with
+               "DIAG tui:",
+               "DIAG server:",
+               "/home/termux/cli-diag.txt",
+               # CLI TUI (2026-11-26): the desktop is gone. The
+               # TUI runs in the foreground of the console shell
+               # on tty1, sized from `stty size` (161x174 on the
+               # 1290x2796 framebuffer, fallback if narrow), and
+               # adopts the already-running serve through the
+               # service registration, same as the desktop did.
+               "Terminal size:",
+               "CLI ready (from guest console)",
+               "ERROR CLI did not start",
+               "CLI exited (code ",
+               "Terminal ready",
+               # Fetch fix (2026-11-25): the e001c27
+               # "Failed to fetch" error page is a client
+               # fetching its OWN sidecar. A plain serve
+               # writes no service registration, so a client
+               # spawns its own sidecar on 49374 and the fetch
+               # fails. Serve now runs in --service mode with
                # the config pre-written with the Keychain
-               # password, so the desktop adopts our already-up
-               # server on 4096 instead. The window is maximised
-               # with an openbox rule (the app opens 1280x800
-               # by default) plus --start-maximized. The V8 JIT
+               # password, so the TUI adopts our already-up
+               # server on 4096 instead. The V8 JIT
                # check that 77b9a2f added is removed (2026-11-26):
                # it answered the question (JIT works, see
                # KERNARIUM-BUILD.md) and cost ~2-3 s before
@@ -340,16 +303,12 @@ new_strings = ["Retrying in 60s", "Automatic retry: starting engine",
                "serve --service",
                "opencode/service.json",
                "--hostname 127.0.0.1",
-               "--start-maximized",
-               "<maximized>yes</maximized>",
-               "openbox maximise rule installed",
                "Health probe starting (server listening in guest)",
-               "Health timer fallback",
-               "DIAG window:"]
+               "Health timer fallback"]
 for m in new_strings:
     check(f"new string present: {m}", m in blob)
 # The old plain serve on 0.0.0.0 is gone: it wrote no service
-# registration, so the desktop spawned its own sidecar.
+# registration, so a client would spawn its own sidecar.
 check("no plain serve on 0.0.0.0", "serve --port 4096 --hostname 0.0.0.0" not in blob)
 # The V8 JIT check is removed from the boot path (2026-11-26):
 # it answered the question (JIT works) and cost ~2-3 s before serve.

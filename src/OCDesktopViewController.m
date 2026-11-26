@@ -75,7 +75,7 @@ static uint16_t KeyCodeForChar(unichar c, BOOL *shift) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title = @"Desktop";
+    self.title = @"Terminal";
     self.view.backgroundColor = [UIColor blackColor];
     self.touchSlots = [NSMutableDictionary dictionary];
 
@@ -88,7 +88,7 @@ static uint16_t KeyCodeForChar(unichar c, BOOL *shift) {
     [self.view addSubview:self.keyField];
 
     self.hintLabel = [[UILabel alloc] init];
-    self.hintLabel.text = @"Tap to click. Use Keyboard to type.";
+    self.hintLabel.text = @"Use Keyboard to type.";
     self.hintLabel.font = [UIFont systemFontOfSize:13];
     self.hintLabel.textColor = [UIColor whiteColor];
     self.hintLabel.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.5];
@@ -115,7 +115,7 @@ static uint16_t KeyCodeForChar(unichar c, BOOL *shift) {
     // the same view the whole time; only its parent changes.
     [self attachGuestView];
     if (![OCKernGlue shared].booted) {
-        self.hintLabel.text = @"Desktop is not up yet. Start the engine from the Engine tab.";
+        self.hintLabel.text = @"Terminal is not up yet. Start the engine from the Engine tab.";
     }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         self.hintLabel.hidden = YES;
@@ -137,7 +137,7 @@ static uint16_t KeyCodeForChar(unichar c, BOOL *shift) {
     // window be judged. Re-assert it full-screen behind the header,
     // then force a present of the latest guest frame: the runtime
     // only draws when the guest posts a new frame, and an idle
-    // desktop posts none, so without this the screen stays black
+    // terminal posts none, so without this the screen stays black
     // even though the view is windowed. The diagnostic line lives
     // here now, so its window field reports the state after the
     // view appears, not before.
@@ -149,7 +149,7 @@ static uint16_t KeyCodeForChar(unichar c, BOOL *shift) {
     // had time to write the file, and a miss retries on the next
     // open (fetchGuestDiagnosticsIfNeeded).
     [[OCEngine shared] fetchGuestDiagnosticsIfNeeded];
-    [[OCEngine shared] appendEngineLog:[NSString stringWithFormat:@"Desktop view shown: guestView frame %@ superview %@ window %@ drawable %@ booted %@",
+    [[OCEngine shared] appendEngineLog:[NSString stringWithFormat:@"Terminal view shown: guestView frame %@ superview %@ window %@ drawable %@ booted %@",
         NSStringFromCGRect(gv.frame),
         gv.superview ? NSStringFromClass([gv.superview class]) : @"nil",
         gv.window ? @"yes" : @"no",

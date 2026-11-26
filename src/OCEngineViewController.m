@@ -3,9 +3,9 @@
 // the engine is fully automatic (2026-11-22) — it starts by
 // itself on launch, after install, and again on a foreground
 // return or a retry timer. There are no Start/Stop buttons and no
-// mode picker any more: the engine always boots the desktop app.
-// "Show desktop" stays: it is the only way to see the desktop,
-// and it only appears while the desktop is running or starting.
+// mode picker any more: the engine always boots the CLI terminal.
+// "Show terminal" stays: it is the only way to see the terminal,
+// and it only appears while the terminal is running or starting.
 #import "OCEngineViewController.h"
 #import "OCEngine.h"
 #import "OCDesktopViewController.h"
@@ -13,7 +13,7 @@
 @interface OCEngineViewController ()
 @property (nonatomic, strong) UILabel *stateLabel;
 @property (nonatomic, strong) UILabel *detailLabel;
-@property (nonatomic, strong) UIButton *showDesktopButton;
+@property (nonatomic, strong) UIButton *showTerminalButton;
 @property (nonatomic, strong) UIProgressView *progressView;
 @property (nonatomic, strong) UILabel *progressLabel;
 @property (nonatomic, strong) UITextView *logTextView;
@@ -42,7 +42,7 @@
     // 2026-11-22), not here: there is no setup button on this tab
     // any more, and no Start/Stop or mode switch either — the
     // engine is fully automatic.
-    self.showDesktopButton = [self buttonWithTitle:@"Show desktop" action:@selector(showDesktopTapped)];
+    self.showTerminalButton = [self buttonWithTitle:@"Show terminal" action:@selector(showTerminalTapped)];
 
     // Live log, PancakeStore style: a "Logs" header with a terminal icon
     // over a dark rounded card holding the monospace log. It sits on this
@@ -80,7 +80,7 @@
 
     UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[
         self.stateLabel, self.detailLabel, self.progressView, self.progressLabel,
-        self.showDesktopButton,
+        self.showTerminalButton,
         logHeader, self.logTextView, self.shareLogButton]];
     stack.axis = UILayoutConstraintAxisVertical;
     stack.spacing = 16;
@@ -246,7 +246,7 @@
     } else if (engine.state == OCEngineStateError) {
         self.detailLabel.text = @"The engine stopped with an error. See the log below — it tries again by itself.";
     } else if (engine.guestCoreLinked) {
-        self.detailLabel.text = @"Engine ready. Open the desktop from below once it is running.";
+        self.detailLabel.text = @"Engine ready. Open the terminal from below once it is running.";
     } else if (engine.guestCoreLoadable) {
         // Runtime not loaded yet — it loads as part of the
         // automatic start, never at launch, so a framework that
@@ -255,15 +255,15 @@
     } else {
         self.detailLabel.text = @"Engine not ready yet.";
     }
-    // The desktop screen only makes sense once the desktop app is
+    // The terminal screen only makes sense once the terminal is
     // up (or starting).
-    BOOL showDesktop = ([OCEngine shared].state == OCEngineStateRunning || [OCEngine shared].state == OCEngineStateStarting);
-    self.showDesktopButton.hidden = !showDesktop;
+    BOOL showTerminal = ([OCEngine shared].state == OCEngineStateRunning || [OCEngine shared].state == OCEngineStateStarting);
+    self.showTerminalButton.hidden = !showTerminal;
 }
 
-- (void)showDesktopTapped {
-    OCDesktopViewController *desktop = [[OCDesktopViewController alloc] init];
-    [self.navigationController pushViewController:desktop animated:YES];
+- (void)showTerminalTapped {
+    OCDesktopViewController *terminal = [[OCDesktopViewController alloc] init];
+    [self.navigationController pushViewController:terminal animated:YES];
 }
 
 @end

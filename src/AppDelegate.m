@@ -229,7 +229,7 @@
     // piece of the launch window, and the 9e5e9bb device log showed
     // the app dying before this point anyway. The view is created
     // and parked in bootWithCompletion, where run() actually needs
-    // it; the Desktop screen moves it into its own view while
+    // it; the Terminal screen moves it into its own view while
     // visible, as before. No Metal work happens at launch now.
     [[OCEngine shared] appendEngineLogSync:@"Launch step 5/7: guest view deferred until first Start (no Metal at launch)"];
 #endif

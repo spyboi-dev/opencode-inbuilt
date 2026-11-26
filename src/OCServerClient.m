@@ -259,8 +259,8 @@
     // uploads attachments through this endpoint, and the 2.3.0
     // server in the guest has it (verified in the pinned source
     // and the shipped binary). The engine uses it to deliver the
-    // desktop bootstrap script as a file instead of typing it
-    // into the console (see OCEngine deliverDesktopBootstrap).
+    // CLI bootstrap script as a file instead of typing it
+    // into the console (see OCEngine deliverCliBootstrap).
     NSString *encoded = [path stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
     NSString *urlPath = [NSString stringWithFormat:@"/api/experimental/fs/write?path=%@", encoded ?: @""];
     NSURL *url = [NSURL URLWithString:[self.serverURL stringByAppendingString:urlPath]];

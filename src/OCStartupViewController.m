@@ -562,7 +562,7 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
 // to Installed (the observer calls maybeAutoStartEngine), and the
 // tabs open on their own once the server is listening. There is no
 // mode choice any more (2026-11-25): the engine always boots the
-// desktop app, and the image is the same either way, so Install
+// CLI terminal, and the image is the same either way, so Install
 // just installs.
 - (void)beginInstall {
     self.installFraction = 0;
@@ -707,11 +707,11 @@ enum { OCStartupRowCore = 0, OCStartupRowBoot, OCStartupRowNode, OCStartupRowOpe
     }
 
     if (running) {
-        [self setRow:OCStartupRowServer state:OCStartupRowDone detail:@"Desktop window ready"];
+        [self setRow:OCStartupRowServer state:OCStartupRowDone detail:@"Terminal ready"];
     } else if (starting && p >= 0.85) {
-        [self setRow:OCStartupRowServer state:OCStartupRowActive detail:@"Starting desktop..."];
+        [self setRow:OCStartupRowServer state:OCStartupRowActive detail:@"Starting terminal..."];
     } else {
-        [self setRow:OCStartupRowServer state:OCStartupRowPending detail:@"Desktop UI"];
+        [self setRow:OCStartupRowServer state:OCStartupRowPending detail:@"Terminal"];
     }
 }
 

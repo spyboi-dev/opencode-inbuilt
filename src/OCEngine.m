@@ -22,13 +22,13 @@ static NSString *const kGuestImageInstalled = @"oc.guestImageInstalled";
 @property (nonatomic, strong, nullable) NSString *serveStatusValue;
 @property (nonatomic, assign) BOOL serveProgressDone;
 // Guest diagnostics fetched through the server's file API
-// (fetchGuestDiagnosticsIfNeeded): the console drops post-X
-// output, so the diagnostics file is read over HTTP instead.
-// The file is rewritten every 10 s by the guest's diag-loop, so
-// fetching is repeated on the same 10 s cadence (not once per
-// boot): the first fetch is always too early — it lands before
-// Xorg starts, as the 25bb172 run proved — and only the later
-// ones name Xorg's fate. Blocks are logged only when their
+// (fetchGuestDiagnosticsIfNeeded): the console drops output
+// once the TUI takes over, so the diagnostics file is read
+// over HTTP instead. The file is rewritten every 10 s by the
+// guest's diag-loop, so fetching is repeated on the same 10 s
+// cadence (not once per boot): the first fetch is always too
+// early — it lands before the CLI starts — and only the later
+// ones name the TUI's state. Blocks are logged only when their
 // content changed since the last fetch, so the engine log gets
 // the state transitions, not twelve copies of the same block.
 @property (nonatomic, assign) BOOL guestDiagnosticsFetched;
@@ -38,13 +38,13 @@ static NSString *const kGuestImageInstalled = @"oc.guestImageInstalled";
 // the first fetch usually misses. Attempts cap the retries.
 @property (nonatomic, assign) NSUInteger guestDiagnosticsFetchAttempts;
 @property (nonatomic, assign) BOOL guestDiagnosticsRetryPending;
-// YES once the desktop bootstrap (phase 2) has been sent to the
+// YES once the CLI bootstrap (phase 2) has been sent to the
 // guest console. Phase 2 goes only after the server probe first
 // succeeds, so the shell is idle and the tty buffer cannot drop
-// the middle of a 5 KB paste (977334d).
-@property (nonatomic, assign) BOOL desktopBootstrapSent;
-// YES once the desktop app reported ready.
-@property (nonatomic, assign) BOOL desktopReady;
+// the middle of a paste (977334d).
+@property (nonatomic, assign) BOOL cliBootstrapSent;
+// YES once the CLI TUI reported ready.
+@property (nonatomic, assign) BOOL cliReady;
 // YES once the guest console printed "server listening" (the
 // bootstrap's curl probe to /api/info succeeded in the guest).
 @property (nonatomic, assign) BOOL serverListening;
@@ -84,15 +84,15 @@ static NSString *const kGuestImageInstalled = @"oc.guestImageInstalled";
 @property (nonatomic, assign) BOOL launchUpdateCheckInFlight;
 @property (nonatomic, assign) BOOL launchUpdateCheckStarted;
 - (void)startServeWithCompletion:(void (^)(BOOL, NSError * _Nullable))completion;
-// Desktop bootstrap (phase 2): sent only after the /api/info
+// CLI bootstrap (phase 2): sent only after the /api/info
 // probe first succeeds, so the guest shell is idle. See
 // consoleBootstrap (phase 1) for why the split exists.
-- (NSString *)desktopBootstrap;
-// Writes the desktop script to the guest as a file through the
+- (NSString *)cliBootstrap;
+// Writes the CLI script to the guest as a file through the
 // server's file API, then types only the one-line `sh` command
-// to run it. Typing the ~4.5 KB script dropped bytes even into
+// to run it. Typing a multi-KB script dropped bytes even into
 // an idle shell (df597d2), so the file is the delivery now.
-- (void)deliverDesktopBootstrap;
+- (void)deliverCliBootstrap;
 - (void)checkForImageUpdateForLaunch;
 - (void)noteAutoStartFailed:(NSString *)reason;
 @end
@@ -572,7 +572,7 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
 }
 
 // Last N lines of a file, or the whole file when it is short. The
-// display activity log can hold a line a second while the desktop
+// display activity log can hold a line a second while the terminal
 // runs, so the pasted log carries its tail, not its whole history.
 + (nullable NSString *)tailOfFile:(NSString *)path maxLines:(NSUInteger)maxLines label:(NSString *)label {
     NSString *text = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
@@ -599,7 +599,7 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
     // contradicts itself: state "stopped" above a log that claims
     // the server is up.
     if (self.state != OCEngineStateRunning && self.state != OCEngineStateStarting &&
-        ([guest containsString:@"server listening"] || [guest containsString:@"DESKTOP READY"])) {
+        ([guest containsString:@"server listening"] || [guest containsString:@"CLI READY"])) {
         [out appendString:@"(Log from a previous run: the engine is stopped now, so this is not live.)\n"];
     }
     [out appendString:guest];
@@ -625,7 +625,7 @@ static void OCEngineWriteLogLineToFile(NSString *path, NSString *line) {
 // Strip ANSI escape sequences (CSI, OSC, and single-char escapes)
 // from a console line. The guest console wraps output in bracketed
 // paste markers (ESC[?2004l / ESC[?2004h) and the shell prompt adds
-// color codes, so a bare marker line like "DESKTOP READY" arrives
+// color codes, so a bare marker line like "CLI READY" arrives
 // with a prefix that defeats hasPrefix/isEqualToString. Stripping
 // lets the marker match on the bare output line only.
 static NSString *OCEngineStripANSI(NSString *line) {
@@ -674,10 +674,10 @@ static NSString *OCEngineStripANSI(NSString *line) {
     NSString *clean = [OCEngineStripANSI(line) stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (!clean.length) return;
     if ([clean hasPrefix:@"DIAG "]) {
-        // The bootstrap's compact desktop summary: it belongs in
+        // The bootstrap's compact CLI summary: it belongs in
         // the engine log too, so the pasted log names the VT, the
-        // mapped window and the Xorg/app failures without needing
-        // the whole guest console. The full block stays in guest.log.
+        // server and the TUI state without needing the whole
+        // guest console. The full block stays in guest.log.
         [self appendEngineLogSync:clean];
         return;
     }
@@ -706,21 +706,17 @@ static NSString *OCEngineStripANSI(NSString *line) {
         }
         return;
     }
-    if ([clean isEqualToString:@"DESKTOP READY"]) {
-        // Exact match only. The typed READY loop line itself
-        // contains `echo "DESKTOP READY"`, so containsString fired
-        // on the echo of the script 1-2 s after "Serve launch
-        // started" in every run from c360a14 through 873e1ee,
-        // before X or Electron existed — the engine claimed
-        // "Desktop ready" and "Engine running" while the screen
-        // was still black, and the 873e1ee "window mapped on :0"
-        // conclusion was void: no bare DESKTOP READY line ever
-        // reached the log. Record a real one even if the server
-        // probe already marked the engine running, so the log
-        // names a genuine mapped window.
-        if (!self.desktopReady) {
-            self.desktopReady = YES;
-            [self appendEngineLogSync:@"Desktop ready (from guest console)"];
+    if ([clean isEqualToString:@"CLI READY"]) {
+        // Exact match only. The script prints this once, when the
+        // TUI process is confirmed alive (pgrep) — it is not the
+        // echo of a loop line, and only the one-line `sh` command
+        // is ever typed, so no typed line contains the marker.
+        // Record a real one even if the server probe already
+        // marked the engine running, so the log names a genuine
+        // running TUI.
+        if (!self.cliReady) {
+            self.cliReady = YES;
+            [self appendEngineLogSync:@"CLI ready (from guest console)"];
             // The diagnostics run right after the READY loop, so
             // fetch them through the server in 10 s: the console
             // drops them, the file API does not.
@@ -907,7 +903,7 @@ static NSString *OCEngineStripANSI(NSString *line) {
     }
 #ifdef OC_KERNARIUM_LINKED
     // Core linked but the guest is not booted yet (first Start after a
-    // relaunch): boot it first, then launch the server (or desktop).
+    // relaunch): boot it first, then launch the server (and the terminal).
     // When the define is absent this block does not exist and
     // behaviour is unchanged.
     if (![OCKernGlue shared].booted) {
@@ -946,20 +942,20 @@ static NSString *OCEngineStripANSI(NSString *line) {
     self.serveGeneration++;
     NSUInteger generation = self.serveGeneration;
     self.serveProgressDone = NO;
-    self.desktopReady = NO;
+    self.cliReady = NO;
     self.serverListening = NO;
     self.guestDiagnosticsFetched = NO;
     self.lastGuestDiagnosticsText = nil;
     self.guestDiagnosticsFetchAttempts = 0;
     self.guestDiagnosticsRetryPending = NO;
-    self.desktopBootstrapSent = NO;
+    self.cliBootstrapSent = NO;
     self.healthProbeInFlight = NO;
     self.lastProbeOK = NO;
     self.serverProbeEverOK = NO;
     self.lastProbeError = nil;
     self.lastProbeLoggedError = nil;
     [self setState:OCEngineStateStarting];
-    [self setServeProgress:0.05 status:@"Starting desktop..."];
+    [self setServeProgress:0.05 status:@"Starting terminal..."];
     [self appendEngineLogSync:@"Serve launch started"];
     NSString *bootstrap = [self consoleBootstrap];
     // The password is typed with echo off (see the bootstrap) and is
@@ -978,7 +974,7 @@ static NSString *OCEngineStripANSI(NSString *line) {
         }
         [[OCKernGlue shared] sendConsoleText:bootstrap];
         [strongSelf setState:OCEngineStateStarting];
-        [strongSelf setServeProgress:0.05 status:@"Starting desktop..."];
+        [strongSelf setServeProgress:0.05 status:@"Starting terminal..."];
         // The guest still has to boot its userland and print the
         // ready marker; give the first start 5 minutes before health
         // failures can restart the engine.
@@ -1019,7 +1015,8 @@ static NSString *OCEngineStripANSI(NSString *line) {
 // ERROR line, never a download: the overlay is wiped every boot, so
 // a first-Start download would repeat on every launch). The same
 // block starts the vsock proxies, the user's app.py (guarded on the
-// file existing), and then the desktop app.
+// file existing), and then the CLI terminal (phase 2, after the
+// server is healthy).
 //
 // Password: typed with echo off (`stty -echo` first), so the tty
 // never echoes it back into the console transcript the app logs.
@@ -1068,34 +1065,34 @@ static NSString *OCEngineStripANSI(NSString *line) {
     // it went.
     [b appendString:@"if [ -f /root/Projects/app.py ]; then (cd /root/Projects && nohup python3 app.py > server.log 2>&1 &); echo \"app.py started\"; else echo \"no app.py in guest\"; fi\n"];
     // The server is the engine: it starts FIRST, backgrounded, and
-    // the desktop app joins that same server on 4096 (its sessions
+    // the CLI TUI joins that same server on 4096 (its sessions
     // are the native UI's sessions). 5f307ff deleted this launch
     // with the CLI mode, so nothing listened on 4096 and Threads
     // could not load chats while the engine claimed to be running
     // (2026-11-25, c360a14 device test). Restored from the desktop
     // branch (9ccab19): the curl wait loop proves the server
-    // answers in the guest before the desktop starts, and the
+    // answers in the guest before the CLI starts, and the
     // "server listening" echo keeps the marker in guest.log. The
     // password reaches curl only as $OPENCODE_SERVER_PASSWORD, so
     // the literal never lands in the console transcript.
     [b appendString:@"echo \"PROGRESS 90 Starting server...\"\n"];
-    // The desktop app finds its server through the service
-    // registration file (~/.local/state/opencode/service.json):
-    // it reads the URL + password there and reuses a healthy
-    // server instead of spawning its own sidecar. A plain
-    // `serve` writes no registration, so the desktop spawned
-    // its own sidecar on 49374 — and the renderer's bootstrap
-    // fetch to that sidecar failed (the e001c27 "Failed to
-    // fetch" error page). Running serve in --service mode
-    // registers OUR server (already proven up by the /api/info
-    // probe below) so the desktop adopts it and the renderer
-    // fetches a server that is already listening. The service
-    // password comes from the service config file, not the
-    // environment, so the config is pre-written here with the
-    // same Keychain password the native UI uses — otherwise
+    // The CLI TUI (and the mobile app pairing) find their server
+    // through the service registration file
+    // (~/.local/state/opencode/service.json): the client reads
+    // the URL + password there and reuses a healthy server
+    // instead of spawning its own sidecar. A plain `serve`
+    // writes no registration, so a client spawns its own
+    // sidecar on 49374 — the desktop did exactly that, and the
+    // renderer's bootstrap fetch to that sidecar failed (the
+    // e001c27 "Failed to fetch" error page). Running serve in
+    // --service mode registers OUR server (already proven up by
+    // the /api/info probe below) so the TUI adopts it. The
+    // service password comes from the service config file, not
+    // the environment, so the config is pre-written here with
+    // the same Keychain password the native UI uses — otherwise
     // serve --service would generate a random one and lock
     // the native UI out. Hostname 127.0.0.1: every consumer
-    // (vsock bridge, desktop, curl loop) reaches the server
+    // (vsock bridge, TUI, curl loop) reaches the server
     // on loopback, and the registered URL is then unambiguous
     // (a 0.0.0.0 bind would register an unusable URL).
     [b appendString:@"mkdir -p /home/termux/.config/opencode\n"];
@@ -1105,28 +1102,28 @@ static NSString *OCEngineStripANSI(NSString *line) {
     [b appendString:@"for i in $(seq 1 60); do if curl -fsS -u \"opencode:$OPENCODE_SERVER_PASSWORD\" http://127.0.0.1:4096/api/info >/dev/null 2>&1; then echo \"server listening\"; break; fi; sleep 2; done\n"];
     [b appendString:@"ss -ltn 2>/dev/null | grep -q ':4096' && echo \"Server on 4096 confirmed\" || echo \"ERROR Server did not start (see /tmp/opencode-serve.log)\"\n"];
     // Phase 1 ends here: the server is up and the shell is about
-    // to go idle (the curl loop broke on the answer). The desktop
-    // section is a separate injection (desktopBootstrap), sent
+    // to go idle (the curl loop broke on the answer). The CLI
+    // section is a separate injection (cliBootstrap), sent
     // only after the host's /api/info probe first succeeds — the
-    // health timer sends it. Typing the whole 5 KB bootstrap at
+    // health timer sends it. Typing the whole bootstrap at
     // once overflows the tty input buffer while the shell is
     // blocked in the curl loop, and the middle is dropped
-    // (977334d: the shell never got past `systemctl stop`, X
-    // never started, no diagnostics file). Phase 1 is ~2 KB, so
-    // even the curl loop's 6 s cannot overflow the 4 KB buffer
-    // behind it.
+    // (977334d: the shell never got past `systemctl stop`, the
+    // desktop never started, no diagnostics file). Phase 1 is
+    // ~2 KB, so even the curl loop's 6 s cannot overflow the
+    // 4 KB buffer behind it.
     return b;
 }
 
-// The desktop bootstrap (phase 2): everything after the server
+// The CLI bootstrap (phase 2): everything after the server
 // is up. Sent only after the /api/info probe first succeeds, so
 // the guest shell is idle at its prompt and consumes each line
-// as it arrives. The only long foreground commands in it are the
-// Xorg socket wait (30 s max) and the READY loop (120 s max),
-// and each has less than 4 KB queued behind it — and the READY
-// loop is last, with nothing after it that needs typing.
-// Phase 2 delivery: the desktop script goes to the guest as a
-// file, not as typed console input. Typing the ~4.5 KB script
+// as it arrives. The TUI runs in the foreground of the console
+// shell (see cliBootstrap): the only long foreground command in
+// the script is the TUI itself, and the script's `wait` keeps
+// the console shell there until the TUI exits.
+// Phase 2 delivery: the CLI script goes to the guest as a
+// file, not as typed console input. Typing a multi-KB script
 // into the tty dropped bytes even into an idle shell (df597d2
 // logs: the diag-snapshot heredoc opener was lost so the script
 // was never written, the fbdev.conf heredoc was mangled, and the
@@ -1137,161 +1134,95 @@ static NSString *OCEngineStripANSI(NSString *line) {
 // endpoint writes raw bytes to an absolute path (the desktop
 // app uploads attachments through it; the 2.3.0 server in the
 // guest has it). Only one short line is ever typed:
-// `sh /tmp/desktop-bootstrap.sh`. The script's heredocs are
+// `sh /tmp/cli-bootstrap.sh`. The script's heredocs are
 // read from the file by sh, not from the tty, so they cannot
 // be split. If the write fails the old console typing is the
 // fallback, so a surprise in the experimental endpoint leaves
-// the desktop delayed rather than unlaunched.
-- (void)deliverDesktopBootstrap {
+// the CLI delayed rather than unlaunched.
+- (void)deliverCliBootstrap {
     OCSettings *settings = [OCSettings shared];
     OCServerClient *client = [[OCServerClient alloc] initWithServerURL:settings.serverURL password:[settings serverPassword]];
-    NSData *data = [[self desktopBootstrap] dataUsingEncoding:NSUTF8StringEncoding];
+    NSData *data = [[self cliBootstrap] dataUsingEncoding:NSUTF8StringEncoding];
     __weak typeof(self) weakSelf = self;
-    [client writeFileAtPath:@"/tmp/desktop-bootstrap.sh" content:data completion:^(NSString * _Nullable resolvedPath, NSError * _Nullable error) {
+    [client writeFileAtPath:@"/tmp/cli-bootstrap.sh" content:data completion:^(NSString * _Nullable resolvedPath, NSError * _Nullable error) {
         typeof(self) strongSelf = weakSelf;
         if (!strongSelf) return;
         if (strongSelf.state == OCEngineStateStopped) return;
         if (!error && resolvedPath.length) {
-            [strongSelf appendEngineLog:@"Desktop launch started"];
-            [[OCKernGlue shared] sendConsoleText:@"sh /tmp/desktop-bootstrap.sh"];
+            [strongSelf appendEngineLog:@"CLI launch started"];
+            [[OCKernGlue shared] sendConsoleText:@"sh /tmp/cli-bootstrap.sh"];
             // Start the diagnostics cadence now, not only when the
-            // user opens the Desktop view: the snapshot file is
-            // rewritten every 10 s, and the fetches name Xorg's
-            // fate as the desktop starts (25bb172: the only fetch
-            // was the too-early first snapshot, because nothing
-            // fetched again).
+            // user opens the Terminal view: the snapshot file is
+            // rewritten every 10 s, and the fetches name the TUI's
+            // state as it starts (25bb172: the only fetch was the
+            // too-early first snapshot, because nothing fetched
+            // again).
             [strongSelf fetchGuestDiagnosticsIfNeeded];
             return;
         }
-        [strongSelf appendEngineLog:[NSString stringWithFormat:@"Desktop bootstrap write failed (%@), falling back to console", error ? error.localizedDescription : @"no path"]];
-        [strongSelf appendEngineLog:@"Desktop launch started"];
-        [[OCKernGlue shared] sendConsoleText:[strongSelf desktopBootstrap]];
+        [strongSelf appendEngineLog:[NSString stringWithFormat:@"CLI bootstrap write failed (%@), falling back to console", error ? error.localizedDescription : @"no path"]];
+        [strongSelf appendEngineLog:@"CLI launch started"];
+        [[OCKernGlue shared] sendConsoleText:[strongSelf cliBootstrap]];
         [strongSelf fetchGuestDiagnosticsIfNeeded];
     }];
 }
 
-- (NSString *)desktopBootstrap {
+- (NSString *)cliBootstrap {
     NSMutableString *b = [NSMutableString string];
-    // The desktop session, started here instead of through the
-    // opencode-desktop systemd service: the service's session
-    // script runs `Xorg :0` with no VT argument, so X takes a
-    // free VT (tty2) and the display stays on tty1's text console
-    // — the black Desktop view on c360a14, with the tty1 login
-    // prompt still visible at the top edge. The session script is
-    // baked into the read-only rootfs, and chvt is not installed,
-    // so the display cannot be switched after the fact: X must
-    // start on the VT the display is already on (vt01). The
-    // bootstrap shell is the autologin termux shell with
-    // passwordless sudo, so Xorg runs via sudo as root and openbox
-    // + the app run as termux, exactly as the service did.
-    // Leftovers are killed first so a restart is clean.
-    // fbdev, not modesetting/virgl: the 873e1ee display log
-    // (Engine/display-activity.log) has ONLY 2D CPU flushes of
-    // resource 2 — the virtio-gpu console framebuffer, 1290x2796
-    // — repeated ~5/s through 37 s, and NO virgl/GPU scanout
-    // ever. X's modesetting driver never produces a scanout the
-    // runtime presents, so the desktop can never show through
-    // the GPU path. fbdev draws straight into /dev/fb0, which
-    // IS the presented framebuffer (fb0: virtio_gpudrmfb, and
-    // the runtime already flushes it on the CPU path), so the
-    // desktop rides the path that is proven to reach the screen.
-    // The config is written to /tmp (writable overlay) and
-    // passed with -configdir; Xorg runs as root, so an absolute
-    // configdir path is allowed. Electron is forced to software
-    // rendering (--disable-gpu): with X on fbdev there is no
-    // DRI, so the GPU process would only spin up and fall back
-    // anyway — make it deterministic from the start.
-    [b appendString:@"echo \"PROGRESS 95 Starting desktop...\"\n"];
+    // The CLI session, started here instead of through the
+    // opencode-desktop systemd service: the service is disabled
+    // at boot (rootfs-build) and the desktop is gone (2026-11-26:
+    // the user replaced it with the CLI TUI, which is lite). The
+    // TUI runs in the foreground of the autologin termux shell
+    // on tty1 — the console the app shows — so it draws straight
+    // into the framebuffer the runtime already flushes on the
+    // CPU path. No Xorg, no openbox, no Electron: the whole
+    // desktop stack is deleted from the bootstrap (it stays in
+    // git history and in the image; the image slimming is a
+    // separate follow-up).
+    // Leftovers are killed first so a restart is clean: a stale
+    // diagnostics loop from a previous boot would keep writing
+    // the previous boot's state over the new one.
     // No `systemctl stop opencode-desktop` here: the service is
     // disabled at boot (rootfs-build), so there is nothing to
     // stop — and on 977334d the shell never got past that line
     // (systemctl can block on D-Bus/systemd for up to 90 s),
     // so X never started and no diagnostics file was written.
-    // The pkill lines below already kill any stray processes.
-    [b appendString:@"sudo pkill -f ai.opencode 2>/dev/null; true\n"];
-    [b appendString:@"sudo pkill -x Xorg 2>/dev/null; true\n"];
-    // Kill a stale framebuffer-flush loop from a previous boot, or
-    // two loops would write the same framebuffer forever. Same
-    // for the diagnostics loop (diag-loop.sh): it rewrites
-    // /tmp/desktop-diag.txt every 10 s, and a stale one would
-    // keep writing the previous boot's state over the new one.
-    [b appendString:@"sudo pkill -f fb-flush.sh 2>/dev/null; true\n"];
+    // The pkill line below already kills any stray processes.
+    [b appendString:@"echo \"PROGRESS 95 Starting terminal...\"\n"];
     [b appendString:@"sudo pkill -f diag-loop.sh 2>/dev/null; true\n"];
-    // Diagnostics that survive: the READY loop below runs up to
-    // 120 s, and the console drops post-X output, so the
-    // diagnostics must not wait for the loop. Write them as a
-    // script (/tmp/diag-snapshot.sh), run it once now — the file
-    // exists within ~20 s of serve start, so the server fetch
-    // finds it — and re-run it every 10 s in the background so
-    // it stays fresh. The file is the durable copy; the console
-    // re-emit after the loop is a bonus, not the channel.
-    // Written here, right after the pkill lines, so the
-    // ~2 KB of heredocs is already consumed before either
-    // wait blocks: the queue behind the old-Xorg wait stays
-    // ~2 KB and behind the socket wait ~1.5 KB, both far
-    // under the 4 KB tty input buffer.
+    // Diagnostics that survive: the console drops output once
+    // the TUI takes over (alternate screen), so the diagnostics
+    // must not wait for the TUI. Write them as a script
+    // (/tmp/diag-snapshot.sh), run it once now — the file exists
+    // within ~20 s of serve start, so the server fetch finds
+    // it — and re-run it every 10 s in the background so it
+    // stays fresh. The file is the durable copy; the console
+    // cannot carry it after the TUI starts.
+    // The snapshot reports the server and the TUI, not Xorg:
+    // pgrep names both processes, and the loop heartbeat names
+    // whether the loop itself is alive. The serve log tail is
+    // the server's own record of the TUI connecting.
     [b appendString:@"cat > /tmp/diag-snapshot.sh <<'EOF'\n"];
     [b appendString:@"#!/bin/sh\n"];
-    [b appendString:@"{ echo \"--- desktop diagnostics ---\"\n"];
+    [b appendString:@"{ echo \"--- cli diagnostics ---\"\n"];
     [b appendString:@"echo \"Active VT: $(cat /sys/class/tty/tty0/active 2>/dev/null || echo unknown)\"\n"];
-    [b appendString:@"ps aux | grep -E \"Xorg|ai.opencode|openbox\" | grep -v grep\n"];
-    [b appendString:@"DISPLAY=:0 xwininfo -root -tree 2>&1 | head -20\n"];
-    [b appendString:@"grep -F \"(EE)\" /tmp/Xorg.0.log 2>/dev/null | tail -5; grep -F \"(EE)\" /tmp/Xorg-modesetting.0.log 2>/dev/null | tail -5; true\n"];
-    [b appendString:@"echo \"Xorg log:\"; tail -20 /tmp/Xorg.log 2>/dev/null; echo \"Desktop app log:\"; tail -10 /tmp/ai-opencode.log 2>/dev/null; true\n"];
-    // The Xorg probe log is the evidence that names why Xorg died:
-    // the 16f1cc2 stderr tail only says "no screens found", and the
-    // default detailed log (/var/log/Xorg.0.log) is root-owned and
-    // unreadable by the termux snapshot, so every grep of it came
-    // back empty. Xorg now writes it to /tmp with -logfile (below),
-    // and the snapshot prints the driver/module/error lines from
-    // both the fbdev and the modesetting logs.
-    [b appendString:@"echo \"Xorg probe (fbdev):\"; grep -F -e \"FBDEV\" -e \"modesetting\" -e \"LoadModule\" -e \"(EE)\" -e \"no screens\" /tmp/Xorg.0.log 2>/dev/null | head -30; true\n"];
-    [b appendString:@"echo \"Xorg probe (modesetting):\"; grep -F -e \"modesetting\" -e \"LoadModule\" -e \"(EE)\" -e \"no screens\" /tmp/Xorg-modesetting.0.log 2>/dev/null | head -30; true\n"];
-    [b appendString:@"echo \"Self-test log:\"; tail -5 /tmp/selftest.log 2>/dev/null; true\n"];
-    // Which framebuffer devices exist at all: the 25bb172
-    // snapshot said "DIAG fb size: unknown" (its cat of
-    // /sys/class/graphics/fb0/virtual_size failed) while the
-    // self-test reads the same path, so if the path is wrong
-    // both fail together — list the directory so a wrong path
-    // is visible instead of a bare "unknown".
-    [b appendString:@"echo \"Graphics: $(ls /sys/class/graphics/ 2>/dev/null | tr '\\n' ' ')\"\n"];
-    [b appendString:@"echo \"DIAG graphics: $(ls /sys/class/graphics/ 2>/dev/null | tr '\\n' ' ')\"\n"];
-    [b appendString:@"echo \"DIAG Active VT: $(cat /sys/class/tty/tty0/active 2>/dev/null || echo unknown)\"\n"];
-    [b appendString:@"echo \"DIAG Windows on :0: $(DISPLAY=:0 xwininfo -root -tree 2>/dev/null | grep -c '^ *0x')\"\n"];
-    [b appendString:@"echo \"DIAG window: $(DISPLAY=:0 xwininfo -root -tree 2>/dev/null | grep '^ *0x' | head -1 | tr -cd '\\11\\40-\\176' | cut -c1-160)\"\n"];
-    [b appendString:@"echo \"DIAG Xorg errors: $(grep -c -F '(EE)' /tmp/Xorg.0.log /tmp/Xorg-modesetting.0.log 2>/dev/null; true)\"\n"];
-    [b appendString:@"echo \"DIAG app log: $(tail -1 /tmp/ai-opencode.log 2>/dev/null | tr -cd '\\11\\40-\\176' | cut -c1-160)\"\n"];
-    [b appendString:@"echo \"DIAG fb-flush: $(pgrep -f fb-flush.sh >/dev/null 2>&1 && echo running || echo NOT running)\"\n"];
-    [b appendString:@"echo \"DIAG fbdev driver: $(grep -c -F 'FBDEV(0)' /tmp/Xorg.0.log 2>/dev/null; true)\"\n"];
-    [b appendString:@"echo \"DIAG modesetting driver: $(grep -c -F 'modesetting(0)' /tmp/Xorg-modesetting.0.log 2>/dev/null; true)\"\n"];
-    [b appendString:@"echo \"DIAG fb size: $(cat /sys/class/graphics/fb0/virtual_size 2>/dev/null || echo unknown)\"\n"];
-    // Does the framebuffer device node exist at all, and does the
-    // DRM device exist for the modesetting retry: the 16f1cc2
-    // snapshot said "DIAG fb size: unknown" and "DIAG graphics:
-    // fbcon", which names a missing sysfs path, not a missing
-    // device — the node and the DRM listing answer it directly.
-    [b appendString:@"echo \"DIAG fb0 node: $(ls -l /dev/fb0 2>&1 | tr -cd '\\11\\40-\\176' | cut -c1-120)\"\n"];
-    [b appendString:@"echo \"DIAG dri: $(ls /dev/dri/ 2>/dev/null | tr '\\n' ' ')\"\n"];
+    [b appendString:@"ps aux | grep -E \"opencode\" | grep -v grep\n"];
+    [b appendString:@"echo \"DIAG server: $(pgrep -f 'opencode serve' >/dev/null 2>&1 && echo running || echo down)\"\n"];
+    [b appendString:@"echo \"DIAG tui: $(pgrep -f '^opencode$' >/dev/null 2>&1 && echo running || echo down)\"\n"];
+    [b appendString:@"echo \"DIAG serve log: $(tail -1 /tmp/opencode-serve.log 2>/dev/null | tr -cd '\\11\\40-\\176' | cut -c1-160)\"\n"];
     // Loop heartbeat: the 16f1cc2 fetches all returned the first
     // snapshot, so whether diag-loop.sh is alive or dead was
     // never visible. The next run's snapshot names it.
     [b appendString:@"echo \"DIAG loop: $(pgrep -f diag-loop.sh >/dev/null 2>&1 && echo running || echo DEAD)\"\n"];
-    [b appendString:@"echo \"DIAG fb-flush log: $(tail -1 /tmp/fb-flush.log 2>/dev/null | tr -cd '\\11\\40-\\176' | cut -c1-160)\"\n"];
-    // "DIAG selftest: OK" in 25bb172 only meant /tmp/selftest.log
-    // was empty or missing — the python may never have run, and
-    // the echo "SELFTEST fb0 red" prints regardless (it follows a
-    // `;`). The python now writes a result marker on success, so
-    // the line names the outcome: red WxH, FAILED (traceback in
-    // the log), or NOT-RUN (python never reached the write).
-    [b appendString:@"echo \"DIAG selftest: $(cat /tmp/selftest.result 2>/dev/null || (test -s /tmp/selftest.log && echo FAILED || echo NOT-RUN))\"\n"];
-    [b appendString:@"echo \"--- end desktop diagnostics ---\"; } > /tmp/desktop-diag.txt 2>&1\n"];
+    [b appendString:@"echo \"--- end cli diagnostics ---\"; } > /tmp/cli-diag.txt 2>&1\n"];
     // Absolute home path, not `~`: the loop runs this script as
     // root, so `~` expands to /root and the copy lands in
-    // /root/desktop-diag.txt while the server reads
-    // /home/termux/desktop-diag.txt — that is why every 16f1cc2
+    // /root/cli-diag.txt while the server reads
+    // /home/termux/cli-diag.txt — that is why every 16f1cc2
     // fetch returned the first snapshot. chmod so the termux
     // server can read the root-written copy.
-    [b appendString:@"cp /tmp/desktop-diag.txt /home/termux/desktop-diag.txt 2>/dev/null; chmod 644 /home/termux/desktop-diag.txt 2>/dev/null; cp /tmp/desktop-diag.txt /root/Projects/desktop-diag.txt 2>/dev/null; true\n"];
+    [b appendString:@"cp /tmp/cli-diag.txt /home/termux/cli-diag.txt 2>/dev/null; chmod 644 /home/termux/cli-diag.txt 2>/dev/null; cp /tmp/cli-diag.txt /root/Projects/cli-diag.txt 2>/dev/null; true\n"];
     [b appendString:@"EOF\n"];
     [b appendString:@"chmod +x /tmp/diag-snapshot.sh\n"];
     [b appendString:@"sh /tmp/diag-snapshot.sh\n"];
@@ -1304,214 +1235,45 @@ static NSString *OCEngineStripANSI(NSString *line) {
     [b appendString:@"EOF\n"];
     [b appendString:@"chmod +x /tmp/diag-loop.sh\n"];
     [b appendString:@"sudo nohup sh /tmp/diag-loop.sh >/tmp/diag-loop.log 2>&1 &\n"];
-    // Wait for the old Xorg to actually die, then clear its lock
-    // and socket. A fixed `sleep 1` was a race on engine restart:
-    // a still-dying Xorg leaves /tmp/.X0-lock behind, the new Xorg
-    // fails with "Server is already active for display 0", and the
-    // socket wait below breaks at once on the STALE socket — so
-    // openbox and the app start against a dead server and the
-    // desktop stays black with no reason in the log. Removing the
-    // lock/socket first means the wait loop only breaks on a fresh
-    // X server.
-    [b appendString:@"for _ in $(seq 1 10); do pgrep -x Xorg >/dev/null 2>&1 || break; sleep 1; done\n"];
-    [b appendString:@"rm -f /tmp/.X0-lock /tmp/.X11-unix/X0\n"];
-    [b appendString:@"sudo mkdir -p /run/user/1000; sudo chown termux:termux /run/user/1000 2>/dev/null; true\n"];
-    [b appendString:@"export DISPLAY=:0; export XDG_RUNTIME_DIR=/run/user/1000\n"];
-
-    // Force X onto fbdev (see the comment above): the config lives
-    // in /tmp so no root write is needed to create it, and Xorg
-    // (root, via sudo) takes the absolute -configdir path.
-    [b appendString:@"mkdir -p /tmp/xorg.conf.d\n"];
-    [b appendString:@"cat > /tmp/xorg.conf.d/10-fbdev.conf <<'EOF'\n"];
-    [b appendString:@"Section \"Device\"\n"];
-    [b appendString:@"    Identifier \"Card0\"\n"];
-    [b appendString:@"    Driver \"fbdev\"\n"];
-    [b appendString:@"    Option \"fbdev\" \"/dev/fb0\"\n"];
-    [b appendString:@"EndSection\n"];
-    [b appendString:@"Section \"Screen\"\n"];
-    [b appendString:@"    Identifier \"Screen0\"\n"];
-    [b appendString:@"    Device \"Card0\"\n"];
-    [b appendString:@"EndSection\n"];
-    [b appendString:@"Section \"ServerLayout\"\n"];
-    [b appendString:@"    Identifier \"Layout0\"\n"];
-    [b appendString:@"    Screen \"Screen0\"\n"];
-    [b appendString:@"EndSection\n"];
-    [b appendString:@"EOF\n"];
-    // Decisive self-test (2026-11-25, 165c227 logs): the screen
-    // shows the tty1 console and the host only ever flushes the
-    // console framebuffer, so X never drew — but the console
-    // channel lost every post-X diagnostic, so whether Xorg died
-    // or ai.opencode never started is still unknown. Before X
-    // starts, fill /dev/fb0 solid red through write(). The result
-    // is visible in a screenshot, no log needed: red means the
-    // write path reaches the screen and X never drew; black means
-    // write() never transfers (the flush-loop theory is dead);
-    // the desktop means it works. python3 writes the frame as
-    // root (sudo: the termux user cannot open /dev/fb0); the
-    // size comes from sysfs, the pixel is BGRA red for the 32bpp
-    // XRGB framebuffer. A failure prints its traceback to
-    // /tmp/selftest.log, tailed in the diagnostics below.
-    [b appendString:@"sudo python3 -c \"s=open('/sys/class/graphics/fb0/virtual_size').read().strip().split(','); w=int(s[0]); h=int(s[1]); open('/dev/fb0','wb').write(b'\\x00\\x00\\xff\\x00'*(w*h)); open('/tmp/selftest.result','w').write('red %dx%d' % (w,h))\" 2>/tmp/selftest.log; echo \"SELFTEST fb0 red\"\n"];
-    // -logfile /tmp/Xorg.0.log: the default detailed log is
-    // /var/log/Xorg.0.log, root-owned and unreadable by the
-    // termux snapshot, so the 16f1cc2 run's "no screens found"
-    // came with no probe lines at all. In /tmp the log is
-    // readable by the snapshot and the fetch, so the next run
-    // names which driver Xorg tried and why it refused.
-    [b appendString:@"XDRIVER=fbdev\n"];
-    [b appendString:@"sudo nohup Xorg :0 -ac -noreset -nolisten tcp vt01 -configdir /tmp/xorg.conf.d -logfile /tmp/Xorg.0.log >/tmp/Xorg.log 2>&1 &\n"];
-    // Socket wait with early death detection: the 25bb172 run
-    // spent its whole 24 s after launch inside this silent 30 s
-    // wait (Xorg never created the socket in 21 s) and the app
-    // was closed before the wait ended, so no XORG line ever
-    // printed. If Xorg is gone after a 3 s grace for exec, say
-    // so at once with its log tail instead of burning the wait.
-    [b appendString:@"for i in $(seq 1 30); do [ -S /tmp/.X11-unix/X0 ] && break; if [ $i -gt 3 ] && ! pgrep -x Xorg >/dev/null 2>&1; then echo \"ERROR Xorg died before its socket appeared\"; tail -20 /tmp/Xorg.log 2>/dev/null; echo \"Xorg probe:\"; grep -F -e \"FBDEV\" -e \"modesetting\" -e \"LoadModule\" -e \"(EE)\" -e \"no screens\" /tmp/Xorg.0.log 2>/dev/null | head -30; break; fi; sleep 1; done\n"];
-    // If the socket never appeared, say why: Xorg's own log goes
-    // to /tmp/Xorg.0.log now (-logfile above), but a failure
-    // before it opens that file lands only in /tmp/Xorg.log
-    // (the stderr redirect). Without this the desktop just stays
-    // black and the READY loop's ERROR line names no cause.
-    [b appendString:@"[ -S /tmp/.X11-unix/X0 ] || { echo \"ERROR Xorg did not start\"; tail -20 /tmp/Xorg.log 2>/dev/null; echo \"Xorg probe:\"; grep -F -e \"FBDEV\" -e \"modesetting\" -e \"LoadModule\" -e \"(EE)\" -e \"no screens\" /tmp/Xorg.0.log 2>/dev/null | head -30; }\n"];
-    // The socket alone does not prove Xorg is alive: it creates
-    // the socket early and can die on the fbdev driver after it,
-    // leaving openbox and the app to start against a dead server
-    // with no reason in the log (165c227: socket present, no
-    // desktop, no error). Check the process, one short line.
-    [b appendString:@"pgrep -x Xorg >/dev/null 2>&1 && echo \"XORG RUNNING\" || echo \"XORG DEAD\"\n"];
-    // fbdev died, retry with modesetting (DRM). Modesetting ran
-    // in the c360a14/c9493ce era (socket appeared, Xorg up);
-    // fbdev dies at once with "no screens found" in every run
-    // since 4c60469, and the fbdev probe log (now captured with
-    // -logfile) names the reason. If modesetting runs and
-    // ai.opencode maps a window, the desktop may appear through
-    // the DRM scanout the 2D path carries. If both die, the two
-    // probe logs name both causes. The retry uses its own
-    // configdir and logfile so nothing from the fbdev attempt
-    // leaks into it.
-    [b appendString:@"if ! pgrep -x Xorg >/dev/null 2>&1; then\n"];
-    [b appendString:@"echo \"FBDEV Xorg died, retrying with modesetting\"\n"];
-    [b appendString:@"mkdir -p /tmp/xorg-modesetting.conf.d\n"];
-    [b appendString:@"cat > /tmp/xorg-modesetting.conf.d/10-modesetting.conf <<'EOF'\n"];
-    [b appendString:@"Section \"Device\"\n"];
-    [b appendString:@"    Identifier \"Card0\"\n"];
-    [b appendString:@"    Driver \"modesetting\"\n"];
-    [b appendString:@"EndSection\n"];
-    [b appendString:@"Section \"Screen\"\n"];
-    [b appendString:@"    Identifier \"Screen0\"\n"];
-    [b appendString:@"    Device \"Card0\"\n"];
-    [b appendString:@"EndSection\n"];
-    [b appendString:@"Section \"ServerLayout\"\n"];
-    [b appendString:@"    Identifier \"Layout0\"\n"];
-    [b appendString:@"    Screen \"Screen0\"\n"];
-    [b appendString:@"EndSection\n"];
-    [b appendString:@"EOF\n"];
-    [b appendString:@"for _ in $(seq 1 10); do pgrep -x Xorg >/dev/null 2>&1 || break; sleep 1; done\n"];
-    [b appendString:@"rm -f /tmp/.X0-lock /tmp/.X11-unix/X0\n"];
-    [b appendString:@"sudo nohup Xorg :0 -ac -noreset -nolisten tcp vt01 -configdir /tmp/xorg-modesetting.conf.d -logfile /tmp/Xorg-modesetting.0.log >/tmp/Xorg-modesetting.log 2>&1 &\n"];
-    [b appendString:@"for i in $(seq 1 30); do [ -S /tmp/.X11-unix/X0 ] && break; if [ $i -gt 3 ] && ! pgrep -x Xorg >/dev/null 2>&1; then echo \"ERROR modesetting Xorg died before its socket appeared\"; tail -20 /tmp/Xorg-modesetting.log 2>/dev/null; echo \"Xorg probe (modesetting):\"; grep -F -e \"modesetting\" -e \"LoadModule\" -e \"(EE)\" -e \"no screens\" /tmp/Xorg-modesetting.0.log 2>/dev/null | head -30; break; fi; sleep 1; done\n"];
-    [b appendString:@"[ -S /tmp/.X11-unix/X0 ] || { echo \"ERROR modesetting Xorg did not start\"; tail -20 /tmp/Xorg-modesetting.log 2>/dev/null; echo \"Xorg probe (modesetting):\"; grep -F -e \"modesetting\" -e \"LoadModule\" -e \"(EE)\" -e \"no screens\" /tmp/Xorg-modesetting.0.log 2>/dev/null | head -30; }\n"];
-    [b appendString:@"pgrep -x Xorg >/dev/null 2>&1 && echo \"XORG RUNNING (modesetting)\" || echo \"XORG DEAD (modesetting)\"\n"];
-    [b appendString:@"pgrep -x Xorg >/dev/null 2>&1 && XDRIVER=modesetting\n"];
-    [b appendString:@"fi\n"];
-    // Framebuffer flush loop — this is what actually puts the
-    // desktop on the screen. The runtime only shows the guest
-    // framebuffer when the guest kernel issues transfer_to_host_2d
-    // + resource_flush on the 2D scanout resource (the console
-    // proves that path: its fbcon writes reach the Metal view).
-    // X on fbdev draws by mmap into /dev/fb0; mmap writes mark
-    // nothing dirty, so no transfer ever fires and the host
-    // framebuffer keeps whatever the console last flushed — black
-    // once X clears the screen at startup. Writing the
-    // framebuffer back onto itself through write() goes through
-    // drm_fb_helper_sys_write, which marks the range dirty, and
-    // the kernel then transfers it. One 16M write per pass is one
-    // flush per pass (one full-texture upload on the host), 5
-    // passes a second. Only for fbdev: under modesetting X draws
-    // into DRM buffers, not /dev/fb0, so the loop would only
-    // re-upload the console framebuffer 5 times a second.
-    [b appendString:@"if pgrep -x Xorg >/dev/null 2>&1 && [ \"$XDRIVER\" = fbdev ]; then\n"];
-    [b appendString:@"cat > /tmp/fb-flush.sh <<'EOF'\n"];
-    [b appendString:@"#!/bin/sh\n"];
-    [b appendString:@"while true; do\n"];
-    [b appendString:@"  dd if=/dev/fb0 of=/dev/fb0 bs=16M status=none 2>/dev/null\n"];
-    [b appendString:@"  sleep 0.2\n"];
-    [b appendString:@"done\n"];
-    [b appendString:@"EOF\n"];
-    [b appendString:@"chmod +x /tmp/fb-flush.sh\n"];
-    [b appendString:@"sudo nohup sh /tmp/fb-flush.sh >/tmp/fb-flush.log 2>&1 &\n"];
-    [b appendString:@"fi\n"];
-    // The app opens at its default 1280x800, centred in the
-    // 1290x2796 screen (the e001c27 screenshot: full width, a
-    // small window, black above and below). Maximise it with
-    // an openbox rule: copy the default rc.xml (known-valid)
-    // and inject one <application> rule matching every window.
-    // The rule is applied at map time, every boot (the overlay
-    // is wiped, so the config is rewritten each start). If the
-    // injection fails the worst case is the default config
-    // (small window, as today) — openbox still starts. The
-    // echo names which way it went. --start-maximized on the
-    // app is belt and braces (Electron honours the Chromium
-    // switch); the openbox rule is the fix that does not
-    // depend on it. (wmctrl/xdotool are not in the image, so
-    // there is no post-launch maximise tool to use instead.)
-    [b appendString:@"mkdir -p /home/termux/.config/openbox\n"];
-    [b appendString:@"cp /etc/xdg/openbox/rc.xml /home/termux/.config/openbox/rc.xml\n"];
-    [b appendString:@"python3 - <<'PYEOF'\n"];
-    [b appendString:@"p='/home/termux/.config/openbox/rc.xml'\n"];
-    [b appendString:@"s=open(p).read()\n"];
-    [b appendString:@"s=s.replace('<applications>','<applications>\\n  <application name=\"*\">\\n    <maximized>yes</maximized>\\n  </application>',1)\n"];
-    [b appendString:@"open(p,'w').write(s)\n"];
-    [b appendString:@"PYEOF\n"];
-    [b appendString:@"grep -q '<maximized>yes</maximized>' /home/termux/.config/openbox/rc.xml && echo \"openbox maximise rule installed\" || echo \"ERROR openbox maximise rule missing\"\n"];
-    [b appendString:@"nohup openbox --sm-disable >/tmp/openbox.log 2>&1 &\n"];
-    [b appendString:@"nohup env DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/1000 HOME=/home/termux /opt/OpenCode/ai.opencode --no-sandbox --disable-dev-shm-usage --disable-gpu --start-maximized >/tmp/ai-opencode.log 2>&1 &\n"];
-
-    // The real app binary is /opt/OpenCode/ai.opencode; the old
-    // pgrep pattern (opencode-desktop) matched the session script
-    // itself. Gate on the app process, and on the window actually
-    // being mapped on :0: the process + socket gate fired while
-    // the screen was still black, because a running Electron
-    // process with no mapped window draws nothing. xwininfo
-    // -root -tree lists the root's children as lines starting
-    // with a window id; zero such lines means nothing is mapped.
-    // If the process is up but no window ever maps, say so and
-    // do not claim ready. NOTE: the "DESKTOP READY" the engine
-    // logged 1 s after serve launch in every run was the ECHO of
-    // this loop line, not its output — the parser matched the
-    // words inside the typed command. The parser now requires a
-    // bare line, so only the loop's own echo (below) counts.
-    // Early breaks: a dead Xorg or an ai.opencode that never
-    // appeared must not burn the whole 120 s — the 25bb172 run
-    // lived 47 s and the loop was still in its early iterations
-    // when the app was closed, so DESKTOP STATE never printed.
-    // Xorg was verified RUNNING just above, so any later pgrep
-    // failure is real; ai.opencode gets 10 s of exec grace
-    // (it is launched just before the loop).
-    [b appendString:@"for i in $(seq 1 60); do if pgrep -f ai.opencode >/dev/null 2>&1 && [ -S /tmp/.X11-unix/X0 ] && [ $(DISPLAY=:0 xwininfo -root -tree 2>/dev/null | grep -c '^ *0x') -gt 0 ]; then echo \"DESKTOP READY\"; break; fi; if ! pgrep -x Xorg >/dev/null 2>&1; then echo \"ERROR Xorg died while waiting for the desktop\"; break; fi; if [ $i -gt 5 ] && ! pgrep -f ai.opencode >/dev/null 2>&1; then echo \"ERROR Desktop did not start (ai.opencode never appeared)\"; break; fi; sleep 2; done\n"];
-    [b appendString:@"pgrep -f ai.opencode >/dev/null 2>&1 || echo \"ERROR Desktop did not start (see above)\"\n"];
-    [b appendString:@"pgrep -f ai.opencode >/dev/null 2>&1 && [ $(DISPLAY=:0 xwininfo -root -tree 2>/dev/null | grep -c '^ *0x') -eq 0 ] && echo \"ERROR Desktop window did not appear (ai.opencode is running but no window is mapped on :0)\"\n"];
-    // One always-printed state line after the loop: the loop's
-    // own echo and the ERROR lines above are all conditional, so
-    // a run where the loop breaks early on READY but the echo is
-    // lost (165c227) leaves no trace of the state at all.
-    [b appendString:@"echo \"DESKTOP STATE app=$(pgrep -f ai.opencode >/dev/null 2>&1 && echo yes || echo no) windows=$(DISPLAY=:0 xwininfo -root -tree 2>/dev/null | grep -c '^ *0x') vt=$(cat /sys/class/tty/tty0/active 2>/dev/null || echo unknown)\"\n"];
-    // The diagnostics file is already written and kept fresh by
-    // diag-snapshot.sh / diag-loop.sh (above, before the READY
-    // loop), so this is only the console re-emit: sleep 5 s for
-    // the start burst to settle, then cat it back. The file is
-    // the channel the fetch reads; the cat is a bonus.
-    [b appendString:@"sleep 5\n"];
-    [b appendString:@"cat /tmp/desktop-diag.txt\n"];
-    // Copy the diagnostics where the server can read them: the
-    // console drops post-X output three runs running (873e1ee,
-    // 4c60469, 165c227), so the app fetches this file through the
-    // server's file API instead (fetchGuestDiagnosticsIfNeeded).
-    // The server runs from the termux home directory, so a copy
-    // there is inside its project; /root/Projects is the second
-    // copy in case the file API roots there. Absolute path (same
-    // `~` reason as the snapshot's copy above).
-    [b appendString:@"cp /tmp/desktop-diag.txt /home/termux/desktop-diag.txt 2>/dev/null; chmod 644 /home/termux/desktop-diag.txt 2>/dev/null; cp /tmp/desktop-diag.txt /root/Projects/desktop-diag.txt 2>/dev/null; true\n"];
+    // Terminal size: the console is the 1290x2796 framebuffer
+    // with the kernel's 8x16 font, so the kernel reports 161
+    // cols x 174 rows. The TUI wants a wide terminal; make the
+    // size explicit (the shell's COLUMNS/LINES can be stale from
+    // the login) and export it so the TUI lays out for the full
+    // screen. If the kernel ever reports something narrow, fall
+    // back to the framebuffer-derived size instead of handing
+    // the TUI a narrow terminal. TERM defaults to linux (the
+    // virtual console); the TUI needs it set to draw.
+    [b appendString:@"SZ=$(stty size 2>/dev/null || echo \"174 161\"); set -- $SZ; TR=$1; TC=$2; [ \"$TC\" -lt 100 ] && { TR=174; TC=161; }; stty rows $TR cols $TC 2>/dev/null; export COLUMNS=$TC LINES=$TR; echo \"Terminal size: ${TR} rows x ${TC} cols\"\n"];
+    [b appendString:@"export TERM=${TERM:-linux}\n"];
+    // The TUI's project directory: the autologin shell starts in
+    // /home/termux, and the server's default project is there
+    // too, so the TUI opens on the same sessions the native UI
+    // and the mobile app see. cd explicitly so a stray cwd from
+    // a restart cannot change it.
+    [b appendString:@"cd /home/termux\n"];
+    // The CLI TUI, in the foreground of this shell: `opencode`
+    // with no args runs the default command, which resolves its
+    // server through Service.discover — it finds our serve's
+    // registration (URL http://127.0.0.1:4096 + password from
+    // service.json, written by phase 1) and connects to it, and
+    // only spawns its own server when no healthy registration
+    // exists (packages/cli/src/commands/handlers/default.ts:35,
+    // packages/cli/src/services/server-connection.ts:51-60).
+    // Same mechanism as the desktop's ensure (77b9a2f), same
+    // registration — the TUI adopts our server, no second
+    // server. It runs in the background of this script so the
+    // script can confirm the process is alive and print the
+    // CLI READY marker the app watches for; the script is
+    // non-interactive (no job control), so the TUI shares the
+    // foreground process group and reads the tty. `wait` keeps
+    // the script — and the console shell — in the foreground
+    // until the TUI exits.
+    [b appendString:@"opencode &\n"];
+    [b appendString:@"TUI_PID=$!\n"];
+    [b appendString:@"for i in $(seq 1 10); do pgrep -f '^opencode$' >/dev/null 2>&1 && break; sleep 1; done\n"];
+    [b appendString:@"if pgrep -f '^opencode$' >/dev/null 2>&1; then echo \"CLI READY\"; else echo \"ERROR CLI did not start\"; fi\n"];
+    [b appendString:@"wait $TUI_PID 2>/dev/null; echo \"CLI exited (code $?)\"\n"];
     return b;
 }
 
@@ -1526,13 +1288,13 @@ static NSString *OCEngineStripANSI(NSString *line) {
     // mark the engine Running again after this stop.
     self.serveGeneration++;
     self.serveProgressDone = NO;
-    self.desktopReady = NO;
+    self.cliReady = NO;
     self.serverListening = NO;
     self.guestDiagnosticsFetched = NO;
     self.lastGuestDiagnosticsText = nil;
     self.guestDiagnosticsFetchAttempts = 0;
     self.guestDiagnosticsRetryPending = NO;
-    self.desktopBootstrapSent = NO;
+    self.cliBootstrapSent = NO;
     self.healthProbeInFlight = NO;
     self.lastProbeOK = NO;
     self.serverProbeEverOK = NO;
@@ -1572,7 +1334,7 @@ static NSString *OCEngineStripANSI(NSString *line) {
                     strongSelf.serveProgressDone = YES;
                     [strongSelf setServeProgress:1.0 status:@"Engine running"];
                     [strongSelf appendEngineLog:@"Server healthy at 127.0.0.1:4096"];
-                    // Phase 2 of the bootstrap: the desktop section
+                    // Phase 2 of the bootstrap: the CLI section
                     // goes now, not with the serve launch — and not
                     // as typed console input. Typing the ~4.5 KB
                     // script dropped bytes even into a ready shell
@@ -1582,24 +1344,24 @@ static NSString *OCEngineStripANSI(NSString *line) {
                     // ai.opencode line split mid-flag so `gpu`
                     // exited 127 and the desktop never started).
                     // The server answering means it can receive
-                    // the script as a file, so deliverDesktop-
+                    // the script as a file, so deliverCli-
                     // Bootstrap writes it through the server's
                     // file API and types only the one-line `sh`
                     // command. 2 s later, so the curl loop has
                     // finished breaking.
-                    if (!strongSelf.desktopBootstrapSent) {
-                        strongSelf.desktopBootstrapSent = YES;
+                    if (!strongSelf.cliBootstrapSent) {
+                        strongSelf.cliBootstrapSent = YES;
                         __weak OCEngine *weakEngine = strongSelf;
                         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                             OCEngine *engine = weakEngine;
                             if (!engine) return;
                             if (engine.state == OCEngineStateStopped) return;
-                            [engine deliverDesktopBootstrap];
+                            [engine deliverCliBootstrap];
                         });
                     }
                     // Running now means the server answers, not the
-                    // desktop marker: the marker is a console line
-                    // and the console drops post-X output, so the
+                    // CLI marker: the marker is a console line
+                    // and the console drops post-TUI output, so the
                     // state must not wait on it — otherwise the
                     // startup screen never presents the tabs
                     // (maybePresentTabs gates on Running) and the
@@ -1628,16 +1390,17 @@ static NSString *OCEngineStripANSI(NSString *line) {
 - (void)checkHealthWithCompletion:(void (^)(BOOL, NSDictionary * _Nullable))completion {
     // Healthy means the guest is up AND the server answers /api/info
     // through the same vsock bridge the native UI uses. The
-    // desktopReady flag is deliberately NOT a gate here: it is a
+    // The cliReady flag is deliberately NOT a gate here: it is a
     // console marker, and the console proved unreliable twice — the
-    // echo of the typed READY loop fired it 1 s after serve launch
-    // (containsString), and the post-X console output that would
-    // carry a real READY is dropped (873e1ee: no bare DESKTOP READY
-    // line ever reached the log). Gating health on it would restart
-    // the engine every 5 minutes whenever the console drops the
-    // marker. The server probe is the honest health signal; the
-    // desktop view is available as a tab regardless, and a real
-    // DESKTOP READY still lands in the engine log when it arrives.
+    // echo of the typed READY loop fired the old DESKTOP READY 1 s
+    // after serve launch (containsString), and the post-TUI console
+    // output that would carry a real READY is dropped (the console
+    // drops output once the TUI takes over). Gating health on it
+    // would restart the engine every 5 minutes whenever the console
+    // drops the marker. The server probe is the honest health
+    // signal; the terminal view is available as a tab regardless,
+    // and a real CLI READY still lands in the engine log when it
+    // arrives.
     // The probe is one small HTTP request; at most one is in flight,
     // and while one runs the last result answers, so a slow probe
     // cannot pile up on the 5 s health timer. Probe failures log on
@@ -1679,29 +1442,27 @@ static NSString *OCEngineStripANSI(NSString *line) {
 }
 
 // Guest diagnostics through the server's file API, not the
-// console: the console drops post-X output three runs running
-// (873e1ee, 4c60469, 165c227), so the diagnostics file the
-// bootstrap writes (and copies to ~/desktop-diag.txt) is read
+// console: the console drops post-TUI output, so the diagnostics
+// file the bootstrap writes (and copies to ~/cli-diag.txt) is read
 // over HTTP through the vsock bridge instead — the same channel
 // the /api/info probe proves every run. The diagnostics file is
 // written ~20 s after serve starts (diag-snapshot.sh runs before
-// the READY loop, diag-loop.sh refreshes it every 10 s), so the
+// the TUI starts, diag-loop.sh refreshes it every 10 s), so the
 // first fetch usually misses: a miss schedules a retry in 10 s,
 // up to 12 attempts (~2 min). Every miss is logged with its
 // attempt number, so the engine log shows the retry history
 // instead of one silent miss (977334d: the fetch missed once at
 // 15:30:21 and the later opens retried silently while the file
-// was never written, because the READY loop had not finished).
+// was never written, because the desktop script had never run).
 - (void)fetchGuestDiagnosticsIfNeeded {
     // Repeated, not once per boot: the guest rewrites
-    // /tmp/desktop-diag.txt every 10 s, and the first fetch
-    // always lands before Xorg starts (25bb172: the only fetched
-    // block showed "no display :0, 0 windows" because it was
-    // taken 4 s after launch). Stop only at the attempt cap
-    // (12 x 10 s ~= 2 min, the READY loop's span) or when the
+    // /tmp/cli-diag.txt every 10 s, and the first fetch
+    // usually lands before the TUI starts (25bb172: the only
+    // fetched block was the too-early first snapshot). Stop
+    // only at the attempt cap (12 x 10 s ~= 2 min) or when the
     // engine stops. One fetch or retry pending at a time, so
-    // viewDidAppear, the post-READY trigger and the
-    // deliverDesktopBootstrap call below all funnel into one
+    // viewDidAppear, the post-CLI trigger and the
+    // deliverCliBootstrap call below all funnel into one
     // cadence instead of stacking timers.
     if (self.guestDiagnosticsFetchAttempts >= 12) return;
     if (self.guestDiagnosticsRetryPending) return;
@@ -1711,14 +1472,14 @@ static NSString *OCEngineStripANSI(NSString *line) {
     OCSettings *settings = [OCSettings shared];
     OCServerClient *client = [[OCServerClient alloc] initWithServerURL:settings.serverURL password:[settings serverPassword]];
     __weak typeof(self) weakSelf = self;
-    [client readFileAtPath:@"desktop-diag.txt" completion:^(NSString * _Nullable text, NSError * _Nullable error) {
+    [client readFileAtPath:@"cli-diag.txt" completion:^(NSString * _Nullable text, NSError * _Nullable error) {
         typeof(self) strongSelf = weakSelf;
         if (!strongSelf) return;
         if (text.length) {
             strongSelf.guestDiagnosticsFetched = YES;
             // Log only when the block changed: the state moves as
-            // Xorg starts or dies, so the log gets the
-            // transitions (early / Xorg up / Xorg dead / ready)
+            // the TUI starts, so the log gets the
+            // transitions (early / TUI up / TUI down / ready)
             // instead of twelve copies of the same block.
             if (![text isEqualToString:strongSelf.lastGuestDiagnosticsText]) {
                 strongSelf.lastGuestDiagnosticsText = text;
@@ -1729,7 +1490,7 @@ static NSString *OCEngineStripANSI(NSString *line) {
         }
         // Re-fetch in 10 s whether this one hit or missed: a hit
         // is a snapshot, not the final state, and the next one is
-        // the one that names Xorg's fate.
+        // the one that names the TUI's fate.
         if (attempt < 12 && !strongSelf.guestDiagnosticsRetryPending) {
             strongSelf.guestDiagnosticsRetryPending = YES;
             __weak typeof(self) weakRetry = strongSelf;

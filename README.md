@@ -1,8 +1,8 @@
 # OpenCode
 
-OpenCode for iOS. The OpenCode desktop app, running on your phone.
+OpenCode for iOS. The OpenCode CLI, running on your phone.
 
-The chat opens the OpenCode desktop. It talks to the OpenCode 2.3.0 server on this device.
+The chat opens the OpenCode terminal. It talks to the OpenCode 2.3.0 server on this device.
 
 ## Build
 

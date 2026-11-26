@@ -1,8 +1,8 @@
-// OCDesktopViewController - the desktop screen.
+// OCDesktopViewController - the terminal screen.
 //
 // Shows the engine's display (the same MTKView run() renders into)
 // full-screen, with touch and keyboard input forwarded to it.
-// The engine runs the real OpenCode desktop app; this screen is
+// The engine runs the OpenCode CLI terminal; this screen is
 // its window on the phone.
 //
 // Input, first version: one finger taps and drags (touch slot 0,
