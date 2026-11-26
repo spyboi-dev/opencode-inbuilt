@@ -25,7 +25,7 @@ Broken, fixed in this build:
 - README: "Tapping a thread opens the official mobile UI..." → "Tapping a thread opens the native chat, linked to the OpenCode 2.3.0 server on this device."
 - No image change, no framework change (still the fork build, API 46), no Settings change, no bootstrap change (no new bootstrap/script lines in this diff, so no bash -n extraction was needed). The CLI Terminal stays (Engine tab → Show terminal). Nothing merged to main. `kernarium-desktop` and termx untouched.
 
-Build 4082db7, local, 2026-11-26 ~17:37 IST (28 s). IPA `mac-ipas/OpenCode-iOS-4082db7.ipa`, 25,243,058 bytes, SHA-256 cd54e50b3dd1695a05cbc4a5fd0c42eeb972f45a360f19a878905ccb4ba57d1e. GitHub release opencode-4082db7. Staged in `~/workspace/goals/opencode-for-ios/files/OpenCode-iOS-4082db7.ipa`. One pre-existing compiler warning (sign-compare at OCEngine.m:603, log-tail helper, not in this diff) — build exits 0.
+Build 4082db7, local, 2026-11-26 ~17:07 IST (28 s). IPA `mac-ipas/OpenCode-iOS-4082db7.ipa`, 25,243,058 bytes, SHA-256 cd54e50b3dd1695a05cbc4a5fd0c42eeb972f45a360f19a878905ccb4ba57d1e. GitHub release opencode-4082db7. Staged in `~/workspace/goals/opencode-for-ios/files/OpenCode-iOS-4082db7.ipa`. One pre-existing compiler warning (sign-compare at OCEngine.m:603, log-tail helper, not in this diff) — build exits 0.
 
 ### Device test (4082db7)
 
